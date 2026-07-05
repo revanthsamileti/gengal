@@ -1,8 +1,8 @@
 // @ts-nocheck
-import React, { useState, useEffect, Component, ErrorInfo, ReactNode } from 'react';
-import { Platform } from 'react-native';
+import React, { useState, useEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
+import { Platform, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { View, ActivityIndicator, Text, Alert } from 'react-native';
+import { View, ActivityIndicator, Text, Alert, Animated, Easing, Image } from 'react-native';
 import { auth } from './src/config/firebase';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { useFonts } from 'expo-font';
@@ -23,16 +23,21 @@ import FinalizeInviteScreen from './src/screens/FinalizeInviteScreen';
 import ProfileDetailsScreen from './src/screens/ProfileDetailsScreen';
 import EarningsScreen from './src/screens/EarningsScreen';
 import ActiveConnectsScreen from './src/screens/ActiveConnectsScreen';
+import ActivityScreen from './src/screens/ActivityScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
 import { ThemeProvider } from './src/theme/ThemeContext';
 import { UserProvider } from './src/context/UserContext';
-import { getUserProfile } from './src/services/userService';
-import { globalAuthMode } from './src/screens/PhoneScreen';
+import { getUserProfile, updateUserStatus } from './src/services/userService';
 import CreatePasswordScreen from './src/screens/CreatePasswordScreen';
 import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
 import LoginPasswordScreen from './src/screens/LoginPasswordScreen';
+import CelebsScreen from './src/screens/CelebsScreen';
+import ChillScreen from './src/screens/ChillScreen';
+import DumCharadesRoomScreen from './src/screens/DumCharadesRoomScreen';
+import LudoScreen from './src/screens/LudoScreen';
+import LudoBoardScreen from './src/screens/LudoBoardScreen';
 
 // --- REMOTE LOGGER ---
 if (Platform.OS === 'web') {
@@ -69,17 +74,28 @@ if (Platform.OS === 'web') {
   } catch (e) {}
 }
 // ----------------------
-type ScreenName = 'Home' | 'Club' | 'ExpertRoom' | 'Personal' | 'Profile' | 'Call' | 'Match' | 'Chat' | 'Language' | 'Phone' | 'FinalizeInvite' | 'ProfileDetails'  | 'ActiveConnects'
+type ScreenName = 'Home' | 'Club' | 'ExpertRoom' | 'Personal' | 'Profile' | 'Call' | 'Match' | 'Chat' | 'Language' | 'Phone' | 'Otp' | 'Avatar' | 'FinalizeInvite' | 'ProfileDetails' | 'ActiveConnects' | 'Activity'
   | 'Settings'
   | 'AdminPanel'
   | 'Coins'
   | 'Earnings'
-  | 'CreatePassword';
+  | 'CreatePassword'
+  | 'ForgotPassword'
+  | 'LoginPassword'
+  | 'Celebs'
+  | 'Chill'
+  | 'DumCharadesRoom'
+  | 'Ludo'
+  | 'LudoBoard';
 
 type NavigationParams = {
   profileName?: string;
   mode?: 'call' | 'video';
   avatarData?: any;
+  roomId?: string;
+  matchData?: any;
+  isCaller?: boolean;
+  [key: string]: any;
 };
 
 class ErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean, error: Error | null}> {
@@ -109,6 +125,63 @@ class ErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean,
   }
 }
 
+function SplashScreen() {
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const scaleAnim = useRef(new Animated.Value(0.7)).current;
+  const dotAnim1 = useRef(new Animated.Value(0)).current;
+  const dotAnim2 = useRef(new Animated.Value(0)).current;
+  const dotAnim3 = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.parallel([
+      Animated.timing(fadeAnim, { toValue: 1, duration: 800, useNativeDriver: true, easing: Easing.out(Easing.cubic) }),
+      Animated.spring(scaleAnim, { toValue: 1, tension: 60, friction: 8, useNativeDriver: true }),
+    ]).start();
+
+    const pulse = (dot: Animated.Value, delay: number) =>
+      Animated.loop(
+        Animated.sequence([
+          Animated.delay(delay),
+          Animated.timing(dot, { toValue: 1, duration: 400, useNativeDriver: true }),
+          Animated.timing(dot, { toValue: 0.3, duration: 400, useNativeDriver: true }),
+        ])
+      ).start();
+
+    pulse(dotAnim1, 0);
+    pulse(dotAnim2, 200);
+    pulse(dotAnim3, 400);
+  }, []);
+
+  return (
+    <View style={{ flex: 1, backgroundColor: '#FFFDF8', alignItems: 'center', justifyContent: 'center' }}>
+      <Animated.View style={{ opacity: fadeAnim, transform: [{ scale: scaleAnim }], alignItems: 'center' }}>
+        {/* Logo */}
+        <Animated.Image
+          source={require('./assets/splash-icon.png')}
+          style={{ width: 120, height: 120, borderRadius: 30, transform: [{ scale: scaleAnim }] }}
+          resizeMode="contain"
+        />
+
+        <Text style={{ marginTop: 20, fontSize: 28, fontWeight: '700', color: '#1a1a1a', letterSpacing: 1 }}>
+          GenGal
+        </Text>
+        <Text style={{ marginTop: 4, fontSize: 13, color: '#999', letterSpacing: 2 }}>
+          CONNECT & VIBE
+        </Text>
+
+        {/* Animated dots */}
+        <View style={{ flexDirection: 'row', marginTop: 36, columnGap: 8 }}>
+          {[dotAnim1, dotAnim2, dotAnim3].map((dot, i) => (
+            <Animated.View key={i} style={{
+              width: 8, height: 8, borderRadius: 4, backgroundColor: '#D49A0B', opacity: dot,
+            }} />
+          ))}
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+
 export default function App() {
   const [fontsLoaded] = useFonts({
     ...MaterialIcons.font,
@@ -129,7 +202,7 @@ export default function App() {
 
   const navigate = (next: string, nextParams: NavigationParams = {}) => {
     if (
-      next === 'Home' || next === 'Club' || next === 'ExpertRoom' || next === 'Personal' || next === 'Profile' || next === 'Call' || next === 'Match' || next === 'Chat' || next === 'Language' || next === 'Phone' || next === 'FinalizeInvite' || next === 'ProfileDetails' || next === 'ActiveConnects' || next === 'Settings' || next === 'AdminPanel' || next === 'Coins' || next === 'Earnings' || next === 'CreatePassword' || next === 'ForgotPassword' || next === 'Otp' || next === 'Avatar' || next === 'LoginPassword'
+      next === 'Home' || next === 'Club' || next === 'ExpertRoom' || next === 'Personal' || next === 'Profile' || next === 'Call' || next === 'Match' || next === 'Chat' || next === 'Language' || next === 'Phone' || next === 'FinalizeInvite' || next === 'ProfileDetails' || next === 'ActiveConnects' || next === 'Activity' || next === 'Settings' || next === 'AdminPanel' || next === 'Coins' || next === 'Earnings' || next === 'CreatePassword' || next === 'ForgotPassword' || next === 'Otp' || next === 'Avatar' || next === 'LoginPassword' || next === 'Celebs' || next === 'Chill' || next === 'DumCharadesRoom' || next === 'Ludo' || next === 'LudoBoard'
     ) {
       setNavStack(prev => [...prev, { name: next as ScreenName, params: nextParams }]);
     }
@@ -155,12 +228,15 @@ export default function App() {
   }, [navStack.length]);
 
   useEffect(() => {
+    let prevUid: string | null = null;
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (currentUser) {
+        prevUid = currentUser.uid;
+        updateUserStatus(currentUser.uid, true);
         try {
           const profile = await getUserProfile(currentUser.uid);
           const isComplete = Boolean(profile && profile.username && profile.nickname && profile.age && profile.gender && (profile.avatar3dUrl || profile.avatarData || profile.avatarUrl));
-          
+
           if (isComplete) {
             if (['Language', 'Phone', 'Otp', 'FinalizeInvite', 'ProfileDetails', 'Avatar', 'CreatePassword', 'LoginPassword'].includes(screen)) {
               resetTo('Home');
@@ -172,6 +248,8 @@ export default function App() {
           resetTo('ProfileDetails');
         }
       } else {
+        if (prevUid) updateUserStatus(prevUid, false);
+        prevUid = null;
         resetTo('Language');
       }
       setIsLoading(false);
@@ -180,12 +258,21 @@ export default function App() {
     return unsubscribe;
   }, []);
 
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      const uid = auth.currentUser?.uid;
+      if (!uid) return;
+      if (nextState === 'active') {
+        updateUserStatus(uid, true);
+      } else if (nextState === 'background' || nextState === 'inactive') {
+        updateUserStatus(uid, false);
+      }
+    });
+    return () => subscription.remove();
+  }, []);
+
   if (isLoading || !fontsLoaded) {
-    return (
-      <View style={{ flex: 1, backgroundColor: '#FFFDF8', alignItems: 'center', justifyContent: 'center' }}>
-        <ActivityIndicator size="large" color="#D49A0B" />
-      </View>
-    );
+    return <SplashScreen />;
   }
 
   return (
@@ -193,20 +280,20 @@ export default function App() {
       <UserProvider>
         <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
         {screen === 'Home' && <HomeScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'ExpertRoom' && <ExpertRoomScreen navigate={navigate} goBack={goBack} />}
+        {screen === 'ExpertRoom' && <ExpertRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
         {screen === 'Club' && <ClubScreen navigate={navigate} goBack={goBack} />}
         {screen === 'Personal' && <PersonalScreen navigate={navigate} goBack={goBack} />}
         {screen === 'Profile' && (
           <ProfileScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
         )}
         {screen === 'Call' && (
-          <CallScreen profileName={params.profileName} mode={params.mode} navigate={navigate} goBack={goBack} />
+          <CallScreen profileName={params.profileName} mode={params.mode} roomId={params.roomId} matchData={params.matchData} isCaller={params.isCaller} navigate={navigate} goBack={goBack} />
         )}
         {screen === 'Match' && (
-          <MatchScreen profileName={params.profileName} navigate={navigate} goBack={goBack} />
+          <MatchScreen profileName={params.profileName} matchData={params.matchData} roomId={params.roomId} navigate={navigate} goBack={goBack} />
         )}
         {screen === 'Chat' && (
-          <ChatScreen profileName={params.profileName} navigate={navigate} goBack={goBack} />
+          <ChatScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
         )}
         {screen === 'Language' && <LanguageScreen navigate={navigate} goBack={goBack} route={{ params }} />}
         {screen === 'Phone' && <PhoneScreen navigate={navigate} goBack={goBack} route={{ params }} />}
@@ -217,6 +304,7 @@ export default function App() {
           <ProfileDetailsScreen navigate={navigate} goBack={goBack} route={{ params }} />
         )}
         {screen === 'ActiveConnects' && <ActiveConnectsScreen navigate={navigate} goBack={goBack} />}
+        {screen === 'Activity' && <ActivityScreen navigate={navigate} />}
         {screen === 'Settings' && <SettingsScreen navigate={navigate} goBack={goBack} />}
         {screen === 'AdminPanel' && <AdminPanelScreen navigate={navigate} goBack={goBack} />}
         {screen === 'Coins' && <CoinsScreen navigate={navigate} goBack={goBack} />}
@@ -224,6 +312,11 @@ export default function App() {
         {screen === 'CreatePassword' && <CreatePasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
         {screen === 'ForgotPassword' && <ForgotPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
         {screen === 'LoginPassword' && <LoginPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+        {screen === 'Celebs' && <CelebsScreen navigate={navigate} goBack={goBack} />}
+        {screen === 'Chill' && <ChillScreen navigate={navigate} goBack={goBack} />}
+        {screen === 'DumCharadesRoom' && <DumCharadesRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+        {screen === 'Ludo' && <LudoScreen navigate={navigate} goBack={goBack} />}
+        {screen === 'LudoBoard' && <LudoBoardScreen navigate={navigate} goBack={goBack} route={{ params }} />}
       </UserProvider>
     </ErrorBoundary>
   );

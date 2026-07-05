@@ -1,0 +1,488 @@
+import React, { useEffect, useState } from 'react';
+import { Platform, ActivityIndicator,
+  Alert,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  Modal,
+  Pressable
+} from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
+import { collection, getDocs, query, where } from 'firebase/firestore';
+import DiamondBadge from '../components/DiamondBadge';
+import { AvatarData, DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';
+import { auth, db } from '../config/firebase';
+import { getUserProfile, saveUserProfile } from '../services/userService';
+import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
+
+const COUNTRY_LANGUAGE_MAP: Record<string, string[]> = {
+  'United States': ['English', 'Spanish'],
+  'India': ['Hindi', 'English', 'Bengali', 'Telugu', 'Marathi', 'Tamil', 'Urdu', 'Gujarati', 'Kannada', 'Odia', 'Malayalam'],
+  'United Kingdom': ['English', 'Welsh', 'Scottish Gaelic'],
+  'Canada': ['English', 'French'],
+  'Australia': ['English'],
+  'Germany': ['German', 'English'],
+  'France': ['French', 'English'],
+  'Japan': ['Japanese', 'English'],
+  'Brazil': ['Portuguese', 'Spanish', 'English'],
+  'Mexico': ['Spanish', 'English'],
+  'South Africa': ['Zulu', 'Xhosa', 'Afrikaans', 'English'],
+  'China': ['Mandarin', 'Cantonese', 'English'],
+};
+const COUNTRIES = Object.keys(COUNTRY_LANGUAGE_MAP).sort();
+
+type ProfileDetailsScreenProps = {
+  navigate: (screen: string, params?: any) => void;
+  route: any;
+};
+
+export default function ProfileDetailsScreen({ navigate, route }: ProfileDetailsScreenProps) {
+  const isEditMode = route?.params?.isEditMode || false;
+  const returnTo = route?.params?.returnTo || 'Settings';
+  const [nickname, setNickname] = useState(route?.params?.nickname || '');
+  const [username, setUsername] = useState(route?.params?.name || '');
+  const [age, setAge] = useState(route?.params?.dob ? String(route.params.dob) : '');
+  const [gender, setGender] = useState<'Masculine' | 'Feminine' | ''>(route?.params?.gender || '');
+  const [country, setCountry] = useState(route?.params?.country || '');
+  const [stateText, setStateText] = useState(route?.params?.state || '');
+  const [city, setCity] = useState(route?.params?.city || '');
+  const [language, setLanguage] = useState(route?.params?.language || '');
+  const [bio, setBio] = useState(route?.params?.bio || '');
+  const [isLoading, setIsLoading] = useState(false);
+  const [usernameError, setUsernameError] = useState(false);
+  const [ageError, setAgeError] = useState(false);
+  
+  const [isCountryModalVisible, setIsCountryModalVisible] = useState(false);
+  const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
+
+  const handleUsernameChange = (val: string) => {
+    setUsername(val);
+    const usernameRegex = /^[a-z0-9_]*$/;
+    if (!usernameRegex.test(val)) {
+      setUsernameError(true);
+    } else {
+      setUsernameError(false);
+    }
+  };
+
+  const handleAgeChange = (val: string) => {
+    setAge(val);
+    if (val && parseInt(val, 10) < 18) {
+      setAgeError(true);
+    } else {
+      setAgeError(false);
+    }
+  };
+  const avatarData = route?.params?.avatarData || { ...DEFAULT_AVATAR_DNA, isPremiumConfig: true };
+
+  useEffect(() => {
+    const fetchProfile = async () => {
+      if (!auth.currentUser) return;
+      try {
+        const profile = await getUserProfile(auth.currentUser.uid);
+        if (!profile) return;
+        // Only override if we don't already have draft values from params
+        if (profile.nickname && !route?.params?.nickname) setNickname(profile.nickname);
+        if (profile.username && !route?.params?.name) setUsername(profile.username);
+        if (profile.age && !route?.params?.dob) setAge(profile.age.toString());
+        if (profile.gender && !route?.params?.gender) setGender(profile.gender as any);
+        if (profile.country && !route?.params?.country) setCountry(profile.country);
+        if (profile.state && !route?.params?.state) setStateText(profile.state);
+        if (profile.city && !route?.params?.city) setCity(profile.city);
+        if (profile.language && !route?.params?.language) setLanguage(profile.language);
+        if (profile.bio && !route?.params?.bio) setBio(profile.bio);
+      } catch (e) {
+        console.warn('Could not fetch existing profile', e);
+      }
+    };
+    fetchProfile();
+  }, [route?.params]);
+
+  const handleBack = () => {
+    if (isEditMode) {
+      navigate(returnTo);
+    } else {
+      navigate('Phone', { step: 'phone', reset: true });
+    }
+  };
+
+  const handleComplete = async () => {
+    if (!nickname || !username || !age || !gender || !country || !language) {
+      Alert.alert('Missing Fields', 'Please fill in all mandatory fields (Nickname, Username, Age, Gender, Country, Language).');
+      return;
+    }
+
+    const usernameRegex = /^[a-z0-9_]+$/;
+    if (!usernameRegex.test(username) || usernameError) {
+      Alert.alert('Invalid Username', 'Username can only contain lowercase letters, numbers, and underscores.');
+      return;
+    }
+
+    if (parseInt(age, 10) < 18 || ageError) {
+      Alert.alert('Invalid Age', 'You must be 18 or older to join.');
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const cleanUsername = username.trim().toLowerCase();
+      const usersRef = collection(db, 'users');
+      const q = query(usersRef, where('username', '==', cleanUsername));
+      const querySnapshot = await getDocs(q);
+      let isUnique = true;
+
+      // Ensure username is globally unique across all users
+      if (!querySnapshot.empty) {
+        querySnapshot.forEach((docSnap) => {
+          if (docSnap.id !== auth.currentUser?.uid) {
+            isUnique = false;
+          }
+        });
+      }
+
+      if (!isUnique) {
+        Alert.alert('Username Taken', 'This username is already in use. Please choose another one.');
+        setIsLoading(false);
+        return;
+      }
+
+      if (isEditMode) {
+        if (auth.currentUser) {
+          await saveUserProfile(auth.currentUser.uid, {
+            nickname: nickname.trim(),
+            username: cleanUsername,
+            age: parseInt(age, 10) || age,
+            gender,
+            country,
+            state: stateText,
+            city,
+            language,
+            bio: bio.trim()
+          });
+          Alert.alert('Success', 'Profile updated successfully!');
+          navigate(returnTo);
+        }
+      } else {
+        navigate('Avatar', {
+          phone: route?.params?.phone,
+          token: route?.params?.token,
+          name: cleanUsername,
+          nickname: nickname.trim(),
+          dob: parseInt(age, 10) || age,
+          gender,
+          country,
+          state: stateText,
+          city,
+          language,
+          bio: bio.trim()
+        });
+      }
+
+    } catch (error) {
+      console.error('Failed to verify username:', error);
+      Alert.alert('Error', 'Could not verify username. Please try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.stageHeader}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
+          <MaterialIcons name="arrow-back" size={23} color={skeuo.plum} />
+        </TouchableOpacity>
+        <Text style={styles.brand}>Gengal</Text>
+        <DiamondBadge compact />
+      </View>
+
+      <View style={styles.contentArea}>
+        <ScrollView contentContainerStyle={styles.infoContainer}>
+          <Text style={styles.infoTitle}>Profile Details</Text>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>NICKNAME</Text>
+            <TextInput style={styles.input} value={nickname} onChangeText={setNickname} />
+            <Text style={styles.hintText}>Your public display name</Text>
+          </View>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>BIO (Optional)</Text>
+            <TextInput style={[styles.input, { height: 80, paddingTop: 14 }]} value={bio} onChangeText={setBio} multiline numberOfLines={3} placeholder="Tell us about yourself..." placeholderTextColor="#A0A0A0" />
+          </View>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>USERNAME</Text>
+            <TextInput style={[styles.input, usernameError && styles.inputError]} value={username} onChangeText={handleUsernameChange} autoCapitalize="none" />
+            <Text style={[styles.hintText, usernameError && styles.hintError]}>Only lowercase letters, numbers, and underscores</Text>
+          </View>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>AGE</Text>
+            <TextInput style={[styles.input, ageError && styles.inputError]} value={age} onChangeText={handleAgeChange} keyboardType="numeric" />
+            <Text style={[styles.hintText, ageError && styles.hintError]}>Must be 18 or older to join</Text>
+          </View>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>COUNTRY (Required)</Text>
+            <TouchableOpacity 
+              style={[styles.input, { justifyContent: 'center' }]} 
+              activeOpacity={0.8}
+              onPress={() => setIsCountryModalVisible(true)}
+            >
+              <Text style={{ color: country ? skeuo.plum : '#A0A0A0', fontSize: 16, fontWeight: '700' }}>
+                {country || 'Select a country...'}
+              </Text>
+              <MaterialIcons name="arrow-drop-down" size={24} color={skeuo.plum} style={{ position: 'absolute', right: 12 }} />
+            </TouchableOpacity>
+          </View>
+
+          {country ? (
+            <View style={styles.formGroup}>
+              <Text style={styles.label}>LANGUAGE (Required)</Text>
+              <TouchableOpacity 
+                style={[styles.input, { justifyContent: 'center' }]} 
+                activeOpacity={0.8}
+                onPress={() => setIsLanguageModalVisible(true)}
+              >
+                <Text style={{ color: language ? skeuo.plum : '#A0A0A0', fontSize: 16, fontWeight: '700' }}>
+                  {language || 'Select your primary language...'}
+                </Text>
+                <MaterialIcons name="arrow-drop-down" size={24} color={skeuo.plum} style={{ position: 'absolute', right: 12 }} />
+              </TouchableOpacity>
+            </View>
+          ) : null}
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>STATE / REGION (Optional)</Text>
+            <TextInput style={styles.input} value={stateText} onChangeText={setStateText} placeholder="e.g. California" placeholderTextColor="#A0A0A0" />
+          </View>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>CITY (Optional)</Text>
+            <TextInput style={styles.input} value={city} onChangeText={setCity} placeholder="e.g. Los Angeles" placeholderTextColor="#A0A0A0" />
+          </View>
+
+          <View style={styles.formGroup}>
+            <Text style={styles.label}>IDENTITY</Text>
+            <View style={styles.genderToggleFrame}>
+              <TouchableOpacity style={[styles.toggleBtn, gender === 'Masculine' && styles.activeMasculine]} onPress={() => setGender('Masculine')}>
+                <Text style={[styles.toggleBtnText, gender === 'Masculine' && styles.textActive]}>MASCULINE</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.toggleBtn, gender === 'Feminine' && styles.activeFeminine]} onPress={() => setGender('Feminine')}>
+                <Text style={[styles.toggleBtnText, gender === 'Feminine' && styles.textActive]}>FEMININE</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <TouchableOpacity style={styles.saveActionBtn} onPress={handleComplete} disabled={isLoading} activeOpacity={0.86}>
+            <LinearGradient colors={[...skeuoGradients.gold]} style={styles.saveGradient}>
+              {isLoading ? <ActivityIndicator color="#4A3600" /> : <Text style={styles.saveActionText}>SAVE PROFILE</Text>}
+            </LinearGradient>
+          </TouchableOpacity>
+        </ScrollView>
+      </View>
+
+      <Modal visible={isCountryModalVisible} transparent animationType="fade">
+        <Pressable style={styles.modalOverlay} onPress={() => setIsCountryModalVisible(false)}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Select Country</Text>
+            <ScrollView>
+              {COUNTRIES.map((c) => (
+                <TouchableOpacity 
+                  key={c} 
+                  style={[styles.modalItem, country === c && styles.modalItemActive]}
+                  onPress={() => {
+                    setCountry(c);
+                    setLanguage('');
+                    setIsCountryModalVisible(false);
+                  }}
+                >
+                  <Text style={[styles.modalItemText, country === c && styles.modalItemTextActive]}>{c}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+
+      <Modal visible={isLanguageModalVisible} transparent animationType="fade">
+        <Pressable style={styles.modalOverlay} onPress={() => setIsLanguageModalVisible(false)}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Select Language</Text>
+            <ScrollView>
+              {country && COUNTRY_LANGUAGE_MAP[country]?.map((l) => (
+                <TouchableOpacity 
+                  key={l} 
+                  style={[styles.modalItem, language === l && styles.modalItemActive]}
+                  onPress={() => {
+                    setLanguage(l);
+                    setIsLanguageModalVisible(false);
+                  }}
+                >
+                  <Text style={[styles.modalItemText, language === l && styles.modalItemTextActive]}>{l}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: skeuo.surface },
+  stageHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 20,
+    paddingTop: 60,
+    paddingBottom: 14,
+    backgroundColor: skeuo.surfaceRaised,
+    borderBottomWidth: 1,
+    borderColor: skeuo.border,
+    boxShadow: Platform.OS === 'web' ? '0 8px 18px rgba(83, 58, 29, 0.10)' : undefined,
+  },
+  brand: { color: skeuo.plum, fontFamily: 'serif', fontSize: 28, fontWeight: '900' },
+  backButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    backgroundColor: skeuo.surfaceRaised,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+  },
+  contentArea: { flex: 1 },
+  infoContainer: { paddingHorizontal: 24, paddingTop: 28, paddingBottom: 112 },
+  infoTitle: { color: skeuo.plum, fontFamily: 'serif', fontSize: 30, fontWeight: '900', marginBottom: 22 },
+  successBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F1F8EA',
+    padding: 12,
+    borderRadius: 16,
+    marginBottom: 22,
+    gap: 8,
+    borderWidth: 1,
+    borderColor: '#D7EDC8',
+    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+  },
+  successText: { color: '#4F8B36', fontSize: 13, fontWeight: '800' },
+  formGroup: { marginBottom: 18 },
+  label: { fontSize: 11, fontWeight: '900', color: '#9A8772', marginBottom: 8, letterSpacing: 1.1 },
+  input: {
+    backgroundColor: skeuo.surfaceInset,
+    borderRadius: 18,
+    height: 54,
+    paddingHorizontal: 17,
+    color: skeuo.plum,
+    fontSize: 16,
+    fontWeight: '700',
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
+  },
+  pickerContainer: {
+    backgroundColor: skeuo.surfaceInset,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
+    overflow: 'hidden',
+  },
+  picker: {
+    height: 54,
+    color: skeuo.plum,
+    fontWeight: '700',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    width: '100%',
+    maxHeight: '70%',
+    backgroundColor: skeuo.surfaceInset,
+    borderRadius: 24,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    elevation: 10,
+    shadowColor: '#533A1D',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 12,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '800',
+    color: skeuo.plum,
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  modalItem: {
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(217, 197, 139, 0.3)',
+  },
+  modalItemActive: {
+    backgroundColor: 'rgba(212, 154, 11, 0.15)',
+    borderRadius: 12,
+    borderBottomWidth: 0,
+  },
+  modalItemText: {
+    fontSize: 16,
+    color: skeuo.plum,
+    fontWeight: '600',
+  },
+  modalItemTextActive: {
+    color: '#D49A0B',
+    fontWeight: '800',
+  },
+  hintText: {
+    fontSize: 11,
+    color: '#9A8772',
+    marginTop: 6,
+    marginLeft: 4,
+    fontStyle: 'italic',
+  },
+  inputError: {
+    borderColor: '#D32F2F',
+    backgroundColor: '#FFEBEE',
+  },
+  hintError: {
+    color: '#D32F2F',
+    fontWeight: '700',
+  },
+  genderToggleFrame: {
+    flexDirection: 'row',
+    backgroundColor: skeuo.surfaceInset,
+    padding: 5,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
+  },
+  toggleBtn: { flex: 1, height: 42, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
+  activeMasculine: { backgroundColor: skeuo.surfaceRaised, borderWidth: 1, borderColor: skeuo.border, boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined },
+  activeFeminine: { backgroundColor: skeuo.surfaceRaised, borderWidth: 1, borderColor: skeuo.border, boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined },
+  toggleBtnText: { fontSize: 12, fontWeight: '900', color: '#9A8772', letterSpacing: 1 },
+  textActive: { color: skeuo.plum },
+  saveActionBtn: { width: '100%', height: 58, borderRadius: 29, marginTop: 30, overflow: 'hidden', boxShadow: Platform.OS === 'web' ? skeuo.goldShadow : undefined },
+  saveGradient: { flex: 1, justifyContent: 'center', alignItems: 'center' },
+  saveActionText: { color: '#563F00', fontWeight: '900', fontSize: 14, letterSpacing: 1.6 },
+});
