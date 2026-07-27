@@ -297,7 +297,7 @@ function CelebCard({
           <TouchableOpacity
             style={cardStyles.actionBtn}
             activeOpacity={0.82}
-            onPress={() => navigate('Call', { profileName: profile.name, mode: 'call', isCaller: true, matchData: { ...profile, modes: ['call', 'video'] } })}
+            onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7), profileName: profile.name, mode: 'call', isCaller: true, matchData: { ...profile, modes: ['call', 'video'] } })}
           >
             <MaterialIcons name="phone" size={14} color="#FFF" />
             <Text style={cardStyles.actionText}>Call</Text>
@@ -308,7 +308,7 @@ function CelebCard({
           <TouchableOpacity
             style={[cardStyles.actionBtn, cardStyles.actionBtnVideo]}
             activeOpacity={0.82}
-            onPress={() => navigate('Call', { profileName: profile.name, mode: 'video', isCaller: true, matchData: { ...profile, modes: ['call', 'video'] } })}
+            onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7), profileName: profile.name, mode: 'video', isCaller: true, matchData: { ...profile, modes: ['call', 'video'] } })}
           >
             <MaterialIcons name="videocam" size={14} color="#FFF7FF" />
             <Text style={[cardStyles.actionText, cardStyles.actionTextVideo]}>Video</Text>
@@ -471,7 +471,6 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
             </View>
           )}
 
-          <View style={{ height: 110 }} />
         </ScrollView>
 
         <BottomNav active="Celebs" navigate={navigate} />
@@ -482,7 +481,7 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 24 },
+  scroll: { paddingBottom: 110 },
 
   hero: {
     marginHorizontal: 14,

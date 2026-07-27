@@ -1,8 +1,8 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useState, useEffect } from 'react';
 import {
   Platform, View, Text, StyleSheet, ScrollView,
-  TouchableOpacity, TextInput, ActivityIndicator, Alert,
-} from 'react-native';
+  TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import ScreenShell from '../components/ScreenShell';

@@ -16,17 +16,20 @@ import {
   limit,
   Timestamp,
   setDoc,
+  deleteDoc,
+  runTransaction,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
 
 export type RoomStatus = 'live' | 'closed';
-export type RoomTier = 'VIP' | 'Elite' | 'Standard';
+export type RoomTier = 'VIP' | 'Advance' | 'Standard';
 
 export interface SpeakerSlot {
   uid: string;
   nickname: string;
   avatarData?: any;
   isMuted: boolean;
+  gender?: 'boy' | 'girl';
 }
 
 export interface ExpertRoom {
@@ -41,6 +44,8 @@ export interface ExpertRoom {
   status: RoomStatus;
   // hand-raise queue — uids who tapped "Raise Hand"
   handQueue: string[];
+  handQueueBoy?: string[];
+  handQueueGirl?: string[];
   // uids currently on stage (speakers), max ~4
   speakers: SpeakerSlot[];
   activeMemberCount: number;
@@ -62,6 +67,8 @@ export interface RoomEvent {
   senderAvatarData?: any;
   giftName?: string;
   giftCost?: number;
+  recipientUid?: string;
+  recipientName?: string;
   text?: string;
   timestamp?: Timestamp;
 }
@@ -72,6 +79,19 @@ export interface TopGifter {
   avatarData?: any;
   totalCoins: number;
 }
+
+export interface HandRequest {
+  uid: string;
+  nickname: string;
+  avatarData?: any;
+  gender: 'boy' | 'girl';
+}
+
+export const subscribeToHandRequests = (roomId: string, callback: (reqs: HandRequest[]) => void) => {
+  return onSnapshot(collection(db, 'expert_rooms', roomId, 'hand_requests'), (snap) => {
+    callback(snap.docs.map(d => ({ uid: d.id, ...d.data() } as HandRequest)));
+  });
+};
 
 export const GIFTS = [
   { id: 'rose',        name: 'Rose',       icon: 'favorite',            cost: 50,   emoji: '🌹' },
@@ -115,6 +135,8 @@ export const createExpertRoom = async (
     ratePerMin,
     status: 'live',
     handQueue: [],
+    handQueueBoy: [],
+    handQueueGirl: [],
     speakers: [hostSlot],
     activeMemberCount: 1,
     reviewingUid: null,
@@ -133,12 +155,12 @@ export const subscribeToActiveRooms = (
   languageFilter?: string,
 ) => {
   const roomsRef = collection(db, 'expert_rooms');
-  let q = query(roomsRef, where('status', '==', 'live'), orderBy('activeMemberCount', 'desc'));
+  let q = query(roomsRef, where('status', '==', 'live'));
   if (tierFilter) {
-    q = query(roomsRef, where('status', '==', 'live'), where('tier', '==', tierFilter), orderBy('activeMemberCount', 'desc'));
+    q = query(roomsRef, where('status', '==', 'live'), where('tier', '==', tierFilter));
   }
   if (languageFilter) {
-    q = query(roomsRef, where('status', '==', 'live'), where('language', '==', languageFilter), orderBy('activeMemberCount', 'desc'));
+    q = query(roomsRef, where('status', '==', 'live'), where('language', '==', languageFilter));
   }
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ExpertRoom)));
@@ -199,21 +221,53 @@ export const joinRoom = async (roomId: string, uid: string, nickname: string, av
 };
 
 export const leaveRoom = async (roomId: string, uid: string, nickname: string) => {
+  try {
+    await deleteDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid));
+  } catch (e) {}
   await updateDoc(doc(db, 'expert_rooms', roomId), {
     activeMemberCount: increment(-1),
     handQueue: arrayRemove(uid),
+    handQueueBoy: arrayRemove(uid),
+    handQueueGirl: arrayRemove(uid),
   });
 };
 
 // ── Raise Hand / Stage ─────────────────────────────────────────────────────
 
-export const raiseHand = async (roomId: string, uid: string, nickname: string) => {
-  await updateDoc(doc(db, 'expert_rooms', roomId), { handQueue: arrayUnion(uid) });
-  await logEvent(roomId, { type: 'raise_hand', senderUid: uid, senderName: nickname });
+export const raiseHand = async (
+  roomId: string,
+  uid: string,
+  nickname: string,
+  avatarData: any,
+  gender: 'boy' | 'girl',
+) => {
+  await setDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid), {
+    nickname,
+    avatarData: avatarData || null,
+    gender,
+    createdAt: serverTimestamp(),
+  });
+  const updateData: any = {
+    handQueue: arrayUnion(uid)
+  };
+  if (gender === 'girl') {
+    updateData.handQueueGirl = arrayUnion(uid);
+  } else {
+    updateData.handQueueBoy = arrayUnion(uid);
+  }
+  await updateDoc(doc(db, 'expert_rooms', roomId), updateData);
+  await logEvent(roomId, { type: 'raise_hand', senderUid: uid, senderName: nickname, text: gender });
 };
 
 export const lowerHand = async (roomId: string, uid: string) => {
-  await updateDoc(doc(db, 'expert_rooms', roomId), { handQueue: arrayRemove(uid) });
+  try {
+    await deleteDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid));
+  } catch (e) {}
+  await updateDoc(doc(db, 'expert_rooms', roomId), {
+    handQueue: arrayRemove(uid),
+    handQueueBoy: arrayRemove(uid),
+    handQueueGirl: arrayRemove(uid),
+  });
 };
 
 export const acceptOnStage = async (
@@ -221,12 +275,44 @@ export const acceptOnStage = async (
   uid: string,
   nickname: string,
   avatarData: any,
+  gender: 'boy' | 'girl',
 ) => {
-  const slot: SpeakerSlot = { uid, nickname, avatarData: avatarData || null, isMuted: true };
-  await updateDoc(doc(db, 'expert_rooms', roomId), {
-    handQueue: arrayRemove(uid),
-    speakers: arrayUnion(slot),
+  const roomRef = doc(db, 'expert_rooms', roomId);
+  const requestRef = doc(db, 'expert_rooms', roomId, 'hand_requests', uid);
+  const slot: SpeakerSlot = { uid, nickname, avatarData: avatarData || null, isMuted: true, gender };
+
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(roomRef);
+    if (!snap.exists()) throw new Error('Room no longer exists.');
+
+    const room = snap.data() as ExpertRoom;
+    if (room.status !== 'live') throw new Error('Room has ended.');
+
+    const speakers = room.speakers || [];
+    if (speakers.some((speaker) => speaker.uid === uid)) {
+      transaction.delete(requestRef);
+      transaction.update(roomRef, {
+        handQueue: arrayRemove(uid),
+        handQueueBoy: arrayRemove(uid),
+        handQueueGirl: arrayRemove(uid),
+      });
+      return;
+    }
+
+    const seatTaken = speakers.some((speaker) => speaker.gender === gender);
+    if (seatTaken) {
+      throw new Error(gender === 'girl' ? 'Girl speaker seat is already occupied.' : 'Boy speaker seat is already occupied.');
+    }
+
+    transaction.delete(requestRef);
+    transaction.update(roomRef, {
+      handQueue: arrayRemove(uid),
+      handQueueBoy: arrayRemove(uid),
+      handQueueGirl: arrayRemove(uid),
+      speakers: [...speakers, slot],
+    });
   });
+
   await logEvent(roomId, { type: 'stage_up', senderUid: uid, senderName: nickname });
 };
 
@@ -293,12 +379,13 @@ export const sendGiftInRoom = async (
   senderId: string,
   senderName: string,
   senderAvatarData: any,
-  hostUid: string,
+  recipientUid: string,
+  recipientName: string,
   giftId: string,
 ) => {
   const gift = GIFTS.find((g) => g.id === giftId);
   if (!gift) throw new Error('Unknown gift');
-  await transferCoins(senderId, hostUid, gift.cost);
+  await transferCoins(senderId, recipientUid, gift.cost);
   await logEvent(roomId, {
     type: 'gift',
     senderUid: senderId,
@@ -306,6 +393,8 @@ export const sendGiftInRoom = async (
     senderAvatarData,
     giftName: gift.name,
     giftCost: gift.cost,
+    recipientUid,
+    recipientName,
   });
   // track top gifters in a subcollection
   const gifterRef = doc(db, 'expert_rooms', roomId, 'gifters', senderId);

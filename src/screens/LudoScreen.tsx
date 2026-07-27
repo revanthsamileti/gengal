@@ -1,3 +1,4 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -8,7 +9,7 @@ import {
   Text,
   TouchableOpacity,
   View,
-} from 'react-native';
+  Modal } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import BottomNav from '../components/BottomNav';
@@ -25,6 +26,7 @@ import {
   TOKEN_COLORS,
   TokenColor,
 } from '../services/ludoService';
+import { deductUserCoins } from '../services/coinService';
 import { skeuo } from '../theme/skeuomorphic';
 
 interface Props {
@@ -184,21 +186,31 @@ export default function LudoScreen({ navigate }: Props) {
   const [rooms, setRooms] = useState<LudoRoom[]>([]);
   const [joiningId, setJoiningId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [createModalVisible, setCreateModalVisible] = useState(false);
 
   useEffect(() => {
     const unsub = subscribeToLudoRooms(setRooms);
     return unsub;
   }, []);
 
-  const handleCreate = useCallback(async () => {
+  const handleCreate = useCallback(async (mode: 'per_game' | 'per_token') => {
+    if (!profile || profile.coins === undefined || profile.coins < 10) {
+      Alert.alert('Insufficient Coins', 'You need at least 10 coins to create a room.');
+      return;
+    }
     setCreating(true);
+    setCreateModalVisible(false);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData);
+      await deductUserCoins(myUid, 10);
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', 'Failed to create room.');
     } finally {
       setCreating(false);
     }
-  }, [myUid, myName, myAvatarData, navigate]);
+  }, [myUid, myName, myAvatarData, navigate, profile]);
 
   const handleJoin = useCallback(async (room: LudoRoom) => {
     if (!room.id || joiningId) return;
@@ -231,13 +243,13 @@ export default function LudoScreen({ navigate }: Props) {
             <Text style={styles.heroTitle}>Ludo Live</Text>
             <Text style={styles.heroSub}>Create a relaxed premium table, roll dice, and play with friends.</Text>
 
-            <TouchableOpacity style={[styles.createBtn, creating && styles.createBtnLoading]} onPress={handleCreate} disabled={creating} activeOpacity={0.84}>
+            <TouchableOpacity style={[styles.createBtn, creating && styles.createBtnLoading]} onPress={() => setCreateModalVisible(true)} disabled={creating} activeOpacity={0.84}>
               {creating ? (
                 <ActivityIndicator color="#4A3600" size="small" />
               ) : (
                 <>
                   <MaterialIcons name="add-circle" size={19} color="#4A3600" />
-                  <Text style={styles.createBtnText}>Create Table</Text>
+                  <Text style={styles.createBtnText}>Create Table (10 💎)</Text>
                 </>
               )}
             </TouchableOpacity>
@@ -267,7 +279,7 @@ export default function LudoScreen({ navigate }: Props) {
               </View>
               <Text style={styles.emptyTitle}>Start the first table</Text>
               <Text style={styles.emptyText}>Create a table and invite friends to join the match.</Text>
-              <TouchableOpacity style={[styles.emptyBtn, creating && styles.createBtnLoading]} onPress={handleCreate} disabled={creating}>
+              <TouchableOpacity style={[styles.emptyBtn, creating && styles.createBtnLoading]} onPress={() => setCreateModalVisible(true)} disabled={creating}>
                 {creating ? <ActivityIndicator size="small" color="#FFFDF8" /> : <Text style={styles.emptyBtnText}>Create Table</Text>}
               </TouchableOpacity>
             </View>
@@ -281,6 +293,36 @@ export default function LudoScreen({ navigate }: Props) {
 
           <View style={{ height: 110 }} />
         </ScrollView>
+
+        {/* Create Room Modal */}
+        <Modal visible={createModalVisible} transparent animationType="slide" onRequestClose={() => setCreateModalVisible(false)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
+            <View style={{ backgroundColor: '#FFFDF8', width: '85%', borderRadius: 20, padding: 24, alignItems: 'center' }}>
+              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#4A3600', marginBottom: 8 }}>Choose Game Mode</Text>
+              <Text style={{ fontSize: 13, color: '#7E7368', textAlign: 'center', marginBottom: 20 }}>
+                Creating a room costs 10 coins. You will earn a 10% commission from player tickets and bets!
+              </Text>
+              
+              <TouchableOpacity style={[styles.createBtn, { width: '100%', marginBottom: 12 }]} onPress={() => handleCreate('per_game')}>
+                <Text style={styles.createBtnText}>Per Game Mode</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
+                Players buy a fixed ticket (50 coins) to join your table.
+              </Text>
+
+              <TouchableOpacity style={[styles.createBtn, { width: '100%', backgroundColor: '#4E8E32', borderColor: '#C4DDB7', marginBottom: 12 }]} onPress={() => handleCreate('per_token')}>
+                <Text style={[styles.createBtnText, { color: '#FFF' }]}>Per Token Mode</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
+                Audience bets on colors, and every dice roll costs 15 coins.
+              </Text>
+
+              <TouchableOpacity onPress={() => setCreateModalVisible(false)} style={{ padding: 10 }}>
+                <Text style={{ color: '#8B7A6A', fontWeight: 'bold' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
 
         <BottomNav active="Chill" navigate={navigate} />
       </View>

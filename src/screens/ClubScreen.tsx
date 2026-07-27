@@ -10,6 +10,7 @@ import {
   TextInput,
   ActivityIndicator,
   Animated,
+  Share,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -31,17 +32,17 @@ import {
 
 const HEARTS_REQUIRED = 33;
 
-const TIER_OPTIONS: RoomTier[] = ['Elite', 'VIP'];
+const TIER_OPTIONS: RoomTier[] = ['Advance', 'VIP'];
 
 const TIER_COLORS: Record<RoomTier, string> = {
   VIP: '#9A1E8A',
-  Elite: '#B99916',
+  Advance: '#B99916',
   Standard: '#4B6282',
 };
 
 const TIER_DESC: Record<RoomTier, string> = {
   Standard: 'Open to all',
-  Elite: 'Curated listeners',
+  Advance: 'Curated listeners',
   VIP: 'Premium only',
 };
 
@@ -50,7 +51,7 @@ type FilterType = RoomTier | 'all';
 const FILTERS: Array<{ label: string; value: FilterType }> = [
   { label: 'All Live', value: 'all' },
   { label: 'VIP', value: 'VIP' },
-  { label: 'Elite', value: 'Elite' },
+  { label: 'Advance', value: 'Advance' },
 ];
 
 export default function ClubScreen({ navigate, goBack }: {
@@ -72,7 +73,7 @@ export default function ClubScreen({ navigate, goBack }: {
   const [topic, setTopic] = useState(TOPICS[0]);
   const [customTopic, setCustomTopic] = useState('');
   const [selectedLang, setSelectedLang] = useState(LANGUAGES[0]);
-  const [selectedTier, setSelectedTier] = useState<RoomTier>('Elite');
+  const [selectedTier, setSelectedTier] = useState<RoomTier>('Advance');
   const [ratePerMin, setRatePerMin] = useState('60');
 
   useEffect(() => {
@@ -91,6 +92,18 @@ export default function ClubScreen({ navigate, goBack }: {
       return;
     }
     setCreateModal(true);
+  };
+
+  const handleShareInvite = async () => {
+    const finalTopic = customTopic.trim() || topic;
+    const nickname = profile?.nickname || profile?.username || 'Host';
+    try {
+      await Share.share({
+        message: `Hey! Join my live matchmaking room on Gengal Club.\nTopic: "${finalTopic}"\nExpert: ${nickname}\n\nSearch for my room in the Club tab!`,
+      });
+    } catch (e: any) {
+      console.warn('Error sharing invite:', e);
+    }
   };
 
   const handleCreateRoom = async () => {
@@ -220,7 +233,6 @@ export default function ClubScreen({ navigate, goBack }: {
             </View>
           )}
 
-          <View style={{ height: 110 }} />
         </ScrollView>
 
         <BottomNav active="Club" navigate={navigate} />
@@ -324,6 +336,11 @@ export default function ClubScreen({ navigate, goBack }: {
                 />
               </View>
 
+              <TouchableOpacity style={styles.shareInviteBtn} onPress={handleShareInvite}>
+                <MaterialIcons name="share" size={16} color="#4B0054" />
+                <Text style={styles.shareInviteBtnText}>SHARE INVITE LINK</Text>
+              </TouchableOpacity>
+
               <TouchableOpacity style={styles.goLiveBtn} activeOpacity={0.85} onPress={handleCreateRoom} disabled={creating}>
                 <LinearGradient colors={skeuoGradients.plumButton} style={styles.goLiveBtnInner}>
                   {creating ? <ActivityIndicator color="#FFF" /> : (
@@ -421,7 +438,7 @@ function RoomCard({ room, index, tierColor, navigate }: {
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 24 },
+  scroll: { paddingBottom: 110 },
 
   // Hero
   hero: {
@@ -573,4 +590,10 @@ const styles = StyleSheet.create({
   goLiveBtn: { marginTop: 20, borderRadius: 20, overflow: 'hidden', boxShadow: Platform.OS === 'web' ? '0 10px 20px rgba(75,0,84,0.28)' : undefined },
   goLiveBtnInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 15 },
   goLiveBtnText: { color: '#FFFDF8', fontSize: 14, fontWeight: '900', letterSpacing: 3 },
+  shareInviteBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    marginTop: 18, paddingVertical: 12, borderRadius: 14,
+    backgroundColor: '#F8F5EF', borderWidth: 1, borderColor: '#4B0054',
+  },
+  shareInviteBtnText: { color: '#4B0054', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
 });

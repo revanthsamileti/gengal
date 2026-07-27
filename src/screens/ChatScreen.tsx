@@ -103,7 +103,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
             <TouchableOpacity
               style={styles.headerAction}
               activeOpacity={0.8}
-              onPress={() => navigate('Call', { profileName: profile.name, mode: 'call', isCaller: true })}
+              onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: profile.name, mode: 'call', isCaller: true  })}
             >
               <MaterialIcons name="phone" size={16} color="#FFF" />
               <CallPriceTag mode="call" />
@@ -111,7 +111,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
             <TouchableOpacity
               style={[styles.headerAction, styles.headerActionDark]}
               activeOpacity={0.8}
-              onPress={() => navigate('Call', { profileName: profile.name, mode: 'video', isCaller: true })}
+              onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: profile.name, mode: 'video', isCaller: true  })}
             >
               <MaterialIcons name="videocam" size={16} color="#FFF7FF" />
               <CallPriceTag mode="video" />

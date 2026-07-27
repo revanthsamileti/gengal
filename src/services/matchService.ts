@@ -30,8 +30,16 @@ export interface MatchRoom {
   createdAt: any;
 }
 
+const normalizeMatchGender = (gender?: string | null): 'male' | 'female' | null => {
+  const value = (gender || '').trim().toLowerCase();
+  if (['male', 'man', 'masculine', 'boy'].includes(value)) return 'male';
+  if (['female', 'woman', 'feminine', 'girl'].includes(value)) return 'female';
+  return null;
+};
+
 export const findMatch = async (
-  currentUser: UserProfile, 
+  currentUser: UserProfile,
+  preferredMode: 'video' | 'call',
   onMatchFound: (roomId: string, matchData: any) => void
 ) => {
   const poolRef = collection(db, 'matchmaking_pool');
@@ -42,11 +50,20 @@ export const findMatch = async (
     const q = query(poolRef, where('status', '==', 'searching'));
     const snapshot = await getDocs(q);
     
+    const myGender = normalizeMatchGender(currentUser.gender);
+    const targetGender = myGender === 'female' ? 'male' : (myGender === 'male' ? 'female' : null);
+
     let opponentDoc = null;
     for (const d of snapshot.docs) {
       if (d.id !== currentUser.uid) {
-        opponentDoc = d;
-        break;
+        const oppData = d.data();
+        const oppGender = normalizeMatchGender(oppData.gender);
+        
+        // Filter by mode and opposite gender
+        if (oppData.preferredMode === preferredMode && oppGender === targetGender) {
+          opponentDoc = d;
+          break;
+        }
       }
     }
 
@@ -54,7 +71,7 @@ export const findMatch = async (
       // 2a. Found someone! Perform a transaction to safely pair them up
       const opponentData = opponentDoc.data();
       
-      const roomId = opponentDoc.id + '_' + currentUser.uid;
+      const roomId = opponentDoc.id + '_' + currentUser.uid + '_' + Date.now();
       const newRoomRef = doc(roomsRef, roomId);
       
       await runTransaction(db, async (transaction) => {
@@ -107,6 +124,8 @@ export const findMatch = async (
         uid: currentUser.uid,
         nickname: currentUser.nickname || 'User',
         avatarData: currentUser.avatarData || null,
+        gender: currentUser.gender || '',
+        preferredMode,
         status: 'searching',
         matchedRoomId: null,
         joinedAt: serverTimestamp()
@@ -147,4 +166,3 @@ export const findMatch = async (
     throw err;
   }
 };
-

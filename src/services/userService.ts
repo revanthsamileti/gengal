@@ -13,6 +13,8 @@ import {
   arrayRemove
 } from 'firebase/firestore';
 
+const ONLINE_FRESHNESS_MS = 5 * 60 * 1000;
+
 export interface UserProfile {
   uid?: string;
   phoneNumber?: string;
@@ -50,7 +52,11 @@ export interface UserProfile {
     isPremiumConfig?: boolean;
   };
   isOnline?: boolean;
-  tier?: 'VIP' | 'Elite' | 'Standard';
+  isActiveMode?: boolean;
+  isSessionActive?: boolean;
+  isDeleted?: boolean;
+  deletedAt?: any;
+  tier?: 'VIP' | 'Advance' | 'Standard';
   bio?: string;
   followers?: number | string[];
   following?: number | string[];
@@ -77,7 +83,10 @@ export const saveUserProfile = async (uid: string, profileData: Partial<UserProf
         respectBadges: 0,
         unrewardedCallSeconds: 0,
         totalReceivedCallSeconds: 0,
-        tier: profileData.avatarUrl ? 'VIP' : 'Elite',
+        tier: profileData.avatarUrl ? 'VIP' : 'Advance',
+        isActiveMode: profileData.isActiveMode !== false,
+        isOnline: profileData.isActiveMode !== false,
+        isSessionActive: true,
         createdAt: serverTimestamp(),
         lastActive: serverTimestamp()
       });
@@ -86,6 +95,14 @@ export const saveUserProfile = async (uid: string, profileData: Partial<UserProf
     console.error("Error saving user profile:", error);
     throw error;
   }
+};
+
+const toMillis = (value: any): number => {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value.toMillis === 'function') return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  return 0;
 };
 
 export const getUserProfile = async (uid: string): Promise<UserProfile | null> => {
@@ -115,14 +132,20 @@ export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void,
     const users: UserProfile[] = [];
     querySnapshot.forEach((doc) => {
       const data = doc.data() as UserProfile;
-      if (currentUid && data.uid === currentUid) return;
+      if (currentUid && doc.id === currentUid) return;
       if (vipOnly && !data.avatarUrl) return;
+      if (data.isActiveMode === false) return;
+
+      const lastActiveMs = toMillis(data.lastActive);
+      if (!lastActiveMs || Date.now() - lastActiveMs > ONLINE_FRESHNESS_MS) return;
+
       // Inject some mock data if missing to keep the UI looking good
-      const derivedTier: 'VIP' | 'Elite' = data.avatarUrl ? 'VIP' : 'Elite';
+      const derivedTier: 'VIP' | 'Advance' = data.avatarUrl ? 'VIP' : 'Advance';
       users.push({
         ...data,
+        uid: doc.id,
         avatarData: data.avatarData || (() => {
-          const seed = (data.uid || '').split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+          const seed = (doc.id || '').split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
           return {
             topType: MOCK_TOPS[seed % MOCK_TOPS.length],
             hairColor: "Black",
@@ -136,6 +159,53 @@ export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void,
     callback(users);
   }, (error) => {
     console.error("Error subscribing to online users:", error);
+  });
+};
+
+const normalizeVisibleUser = (id: string, data: UserProfile): UserProfile => {
+  const derivedTier: 'VIP' | 'Advance' = data.avatarUrl ? 'VIP' : 'Advance';
+  return {
+    ...data,
+    uid: id,
+    avatarData: data.avatarData || (() => {
+      const seed = (id || '').split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
+      return {
+        topType: MOCK_TOPS[seed % MOCK_TOPS.length],
+        hairColor: "Black",
+        clotheType: MOCK_CLOTHES[seed % MOCK_CLOTHES.length],
+        skinColor: MOCK_SKINS[seed % MOCK_SKINS.length],
+      };
+    })(),
+    tier: derivedTier,
+  };
+};
+
+export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void, currentUid?: string) => {
+  const usersRef = collection(db, 'users');
+
+  return onSnapshot(usersRef, (querySnapshot) => {
+    const users: UserProfile[] = [];
+    querySnapshot.forEach((doc) => {
+      const data = doc.data() as UserProfile;
+      if (currentUid && doc.id === currentUid) return;
+      if (data.isDeleted === true || data.deletedAt) return;
+
+      const hasProfileIdentity = Boolean(data.nickname || data.username);
+      if (!hasProfileIdentity) return;
+
+      const hasActiveSession = data.isSessionActive === true || (data.isSessionActive === undefined && data.isOnline === true);
+      if (!hasActiveSession) return;
+
+      const lastActiveMs = toMillis(data.lastActive);
+      if (!lastActiveMs || Date.now() - lastActiveMs > ONLINE_FRESHNESS_MS) return;
+
+      users.push(normalizeVisibleUser(doc.id, data));
+    });
+
+    users.sort((a, b) => toMillis(b.lastActive) - toMillis(a.lastActive));
+    callback(users);
+  }, (error) => {
+    console.error("Error subscribing to recent users:", error);
   });
 };
 
@@ -170,11 +240,28 @@ export const unfollowUser = async (currentUid: string, targetUid: string) => {
   ]);
 };
 
-export const updateUserStatus = async (uid: string, isOnline: boolean) => {
+export const toggleActiveMode = async (uid: string, isActiveMode: boolean) => {
   try {
     const userRef = doc(db, 'users', uid);
     await updateDoc(userRef, {
-      isOnline,
+      isActiveMode,
+      isOnline: isActiveMode,
+      isSessionActive: true,
+      lastActive: serverTimestamp()
+    });
+  } catch (error) {
+    console.error("Error toggling active mode:", error);
+  }
+};
+
+export const updateUserStatus = async (uid: string, isOnline: boolean) => {
+  try {
+    const userRef = doc(db, 'users', uid);
+    const userSnap = await getDoc(userRef);
+    const isActiveMode = userSnap.exists() ? userSnap.data().isActiveMode !== false : true;
+    await updateDoc(userRef, {
+      isOnline: isOnline && isActiveMode,
+      isSessionActive: isOnline,
       lastActive: serverTimestamp()
     });
   } catch (error) {

@@ -5,6 +5,8 @@ import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { skeuo } from '../theme/skeuomorphic';
 import { loginWithPassword } from '../services/authService';
+import { getUserProfile } from '../services/userService';
+import { auth } from '../config/firebase';
 
 export default function LoginPasswordScreen({ navigate, goBack, route }: any) {
   const { params } = route || {};
@@ -25,8 +27,21 @@ export default function LoginPasswordScreen({ navigate, goBack, route }: any) {
     setErrorMsg('');
 
     try {
-      await loginWithPassword(phone, password);
-      // App.tsx onAuthStateChanged will detect the login and route to Home automatically!
+      const { user } = await loginWithPassword(phone, password);
+      
+      // Fetch profile directly from the newly signed-in user object
+      if (user) {
+        const profile = await getUserProfile(user.uid);
+        const isComplete = Boolean(profile && (profile.username || profile.nickname || profile.coins !== undefined || profile.createdAt));
+        
+        if (isComplete) {
+          navigate('Home');
+        } else {
+          navigate('ProfileDetails', { isEditMode: true, returnTo: 'Home' });
+        }
+      } else {
+        navigate('Home'); // Fallback if user object is somehow missing
+      }
     } catch (error: any) {
       setErrorMsg(error.message || 'Invalid password or account');
       setIsLoading(false);

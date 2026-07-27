@@ -188,7 +188,7 @@ function AvatarOption({
   );
 }
 
-export default function FinalizeInviteScreen({ navigation, navigate: directNavigate, route }: any) {
+export default function FinalizeInviteScreen({ navigation, navigate: directNavigate, route, goBack }: any) {
   const { height } = useWindowDimensions();
   const navigate = directNavigate || navigation?.navigate || (() => {});
   const { params } = route || {};
@@ -231,7 +231,9 @@ export default function FinalizeInviteScreen({ navigation, navigate: directNavig
   const [avatarData, setAvatarData] = useState<AvatarData>(getInitialAvatar(isMasc));
 
   useEffect(() => {
-    setAvatarData(getInitialAvatar(effectiveGender === 'Masculine'));
+    if (!params?.existingAvatarData) {
+      setAvatarData(getInitialAvatar(effectiveGender === 'Masculine'));
+    }
   }, [effectiveGender]);
   const isExpandedRef = useRef(false);
   const EXPAND_OFFSET = 240;
@@ -329,7 +331,13 @@ export default function FinalizeInviteScreen({ navigation, navigate: directNavig
   const renderStudio = () => (
     <View style={styles.builder}>
       <View style={[styles.builderTopActions, { top: Math.max((Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 44) + 10, 50) }]}>
-        <Pressable onPress={() => navigate('ProfileDetails', { ...params, gender: effectiveGender })}>
+        <Pressable onPress={() => {
+          if (params?.isEditMode && goBack) {
+            goBack();
+          } else {
+            navigate('ProfileDetails', { ...params, gender: effectiveGender });
+          }
+        }}>
           {({ pressed }) => (
             <View style={[styles.builderCircleBtn, pressed && { transform: [{ translateY: 2 }], boxShadow: 'none' }]}>
               <MaterialIcons name="arrow-back" size={26} color={skeuo.plum} />

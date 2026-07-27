@@ -44,10 +44,10 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
   const profile = matchData ? {
     name: matchData.nickname || matchData.name,
     uri: matchData.uri || matchData.avatarUrl || '',
-    tier: (matchData.avatarUrl || matchData.uri) ? 'VIP' : 'Elite',
+    tier: (matchData.avatarUrl || matchData.uri) ? 'VIP' : 'Advance',
     avatarData: matchData.avatarData,
     uid: matchData.uid,
-  } : { name: profileName || 'User', uri: '', tier: 'Elite', uid: undefined };
+  } : { name: profileName || 'User', uri: '', tier: 'Advance', uid: undefined };
 
   return (
     <ScreenShell tone="dark">

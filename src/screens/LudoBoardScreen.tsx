@@ -1,3 +1,4 @@
+import { Alert } from '../components/CustomAlert';
 import React, {
   useState, useEffect, useRef, useCallback, useMemo,
 } from 'react';
@@ -15,7 +16,7 @@ import {
   Modal,
   ActivityIndicator,
   Dimensions,
-} from 'react-native';
+  ToastAndroid } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Svg, { Polygon, Circle } from 'react-native-svg';
 import { PATH, PLAYERS, PLAYER_NAMES, START_INDEX, STAR_CELLS, HOME_COLUMN, BASE_ORIGIN, BASE_PADS, HOME_REST, HOME_PROGRESS, cellForProgress, PlayerColor, Cell } from './LudoConstants';
@@ -25,9 +26,12 @@ import { PATH, PLAYERS, PLAYER_NAMES, START_INDEX, STAR_CELLS, HOME_COLUMN, BASE
 
 
 
-import { MaterialIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from '../components/GengalAvatar';
 import ScreenShell from '../components/ScreenShell';
+import TopBar from '../components/TopBar';
+import { useGengalVoice } from '../hooks/useGengalVoice';
+import { colors } from '../theme/colors';
 import { skeuo } from '../theme/skeuomorphic';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
@@ -40,6 +44,8 @@ import {
   startGame, rollDice, moveToken, skipTurn, closeLudoRoom,
   getLegalMoves, nextTurn,
   sendLudoChat, sendLudoGift,
+  buyLudoTicket,
+  placeLudoBet,
 } from '../services/ludoService';
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -258,7 +264,7 @@ const boardStyles = StyleSheet.create({
 
 // ── Player Panel ──────────────────────────────────────────────────────────────
 
-function PlayerPanel({ player, color, tokens, isActive, rank }: { player: LudoPlayer | null, color: TokenColor, tokens: Token[], isActive: boolean, rank: number | null }) {
+function PlayerPanel({ room, player, color, tokens, isActive, rank, onPress, onBuyTicket, onPlaceBet, myUid }: { room: LudoRoom, player: LudoPlayer | null, color: TokenColor, tokens: Token[], isActive: boolean, rank: number | null, onPress?: () => void, onBuyTicket?: () => void, onPlaceBet?: () => void, myUid: string }) {
   const pulse = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (isActive) {
@@ -276,11 +282,22 @@ function PlayerPanel({ player, color, tokens, isActive, rank }: { player: LudoPl
   const pTokens = tokens.filter(t => t.color === color);
   
   return (
-    <Animated.View style={[panelStyles.container, { transform: [{ scale: pulse }], borderColor: isActive ? COLOR_BG[color] : 'rgba(255,255,255,0.1)' }]}>
-      <View style={panelStyles.row}>
-        {player ? <GengalAvatar data={player.avatarData} size={32} /> : <View style={panelStyles.emptyAvatar}><Text style={panelStyles.emptyText}>Open</Text></View>}
+    <TouchableOpacity activeOpacity={0.8} onPress={onPress} style={{flex: 1}}>
+      <Animated.View style={[panelStyles.container, { transform: [{ scale: pulse }], borderColor: isActive ? COLOR_BG[color] : 'rgba(255,255,255,0.1)' }]}>
+        <View style={panelStyles.row}>
+        {player ? <GengalAvatar data={player.avatarData} size={32} /> : (
+          <TouchableOpacity activeOpacity={0.7} onPress={onBuyTicket} style={panelStyles.emptyAvatar}>
+            <Text style={panelStyles.emptyText}>Open</Text>
+            {room.gameMode === 'per_game' && room.phase === 'waiting' && <Text style={{fontSize: 8, color: '#D49A0B', fontWeight: 'bold'}}>50💎</Text>}
+          </TouchableOpacity>
+        )}
         <View style={{ flex: 1, marginLeft: 8 }}>
           <Text style={panelStyles.name} numberOfLines={1}>{player?.nickname || PLAYER_NAMES[color]}</Text>
+          {room.gameMode === 'per_token' && player?.uid !== myUid && (
+             <TouchableOpacity style={{backgroundColor: 'rgba(212, 154, 11, 0.2)', paddingHorizontal: 4, borderRadius: 4, alignSelf: 'flex-start', marginTop: 2}} onPress={onPlaceBet}>
+               <Text style={{color: '#D49A0B', fontSize: 9, fontWeight: 'bold'}}>BET 50💎</Text>
+             </TouchableOpacity>
+          )}
           <Text style={panelStyles.colorName}>{color.toUpperCase()}</Text>
         </View>
         {rank !== null && <Text style={[panelStyles.rank, { color: COLOR_BG[color] }]}>#{rank}</Text>}
@@ -290,7 +307,8 @@ function PlayerPanel({ player, color, tokens, isActive, rank }: { player: LudoPl
           <View key={i} style={[panelStyles.smallToken, { backgroundColor: t.position === HOME_PROGRESS ? COLOR_BG[color] : 'rgba(255,255,255,0.1)' }]} />
         ))}
       </View>
-    </Animated.View>
+      </Animated.View>
+    </TouchableOpacity>
   );
 }
 
@@ -350,7 +368,7 @@ function ControlBar({ room, onRoll, rolling, disabled, myUid }: { room: LudoRoom
       <View style={{ flex: 1 }}>
         <Text style={ctrlStyles.header}>{room.phase === 'finished' ? 'GAME OVER' : 'CURRENT TURN'}</Text>
         <Text style={[ctrlStyles.name, { color: COLOR_BG[room.currentTurn] }]}>{name}</Text>
-        <Text style={ctrlStyles.msg}>{(!room.diceRolled && room.phase === 'playing' && !rolling) ? 'Tap the dice to roll' : ''}</Text>
+        <Text style={ctrlStyles.msg}>{(!room.diceRolled && room.phase === 'playing' && !rolling) ? (room.gameMode === 'per_token' ? 'Tap the dice to roll (15💎)' : 'Tap the dice to roll') : ''}</Text>
       </View>
       
       <TouchableOpacity onPress={onRoll} disabled={disabled} activeOpacity={0.7} style={[ctrlStyles.diceWrap, disabled && { opacity: 0.5 }]}>
@@ -435,6 +453,17 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const [secondsLeft, setSecondsLeft] = useState(15);
   const captureAnim = useRef(new Animated.Value(0)).current;
 
+  const [giftTarget, setGiftTarget] = useState<string | null>(null);
+
+  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn } = useGengalVoice('agora');
+  
+  useEffect(() => {
+    if (roomId && myUid) {
+      connectSeat(roomId, "ludo_" + roomId, myUid);
+    }
+    return () => { disconnectSeat(); };
+  }, [roomId, myUid]);
+
   const myPlayer = room?.players.find(p => p.uid === myUid) ?? null;
   const isHost = room?.hostUid === myUid;
   const isMyTurn = myPlayer?.color === room?.currentTurn;
@@ -508,14 +537,65 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
 
   // Actions
   const handleRoll = useCallback(async () => {
-    if (!room || rolling || room.diceRolled || !isMyTurn) return;
-    setRolling(true);
-    try {
-      await rollDice(roomId, myUid, myName, myAvatarData, room);
-    } finally {
-      setRolling(false);
+    if (!isMyTurn || room?.diceRolled || rolling) return;
+    
+    if (room?.gameMode === 'per_token') {
+      if (!profile || profile.coins === undefined || profile.coins < 15) {
+        Alert.alert('Insufficient Coins', 'You need 15 coins to roll the dice.');
+        return;
+      }
     }
-  }, [room, rolling, isMyTurn, roomId, myUid, myName, myAvatarData]);
+
+    setRolling(true);
+    
+    if (room?.gameMode === 'per_token') {
+      try {
+        const { deductUserCoins, creditUserCoins } = await import('../services/coinService');
+        await deductUserCoins(myUid, 15);
+        if (room.hostUid !== myUid) {
+          await creditUserCoins(room.hostUid, 2);
+        }
+      } catch(e) {
+        setRolling(false);
+        Alert.alert('Error', 'Failed to deduct roll fee.');
+        return;
+      }
+    }
+
+    setTimeout(async () => {
+      try {
+        if(room) await rollDice(roomId, myUid, myName, myAvatarData, room);
+      } finally {
+        setRolling(false);
+      }
+    }, 600);
+  }, [isMyTurn, room, rolling, roomId, myUid, myName, profile]);
+
+  const handleBuyTicket = useCallback(async (targetColor: TokenColor) => {
+    if (!profile || profile.coins === undefined || profile.coins < 50) {
+      Alert.alert('Insufficient Coins', 'You need 50 coins to buy a ticket.');
+      return;
+    }
+    if (!room) return;
+    try {
+      await buyLudoTicket(roomId, myUid, myName, myAvatarData, 50, room.hostUid, targetColor);
+    } catch(e: any) {
+      Alert.alert('Error', e.message || 'Failed to buy ticket.');
+    }
+  }, [profile, roomId, myUid, myName, myAvatarData, room]);
+
+  const handlePlaceBet = useCallback(async (targetColor: TokenColor) => {
+    if (!profile || profile.coins === undefined || profile.coins < 50) {
+      Alert.alert('Insufficient Coins', 'You need 50 coins to place a bet.');
+      return;
+    }
+    if (!room) return;
+    try {
+      await placeLudoBet(roomId, myUid, myName, targetColor, 50, room.hostUid);
+    } catch(e: any) {
+      Alert.alert('Error', e.message || 'Failed to place bet.');
+    }
+  }, [profile, roomId, myUid, myName, room]);
 
   const handleTokenPress = useCallback(async (tokenId: string) => {
     if (!room || movingToken || !room.diceRolled) return;
@@ -526,6 +606,15 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       setMovingToken(null);
     }
   }, [room, movingToken, roomId, myUid, myName, myAvatarData]);
+
+  const handleStartGame = useCallback(async () => {
+    if (!isHost) return;
+    if (room && room.players.length < 2) {
+      Alert.alert('Not enough players', 'You need at least one more player to start.');
+      return;
+    }
+    await startGame(roomId);
+  }, [roomId, isHost, room]);
 
   const handleSendChat = useCallback(async () => {
     if (!chatText.trim() || !roomId) return;
@@ -576,22 +665,33 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     <ScreenShell>
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={newStyles.container}>
-          {/* Header */}
-          <View style={newStyles.header}>
-            <View>
-              <Text style={newStyles.royal}>ROYAL</Text>
-              <Text style={newStyles.ludoTitle}>Ludo</Text>
-            </View>
-            <TouchableOpacity onPress={() => startGame(roomId)} style={newStyles.newGameBtn}>
-              <MaterialIcons name="refresh" size={16} color="rgba(255,255,255,0.6)" />
-              <Text style={newStyles.newGameText}>New Game</Text>
+          {/* Header & Actions */}
+          <TopBar navigate={navigate} title="LUDO ARENA" subtitle={`Room: ${roomId}`} />
+          <View style={newStyles.actionBar}>
+            <TouchableOpacity onPress={handleLeave} style={newStyles.actionBtnError}>
+              <MaterialIcons name="exit-to-app" size={16} color="#FFF" />
+              <Text style={newStyles.actionText}>Leave</Text>
             </TouchableOpacity>
+
+            <View style={{flexDirection: 'row', gap: 10}}>
+              <TouchableOpacity onPress={toggleMic} style={[newStyles.actionBtn, micMuted && newStyles.actionBtnError]}>
+                <Ionicons name={micMuted ? "mic-off" : "mic"} size={18} color="#FFF" />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={toggleSpeaker} style={[newStyles.actionBtn, !speakerOn && newStyles.actionBtnError]}>
+                <Ionicons name={speakerOn ? "volume-high" : "volume-mute"} size={18} color="#FFF" />
+              </TouchableOpacity>
+              {isHost && room.phase === 'waiting' && (
+                <TouchableOpacity onPress={handleStartGame} style={newStyles.actionBtn}>
+                  <MaterialIcons name="play-arrow" size={18} color="#FFF" />
+                </TouchableOpacity>
+              )}
+            </View>
           </View>
 
           {/* Top Players */}
           <View style={newStyles.panelsRow}>
-            <PlayerPanel player={room.players.find(p => p.color === 'red') || null} color="red" tokens={room.tokens} isActive={room.currentTurn === 'red'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'red')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'red')?.uid || '') + 1 : null} />
-            <PlayerPanel player={room.players.find(p => p.color === 'green') || null} color="green" tokens={room.tokens} isActive={room.currentTurn === 'green'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'green')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'green')?.uid || '') + 1 : null} />
+            <PlayerPanel room={room} myUid={myUid} player={room.players.find(p => p.color === 'red') || null} color="red" tokens={room.tokens} isActive={room.currentTurn === 'red'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'red')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'red')?.uid || '') + 1 : null} onBuyTicket={() => handleBuyTicket('red')} onPlaceBet={() => handlePlaceBet('red')} />
+            <PlayerPanel room={room} myUid={myUid} player={room.players.find(p => p.color === 'green') || null} color="green" tokens={room.tokens} isActive={room.currentTurn === 'green'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'green')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'green')?.uid || '') + 1 : null} onBuyTicket={() => handleBuyTicket('green')} onPlaceBet={() => handlePlaceBet('green')} />
           </View>
 
           {/* Board */}
@@ -599,8 +699,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
 
           {/* Bottom Players */}
           <View style={newStyles.panelsRow}>
-            <PlayerPanel player={room.players.find(p => p.color === 'blue') || null} color="blue" tokens={room.tokens} isActive={room.currentTurn === 'blue'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'blue')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'blue')?.uid || '') + 1 : null} />
-            <PlayerPanel player={room.players.find(p => p.color === 'yellow') || null} color="yellow" tokens={room.tokens} isActive={room.currentTurn === 'yellow'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'yellow')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'yellow')?.uid || '') + 1 : null} />
+            <PlayerPanel room={room} myUid={myUid} player={room.players.find(p => p.color === 'blue') || null} color="blue" tokens={room.tokens} isActive={room.currentTurn === 'blue'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'blue')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'blue')?.uid || '') + 1 : null} onBuyTicket={() => handleBuyTicket('blue')} onPlaceBet={() => handlePlaceBet('blue')} />
+            <PlayerPanel room={room} myUid={myUid} player={room.players.find(p => p.color === 'yellow') || null} color="yellow" tokens={room.tokens} isActive={room.currentTurn === 'yellow'} rank={room.winnersOrder.indexOf(room.players.find(p => p.color === 'yellow')?.uid || '') > -1 ? room.winnersOrder.indexOf(room.players.find(p => p.color === 'yellow')?.uid || '') + 1 : null} onBuyTicket={() => handleBuyTicket('yellow')} onPlaceBet={() => handlePlaceBet('yellow')} />
           </View>
 
           {/* Control Bar */}
@@ -629,21 +729,51 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       {room.phase === 'finished' && (
         <WinModal room={room} myUid={myUid} onClose={handleLeave} />
       )}
+
+      <Modal visible={!!giftTarget} transparent animationType="fade" onRequestClose={() => setGiftTarget(null)}>
+        <TouchableOpacity style={newStyles.modalOverlay} activeOpacity={1} onPress={() => setGiftTarget(null)}>
+          <View style={newStyles.giftModal} onStartShouldSetResponder={() => true}>
+            <Text style={newStyles.giftTitle}>Send a Gift</Text>
+            <View style={newStyles.giftList}>
+              {LUDO_GIFTS.map(g => (
+                <TouchableOpacity key={g.id} style={newStyles.giftBtn} onPress={() => { 
+                    handleGift(g); 
+                    setGiftTarget(null);
+                    ToastAndroid?.show?.(`Sent ${g.emoji} to player!`, ToastAndroid.SHORT);
+                }}>
+                  <Text style={{fontSize: 32}}>{g.emoji}</Text>
+                  <Text style={{color:'#FFF', fontSize: 12, fontWeight: 'bold'}}>{g.name}</Text>
+                  <Text style={{color:colors.gold, fontSize: 10}}>{g.cost} 💎</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </ScreenShell>
   );
 }
 
 const newStyles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#0B1121' },
+  container: { flex: 1, backgroundColor: colors.backgroundCard },
   header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 20, paddingTop: 10, paddingBottom: 5 },
   royal: { fontFamily: 'monospace', fontSize: 10, textTransform: 'uppercase', letterSpacing: 3, color: 'rgba(255,255,255,0.5)' },
   ludoTitle: { fontSize: 28, fontWeight: 'bold', color: '#F5F5F5' },
   newGameBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(15,23,42,0.8)', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' },
   newGameText: { fontSize: 12, fontWeight: '700', color: 'rgba(255,255,255,0.6)' },
   panelsRow: { flexDirection: 'row', gap: 12, paddingHorizontal: 20, marginVertical: 4 },
-  chatContainer: { flex: 1, marginHorizontal: 20, marginBottom: 10, backgroundColor: 'rgba(15,23,42,0.5)', borderRadius: 16, padding: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)' },
+  chatContainer: { flex: 1, marginHorizontal: 20, marginBottom: 10, backgroundColor: 'rgba(0,0,0,0.4)', borderRadius: 16, padding: 10, borderWidth: 1, borderColor: 'rgba(255,255,255,0.05)' },
   chatScroll: { flex: 1, marginBottom: 8 },
   chatInputRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   chatInput: { flex: 1, backgroundColor: 'rgba(0,0,0,0.3)', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8, color: '#FFF', fontSize: 12 },
-  sendBtn: { backgroundColor: COLOR_BG.blue, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' }
+  sendBtn: { backgroundColor: COLOR_BG.blue, width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  actionBar: { flexDirection: 'row', justifyContent: 'space-between', paddingHorizontal: 20, marginBottom: 10 },
+  actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: colors.plumMuted, paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
+  actionBtnError: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(220,38,38,0.8)', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20 },
+  actionText: { fontSize: 12, fontWeight: 'bold', color: '#FFF' },
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
+  giftModal: { backgroundColor: colors.backgroundElevated, borderRadius: 20, padding: 20, width: '85%', alignItems: 'center', borderWidth: 1, borderColor: colors.gold },
+  giftTitle: { color: colors.textPrimary, fontSize: 20, fontWeight: 'bold', marginBottom: 15 },
+  giftList: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'center', gap: 10 },
+  giftBtn: { backgroundColor: 'rgba(255,255,255,0.05)', padding: 10, borderRadius: 12, alignItems: 'center', width: 70, borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)' }
 });

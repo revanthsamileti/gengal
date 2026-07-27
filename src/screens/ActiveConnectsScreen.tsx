@@ -8,8 +8,10 @@ import { LinearGradient } from 'expo-linear-gradient';
 import ScreenShell from '../components/ScreenShell';
 import TopBar from '../components/TopBar';
 import GengalAvatar from '../components/GengalAvatar';
-import { subscribeToOnlineUsers, UserProfile as FirebaseUser } from '../services/userService';
+import BottomNav from '../components/BottomNav';
+import { subscribeToRecentUsers, UserProfile as FirebaseUser } from '../services/userService';
 import { auth } from '../config/firebase';
+import { useUser } from '../context/UserContext';
 
 type Props = {
   navigate: (screen: string, params?: any) => void;
@@ -19,8 +21,9 @@ type Props = {
 function UserCard({ profile, index, navigate }: { profile: any; index: number; navigate: Props['navigate'] }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(16)).current;
-  const tier = profile.avatarUrl ? 'VIP' : 'Elite';
+  const tier = profile.avatarUrl ? 'VIP' : 'Advance';
   const tierColor = tier === 'VIP' ? '#9A1E8A' : '#B99916';
+  const isActive = profile.isActiveMode === true;
 
   useEffect(() => {
     Animated.parallel([
@@ -43,7 +46,7 @@ function UserCard({ profile, index, navigate }: { profile: any; index: number; n
           ) : (
             <Image source={{ uri: profile.uri }} style={styles.avatarImg} />
           )}
-          <View style={styles.onlineDot} />
+          <View style={[styles.onlineDot, !isActive && styles.inactiveDot]} />
         </View>
 
         {/* Info */}
@@ -59,22 +62,26 @@ function UserCard({ profile, index, navigate }: { profile: any; index: number; n
             <MaterialIcons name="language" size={12} color="#9A7A05" />
             <Text style={styles.metaText}>{profile.lang}</Text>
             <View style={styles.dot} />
-            <MaterialIcons name="circle" size={8} color="#5EBB62" />
-            <Text style={[styles.metaText, { color: '#5EBB62' }]}>Online</Text>
+            <MaterialIcons name="circle" size={8} color={isActive ? '#10B981' : '#B0A49A'} />
+            <Text style={[styles.metaText, { color: isActive ? '#10B981' : '#8A7C70' }]}>
+              {isActive ? 'Active now' : 'Inactive'}
+            </Text>
           </View>
         </View>
 
         {/* Actions */}
         <View style={styles.actions}>
           <TouchableOpacity
-            style={styles.actionBtn}
-            onPress={() => navigate('Call', { profileName: profile.name, mode: 'call', matchData: profile, isCaller: true })}
+            style={[styles.actionBtn, !isActive && styles.actionBtnDisabled]}
+            disabled={!isActive}
+            onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: profile.name, mode: 'call', matchData: profile, isCaller: true  })}
           >
             <MaterialIcons name="phone" size={16} color="#FFF" />
           </TouchableOpacity>
           <TouchableOpacity
-            style={[styles.actionBtn, styles.videoBtn]}
-            onPress={() => navigate('Call', { profileName: profile.name, mode: 'video', matchData: profile, isCaller: true })}
+            style={[styles.actionBtn, styles.videoBtn, !isActive && styles.actionBtnDisabled]}
+            disabled={!isActive}
+            onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: profile.name, mode: 'video', matchData: profile, isCaller: true  })}
           >
             <MaterialIcons name="videocam" size={16} color="#FFF" />
           </TouchableOpacity>
@@ -88,10 +95,12 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
 
+  const { profile: myProfile } = useUser();
+
   useEffect(() => {
-    const unsub = subscribeToOnlineUsers((users) => setFirebaseUsers(users), auth.currentUser?.uid);
+    const unsub = subscribeToRecentUsers((users) => setFirebaseUsers(users), myProfile?.uid);
     return unsub;
-  }, []);
+  }, [myProfile?.uid]);
 
   const displayProfiles = firebaseUsers.map(u => ({
     uid: u.uid,
@@ -101,6 +110,8 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
     avatarUrl: u.avatarUrl,
     avatarData: u.avatarData,
     lang: u.language || 'EN',
+    isActiveMode: u.isActiveMode === true,
+    lastActive: u.lastActive,
   }));
 
   const filtered = displayProfiles.filter(p =>
@@ -116,10 +127,24 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
           {/* Header */}
           <View style={styles.pageHeader}>
             <View>
-              <Text style={styles.pageTitle}>People Online</Text>
-              <Text style={styles.pageCount}>{displayProfiles.length} connected now</Text>
+              <Text style={styles.pageTitle}>More Profiles</Text>
+              <Text style={styles.pageCount}>{displayProfiles.length} recently connected</Text>
             </View>
           </View>
+          
+          <TouchableOpacity 
+            style={{ backgroundColor: 'red', padding: 20, marginBottom: 20, borderRadius: 10, zIndex: 9999 }}
+            onPress={() => {
+              navigate('Call', {
+                roomId: 'test_room',
+                mode: 'video',
+                isCaller: true,
+                matchData: { nickname: 'Test Target', avatarUrl: 'https://i.pravatar.cc/150?u=test', uid: 'test_target_uid' }
+              });
+            }}
+          >
+            <Text style={{ color: 'white', textAlign: 'center', fontWeight: 'bold' }}>TEST CALL RINGING UI</Text>
+          </TouchableOpacity>
 
           {/* Search */}
           <View style={styles.searchBox}>
@@ -141,12 +166,12 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
           {/* Legend */}
           <View style={styles.legend}>
             <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: '#9A1E8A' }]} />
-              <Text style={styles.legendText}>VIP — uploaded photo</Text>
+              <View style={[styles.legendDot, { backgroundColor: '#10B981' }]} />
+              <Text style={styles.legendText}>Active profile</Text>
             </View>
             <View style={styles.legendItem}>
-              <View style={[styles.legendDot, { backgroundColor: '#B99916' }]} />
-              <Text style={styles.legendText}>Elite — avatar only</Text>
+              <View style={[styles.legendDot, { backgroundColor: '#B0A49A' }]} />
+              <Text style={styles.legendText}>Inactive profile</Text>
             </View>
           </View>
 
@@ -156,10 +181,10 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
               <View style={styles.empty}>
                 <MaterialIcons name="people-outline" size={48} color="#D1B23B" />
                 <Text style={styles.emptyTitle}>
-                  {searchQuery ? 'No results found' : 'No one online yet'}
+                  {searchQuery ? 'No results found' : 'No recent users yet'}
                 </Text>
                 <Text style={styles.emptySub}>
-                  {searchQuery ? 'Try a different name' : 'Check back soon!'}
+                  {searchQuery ? 'Try a different name' : 'Only logged-in recent users appear here'}
                 </Text>
               </View>
             ) : (
@@ -169,6 +194,8 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
             )}
           </View>
         </ScrollView>
+        
+        <BottomNav active="Personal" navigate={navigate} />
       </View>
     </ScreenShell>
   );
@@ -211,7 +238,10 @@ const styles = StyleSheet.create({
   onlineDot: {
     position: 'absolute', bottom: 2, right: 2,
     width: 12, height: 12, borderRadius: 6,
-    backgroundColor: '#5EBB62', borderWidth: 2, borderColor: '#FFFDF8',
+    backgroundColor: '#10B981', borderWidth: 2, borderColor: '#FFFDF8',
+  },
+  inactiveDot: {
+    backgroundColor: '#B0A49A',
   },
 
   cardInfo: { flex: 1 },
@@ -230,6 +260,11 @@ const styles = StyleSheet.create({
   actionBtn: {
     width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#7A256D', borderWidth: 1, borderColor: '#7A256D',
+  },
+  actionBtnDisabled: {
+    backgroundColor: '#B8ACA4',
+    borderColor: '#B8ACA4',
+    opacity: 0.65,
   },
   videoBtn: {},
 

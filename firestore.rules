@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // 1. Users collection
+    // Anyone can read profiles, but only the owner can write
+    match /users/{userId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId;
+    }
+
+    // 2. Incoming calls
+    // Only the caller or the receiver can read/write these documents
+    match /incoming_calls/{receiverId} {
+      allow read, update, delete: if request.auth != null && (request.auth.uid == receiverId || resource.data.callerUid == request.auth.uid);
+      allow create: if request.auth != null && request.resource.data.callerUid == request.auth.uid;
+    }
+    
+    // 3. Private Chats
+    // Only participants can read or write
+    match /chats/{chatId} {
+      allow create: if request.auth != null && request.resource.data.participants.hasAny([request.auth.uid]);
+      allow read, update, delete: if request.auth != null && resource.data.participants.hasAny([request.auth.uid]);
+      
+      // Messages inside chats
+      match /messages/{messageId} {
+        allow read, write: if request.auth != null;
+      }
+    }
+
+    // 4. Calls
+    match /calls/{callId} {
+      allow read, write: if request.auth != null;
+      match /{subcollection}/{docId} {
+        allow read, write: if request.auth != null;
+      }
+    }
+
+    // 5. Settings
+    match /settings/{docId} {
+      allow read: if request.auth != null;
+      allow write: if false; // Only admin can change global settings
+    }
+
+    // 6. Public and other Rooms (kept flexible so we don't break app features)
+    match /chill_rooms/{roomId} {
+      allow read, write: if request.auth != null;
+      match /{subcollection}/{docId} { allow read, write: if request.auth != null; }
+    }
+    match /expert_rooms/{roomId} {
+      allow read, write: if request.auth != null;
+      match /{subcollection}/{docId} { allow read, write: if request.auth != null; }
+    }
+    match /public_rooms/{roomId} {
+      allow read, write: if request.auth != null;
+      match /{subcollection}/{docId} { allow read, write: if request.auth != null; }
+    }
+    match /ludo_rooms/{roomId} {
+      allow read, write: if request.auth != null;
+      match /{subcollection}/{docId} { allow read, write: if request.auth != null; }
+    }
+    match /rooms/{roomId} {
+      allow read, write: if request.auth != null;
+      match /{subcollection}/{docId} { allow read, write: if request.auth != null; }
+    }
+    
+    // 7. Matchmaking Pool
+    match /matchmaking_pool/{docId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

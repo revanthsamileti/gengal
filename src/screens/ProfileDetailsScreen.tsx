@@ -1,6 +1,6 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useEffect, useState } from 'react';
 import { Platform, ActivityIndicator,
-  Alert,
   ScrollView,
   StyleSheet,
   Text,
@@ -178,7 +178,8 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
           state: stateText,
           city,
           language,
-          bio: bio.trim()
+          bio: bio.trim(),
+          avatar: avatarData
         });
       }
 

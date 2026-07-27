@@ -6,6 +6,7 @@ import { View, ActivityIndicator, Text, Alert, Animated, Easing, Image } from 'r
 import { auth } from './src/config/firebase';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { useFonts } from 'expo-font';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import HomeScreen from './src/screens/HomeScreen';
 import ExpertRoomScreen from './src/screens/ExpertRoomScreen';
@@ -193,6 +194,11 @@ export default function App() {
   const screen = currentRoute.name;
   const params = currentRoute.params;
 
+  const screenRef = useRef<ScreenName>(screen);
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
+
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -228,34 +234,18 @@ export default function App() {
   }, [navStack.length]);
 
   useEffect(() => {
-    let prevUid: string | null = null;
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsLoading(false);
+      
       if (currentUser) {
-        prevUid = currentUser.uid;
-        updateUserStatus(currentUser.uid, true);
-        try {
-          const profile = await getUserProfile(currentUser.uid);
-          const isComplete = Boolean(profile && profile.username && profile.nickname && profile.age && profile.gender && (profile.avatar3dUrl || profile.avatarData || profile.avatarUrl));
-
-          if (isComplete) {
-            if (['Language', 'Phone', 'Otp', 'FinalizeInvite', 'ProfileDetails', 'Avatar', 'CreatePassword', 'LoginPassword'].includes(screen)) {
-              resetTo('Home');
-            }
-          } else {
-            resetTo('ProfileDetails');
-          }
-        } catch (e) {
-          resetTo('ProfileDetails');
-        }
+        resetTo('Home');
       } else {
-        if (prevUid) updateUserStatus(prevUid, false);
-        prevUid = null;
         resetTo('Language');
       }
-      setIsLoading(false);
     });
 
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
 
   useEffect(() => {
@@ -276,48 +266,50 @@ export default function App() {
   }
 
   return (
-    <ErrorBoundary>
-      <UserProvider>
-        <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
-        {screen === 'Home' && <HomeScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'ExpertRoom' && <ExpertRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Club' && <ClubScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Personal' && <PersonalScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Profile' && (
-          <ProfileScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
-        )}
-        {screen === 'Call' && (
-          <CallScreen profileName={params.profileName} mode={params.mode} roomId={params.roomId} matchData={params.matchData} isCaller={params.isCaller} navigate={navigate} goBack={goBack} />
-        )}
-        {screen === 'Match' && (
-          <MatchScreen profileName={params.profileName} matchData={params.matchData} roomId={params.roomId} navigate={navigate} goBack={goBack} />
-        )}
-        {screen === 'Chat' && (
-          <ChatScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
-        )}
-        {screen === 'Language' && <LanguageScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Phone' && <PhoneScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Otp' && <OtpScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Avatar' && <AvatarScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'FinalizeInvite' && <FinalizeInviteScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'ProfileDetails' && (
-          <ProfileDetailsScreen navigate={navigate} goBack={goBack} route={{ params }} />
-        )}
-        {screen === 'ActiveConnects' && <ActiveConnectsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Activity' && <ActivityScreen navigate={navigate} />}
-        {screen === 'Settings' && <SettingsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'AdminPanel' && <AdminPanelScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Coins' && <CoinsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Earnings' && <EarningsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'CreatePassword' && <CreatePasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'ForgotPassword' && <ForgotPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'LoginPassword' && <LoginPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Celebs' && <CelebsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Chill' && <ChillScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'DumCharadesRoom' && <DumCharadesRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Ludo' && <LudoScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'LudoBoard' && <LudoBoardScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-      </UserProvider>
-    </ErrorBoundary>
+    <SafeAreaProvider>
+      <ErrorBoundary>
+        <UserProvider>
+          <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
+          {screen === 'Home' && <HomeScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'ExpertRoom' && <ExpertRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'Club' && <ClubScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'Personal' && <PersonalScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'Profile' && (
+            <ProfileScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
+          )}
+          {screen === 'Call' && (
+            <CallScreen profileName={params.profileName} mode={params.mode} roomId={params.roomId} matchData={params.matchData} isCaller={params.isCaller} navigate={navigate} goBack={goBack} />
+          )}
+          {screen === 'Match' && (
+            <MatchScreen profileName={params.profileName} matchData={params.matchData} roomId={params.roomId} navigate={navigate} goBack={goBack} />
+          )}
+          {screen === 'Chat' && (
+            <ChatScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
+          )}
+          {screen === 'Language' && <LanguageScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'Phone' && <PhoneScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'Otp' && <OtpScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'Avatar' && <AvatarScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'FinalizeInvite' && <FinalizeInviteScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'ProfileDetails' && (
+            <ProfileDetailsScreen navigate={navigate} goBack={goBack} route={{ params }} />
+          )}
+          {screen === 'ActiveConnects' && <ActiveConnectsScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'Activity' && <ActivityScreen navigate={navigate} />}
+          {screen === 'Settings' && <SettingsScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'AdminPanel' && <AdminPanelScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'Coins' && <CoinsScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'Earnings' && <EarningsScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'CreatePassword' && <CreatePasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'ForgotPassword' && <ForgotPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'LoginPassword' && <LoginPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'Celebs' && <CelebsScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'Chill' && <ChillScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'DumCharadesRoom' && <DumCharadesRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+          {screen === 'Ludo' && <LudoScreen navigate={navigate} goBack={goBack} />}
+          {screen === 'LudoBoard' && <LudoBoardScreen navigate={navigate} goBack={goBack} route={{ params }} />}
+        </UserProvider>
+      </ErrorBoundary>
+    </SafeAreaProvider>
   );
 }

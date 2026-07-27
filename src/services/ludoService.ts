@@ -83,6 +83,9 @@ export interface LudoRoom {
   hostUid: string;
   phase: LudoPhase;
   status: 'live' | 'closed';
+  gameMode: 'per_game' | 'per_token';
+  ticketPrice: number;       // e.g. 50 coins to join
+  audienceBets: Record<string, { color: TokenColor, amount: number }>; // map of uid to bet
   // Players (up to 4)
   players: LudoPlayer[];
   activeMemberCount: number;
@@ -265,6 +268,7 @@ export const createLudoRoom = async (
   hostUid: string,
   hostNickname: string,
   hostAvatarData: any,
+  gameMode: 'per_game' | 'per_token'
 ): Promise<string> => {
   const hostPlayer: LudoPlayer = {
     uid: hostUid,
@@ -279,6 +283,9 @@ export const createLudoRoom = async (
     hostUid,
     phase: 'waiting',
     status: 'live',
+    gameMode,
+    ticketPrice: 50,
+    audienceBets: {},
     players: [hostPlayer],
     activeMemberCount: 1,
     tokens: buildInitialTokens(),
@@ -354,6 +361,13 @@ export const joinLudoRoom = async (
     return { joined: true, asSpectator: true };
   }
 
+  // Join as spectator initially for all new monetized games unless host
+  if (uid !== room.hostUid) {
+    await updateDoc(doc(db, 'ludo_rooms', roomId), { spectatorCount: increment(1) });
+    await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
+    return { joined: true, asSpectator: true };
+  }
+
   // Assign next available color
   const taken = new Set(room.players.map(p => p.color));
   const color = COLORS_ORDER.find(c => !taken.has(c))!;
@@ -361,12 +375,83 @@ export const joinLudoRoom = async (
     uid, nickname, avatarData: avatarData || null,
     color, isHost: false, isOnline: true, score: 0,
   };
+
+  const updatedPlayers = [...room.players, newPlayer];
+  await updateDoc(doc(db, 'ludo_rooms', roomId), {
+    players: updatedPlayers,
+    activeMemberCount: increment(1),
+  });
+  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined the table' });
+  return { joined: true, asSpectator: false };
+};
+
+export const buyLudoTicket = async (
+  roomId: string,
+  uid: string,
+  nickname: string,
+  avatarData: any,
+  ticketPrice: number,
+  hostUid: string,
+  targetColor: TokenColor
+) => {
+  // Deduct from buyer
+  const { deductUserCoins, transferCoins } = await import('./coinService');
+  await deductUserCoins(uid, ticketPrice);
+  // Give 10% commission to host
+  const commission = Math.floor(ticketPrice * 0.1);
+  if (commission > 0) {
+    // We don't have transferCoins directly from app pool, so we just credit host
+    const { creditUserCoins } = await import('./coinService');
+    await creditUserCoins(hostUid, commission);
+  }
+
+  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
+  const room = snap.data() as LudoRoom;
+  
+  if (room.players.find(p => p.color === targetColor)) {
+    throw new Error('Color already taken');
+  }
+
+  const newPlayer: LudoPlayer = {
+    uid, nickname, avatarData: avatarData || null,
+    color: targetColor, isHost: false, isOnline: true, score: 0,
+  };
+
   await updateDoc(doc(db, 'ludo_rooms', roomId), {
     players: [...room.players, newPlayer],
     activeMemberCount: increment(1),
   });
-  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
-  return { joined: true, asSpectator: false };
+  await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: `bought a ticket and joined the table!` });
+};
+
+export const placeLudoBet = async (
+  roomId: string,
+  uid: string,
+  nickname: string,
+  color: TokenColor,
+  amount: number,
+  hostUid: string
+) => {
+  const { deductUserCoins, creditUserCoins } = await import('./coinService');
+  await deductUserCoins(uid, amount);
+  // 10% commission to host
+  const commission = Math.floor(amount * 0.1);
+  if (commission > 0) {
+    await creditUserCoins(hostUid, commission);
+  }
+
+  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
+  const room = snap.data() as LudoRoom;
+  const newBets = { ...room.audienceBets };
+  
+  if (newBets[uid]) {
+    newBets[uid].amount += amount;
+  } else {
+    newBets[uid] = { color, amount };
+  }
+
+  await updateDoc(doc(db, 'ludo_rooms', roomId), { audienceBets: newBets });
+  await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, text: `placed a ${amount} 💎 bet on ${color}!` });
 };
 
 export const leaveLudoRoom = async (roomId: string, uid: string, nickname: string, asSpectator: boolean) => {

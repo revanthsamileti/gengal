@@ -38,7 +38,7 @@ function ModeButton({
     <TouchableOpacity
       activeOpacity={0.85}
       style={[styles.modeButton, isVideo && styles.modeButtonVideo]}
-      onPress={() => navigate('Call', { profileName: (profile as any).name || (profile as any).nickname || (profile as any).username, mode, isCaller: true })}
+      onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: (profile as any).name || (profile as any).nickname || (profile as any).username, mode, isCaller: true  })}
     >
       <MaterialIcons
         name={isVideo ? 'videocam' : 'phone'}
@@ -81,7 +81,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
       name: u.nickname || u.username || 'User',
       age: u.age || 20,
       lang: u.language || 'EN',
-      tier: u.avatarUrl ? 'VIP' : 'Elite',
+      tier: u.avatarUrl ? 'VIP' : 'Advance',
       uri: u.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
       avatarData: u.avatarData,
       bio: u.bio || '',
@@ -93,7 +93,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
       name: myProfile.nickname || myProfile.username || 'User',
       age: myProfile.age || 20,
       lang: myProfile.language || 'EN',
-      tier: myProfile.avatarUrl ? 'VIP' : 'Elite',
+      tier: myProfile.avatarUrl ? 'VIP' : 'Advance',
       uri: myProfile.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
       avatarData: myProfile.avatarData,
       bio: myProfile.bio || '',
@@ -108,7 +108,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
     name: matchData.name || matchData.nickname || 'User',
     age: matchData.age || 20,
     lang: matchData.lang || matchData.language || 'EN',
-    tier: (matchData.avatarUrl || matchData.uri) ? 'VIP' : 'Elite',
+    tier: (matchData.avatarUrl || matchData.uri) ? 'VIP' : 'Advance',
     uri: matchData.uri || matchData.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
     avatarData: matchData.avatarData,
     bio: matchData.bio || '',
@@ -224,29 +224,6 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
               <>
                 <Text style={styles.panelTitle}>Your profile</Text>
                 <View style={styles.ownerActions}>
-                  <TouchableOpacity 
-                    style={styles.ownerButton} 
-                    activeOpacity={0.82}
-                    onPress={() => {
-                      navigate('ProfileDetails', {
-                        isEditMode: true,
-                        returnTo: 'Profile',
-                        name: myProfile?.username || '',
-                        nickname: myProfile?.nickname || '',
-                        dob: myProfile?.age || '',
-                        gender: myProfile?.gender || '',
-                        country: myProfile?.country || '',
-                        state: myProfile?.state || '',
-                        city: myProfile?.city || '',
-                        language: myProfile?.language || '',
-                        bio: myProfile?.bio || '',
-                      });
-                    }}
-                  >
-                    <MaterialIcons name="edit" size={18} color="#836A07" />
-                    <Text style={styles.ownerButtonText}>Edit Profile</Text>
-                  </TouchableOpacity>
-
                   <TouchableOpacity 
                     style={styles.ownerButton} 
                     activeOpacity={0.82}

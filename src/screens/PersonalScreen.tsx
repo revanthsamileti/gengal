@@ -9,7 +9,7 @@ import { Platform, Image,
   View, } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
-import Svg, { Circle, Path, G } from 'react-native-svg';
+
 import ScreenShell from '../components/ScreenShell';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
@@ -33,6 +33,9 @@ type MatchNode = {
   image: string;
   avatarData?: any;
   modes: Array<'call' | 'video'>;
+  liveStatus?: string;
+  feedCategory?: string;
+  city?: string;
 };
 
 type PersonalScreenProps = {
@@ -363,6 +366,78 @@ function MatchRow({
   );
 }
 
+
+function ConnectCard({
+  node,
+  navigate,
+}: {
+  node: MatchNode;
+  navigate: PersonalScreenProps['navigate'];
+}) {
+  const isBusy = node.liveStatus === 'busy';
+  const tierColor = node.tier === 'VIP' ? '#9A1E8A' : '#B99916';
+  
+  return (
+    <View style={styles.connectCardWrapper}>
+      {node.feedCategory ? (
+        <View style={styles.cardCategoryBadge}>
+          <Text style={styles.cardCategoryBadgeText}>{node.feedCategory}</Text>
+        </View>
+      ) : null}
+      <TouchableOpacity
+        activeOpacity={0.88}
+        style={[styles.connectCard, isBusy && styles.connectCardBusy]}
+        onPress={() => navigate('Profile', { profileName: node.name, matchData: node })}
+      >
+        <LinearGradient
+          colors={node.liveStatus === 'available' ? ['#34D399', '#10B981'] : (isBusy ? ['#FF9999', '#CC0000'] : ['#FFF4CA', '#EAD06F'])}
+          style={styles.connectAvatarRing}
+        >
+          <View style={styles.connectAvatarInner}>
+            {node.avatarData ? (
+              <GengalAvatar data={node.avatarData} size={70} />
+            ) : (
+              <Image source={{ uri: node.image }} style={styles.connectAvatarImage} />
+            )}
+          </View>
+        </LinearGradient>
+        
+        <View style={styles.connectCardInfo}>
+          <View style={styles.connectNameRow}>
+            <Text style={styles.connectName} numberOfLines={1}>{node.name}, {node.age}</Text>
+            {node.liveStatus && (
+              <View style={[styles.connectLiveBadge, isBusy && { backgroundColor: '#CC0000' }]}>
+                <Text style={styles.connectLiveBadgeText}>{node.liveStatus.toUpperCase()}</Text>
+              </View>
+            )}
+          </View>
+          <View style={styles.connectMetaRow}>
+            <View style={[styles.connectTierBadge, { borderColor: tierColor }]}>
+              <MaterialIcons name="diamond" size={10} color={tierColor} />
+              <Text style={[styles.connectTierText, { color: tierColor }]}>{node.tier}</Text>
+            </View>
+            <View style={styles.connectDot} />
+            <MaterialIcons name="language" size={12} color="#8A7C70" />
+            <Text style={styles.connectMetaText}>{node.language}</Text>
+            {node.city && (
+              <>
+                <View style={styles.connectDot} />
+                <MaterialIcons name="location-on" size={12} color="#8A7C70" />
+                <Text style={styles.connectMetaText}>{node.city}</Text>
+              </>
+            )}
+          </View>
+          <View style={styles.connectActions}>
+            {node.modes.map((mode) => (
+              <ModeButton key={mode} mode={mode} node={node} navigate={navigate} />
+            ))}
+          </View>
+        </View>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 export default function PersonalScreen({ navigate }: PersonalScreenProps) {
   const [selectedLanguage, setSelectedLanguage] = useState('ALL');
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
@@ -402,7 +477,7 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
   }, [vipOnly]);
 
   const combinedProfiles = useMemo(() => {
-    return firebaseUsers.map(u => ({
+    let profiles = firebaseUsers.map(u => ({
       uid: u.uid,
       name: u.nickname || u.username || 'User',
       age: u.age || 20,
@@ -412,6 +487,38 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
       avatarData: u.avatarData,
       modes: ['call', 'video'] as Array<'call' | 'video'>
     }));
+    
+    // Fallback dummy data for UI testing if empty
+    if (profiles.length === 0) {
+      profiles = [
+        {
+          uid: 'dummy1',
+          name: 'Sarah',
+          age: 24,
+          lang: 'EN',
+          tier: 'VIP',
+          uri: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200',
+          modes: ['call', 'video'],
+          liveStatus: 'available',
+          feedCategory: '?? Top Stars',
+          city: 'New York',
+        } as any,
+        {
+          uid: 'dummy2',
+          name: 'Priya',
+          age: 22,
+          lang: 'HI',
+          tier: 'Elite',
+          uri: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=200',
+          modes: ['video'],
+          liveStatus: 'busy',
+          feedCategory: '?? Discovery',
+          city: 'Mumbai',
+        } as any
+      ];
+    }
+    
+    return profiles;
   }, [firebaseUsers]);
 
   const MATCHES: MatchNode[] = useMemo(() => {
@@ -466,7 +573,28 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.scroll}
         >
-          <PathBackground matchCount={sortedMatches.length} isEndRight={isEndRight} />
+          
+          <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', justifyContent: 'center', marginTop: 10, marginBottom: 10 }}>
+            <TouchableOpacity 
+              style={styles.randomButtonSmall}
+              activeOpacity={0.85}
+              onPress={() => handleRandomMatch()}
+              accessibilityLabel="Random match"
+            >
+              <MaterialIcons name={isSearching ? 'close' : 'favorite'} size={24} color="#D2B243" />
+              <Text style={{fontWeight: 'bold', color: '#D2B243', marginLeft: 4}}>Random Match</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              activeOpacity={0.85} 
+              style={styles.moreButtonSmall}
+              onPress={() => navigate('ActiveConnects')}
+              accessibilityLabel="More profiles"
+            >
+              <MaterialIcons name="more-horiz" size={24} color="#887006" />
+              <Text style={{fontWeight: 'bold', color: '#887006', marginLeft: 4}}>All Connects</Text>
+            </TouchableOpacity>
+          </View>
+
 
 
 
@@ -490,14 +618,23 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
             </TouchableOpacity>
           </View>
 
-          <View style={styles.matchList}>
-            {sortedMatches.map((node, index) => (
-              <MatchRow key={node.uid || (node.name + index)} node={node} index={index} navigate={navigate} />
-            ))}
+          
+          <View style={styles.feedArea}>
+            {sortedMatches.map((node: MatchNode, index: number) => {
+              const isFirstInCategory = index === 0 || sortedMatches[index - 1].feedCategory !== node.feedCategory;
+              return (
+                <ConnectCard 
+                  key={node.uid || (node.name + index)} 
+                  node={{ ...node, feedCategory: isFirstInCategory ? node.feedCategory : undefined }} 
+                  navigate={navigate} 
+                />
+              );
+            })}
           </View>
 
+
           <View style={[
-            styles.randomWrap,
+            undefined,
             !isEndRight ? { justifyContent: 'flex-start', paddingLeft: 28, paddingRight: 0 } : {}
           ]}>
             {!isEndRight && (
@@ -932,5 +1069,143 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 0,
     left: 0,
+  },
+
+  feedArea: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 40,
+    gap: 16,
+  },
+  connectCardWrapper: {
+    marginBottom: 8,
+  },
+  cardCategoryBadge: {
+    alignSelf: 'flex-start',
+    backgroundColor: '#4B0054',
+    paddingHorizontal: 12,
+    paddingVertical: 4,
+    borderRadius: 12,
+    marginBottom: -10,
+    marginLeft: 16,
+    zIndex: 2,
+    borderWidth: 1,
+    borderColor: '#7A256D',
+  },
+  cardCategoryBadgeText: {
+    color: '#FFF',
+    fontSize: 10,
+    fontWeight: 'bold',
+  },
+  connectCard: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(255, 253, 248, 0.95)',
+    borderRadius: 20,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: '#E8D1A7',
+    alignItems: 'center',
+    gap: 12,
+  },
+  connectCardBusy: {
+    borderColor: '#FFCCCC',
+    backgroundColor: '#FFF5F5',
+  },
+  connectAvatarRing: {
+    padding: 3,
+    borderRadius: 40,
+  },
+  connectAvatarInner: {
+    backgroundColor: '#FFF',
+    borderRadius: 37,
+    padding: 2,
+  },
+  connectAvatarImage: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+  },
+  connectCardInfo: {
+    flex: 1,
+    gap: 6,
+  },
+  connectNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  connectName: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: '#4B0054',
+    flexShrink: 1,
+  },
+  connectLiveBadge: {
+    backgroundColor: '#10B981',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
+  connectLiveBadgeText: {
+    color: '#FFF',
+    fontSize: 9,
+    fontWeight: 'bold',
+  },
+  connectMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flexWrap: 'wrap',
+  },
+  connectTierBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    borderWidth: 1,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 8,
+  },
+  connectTierText: {
+    fontSize: 9,
+    fontWeight: 'bold',
+  },
+  connectMetaText: {
+    fontSize: 12,
+    color: '#8A7C70',
+  },
+  connectDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: '#D1C8C0',
+    marginHorizontal: 2,
+  },
+  connectActions: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 4,
+  },
+  randomButtonSmall: {
+    height: 44,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFDF8',
+    borderWidth: 1.5,
+    borderColor: '#D2B243',
+  },
+  moreButtonSmall: {
+    height: 44,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFDF8',
+    borderWidth: 1.5,
+    borderColor: '#D2B243',
   },
 });

@@ -1,3 +1,4 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Platform,
@@ -8,8 +9,7 @@ import {
   View,
   Modal,
   ActivityIndicator,
-  Animated,
-} from 'react-native';
+  Animated } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
@@ -24,6 +24,7 @@ import {
   subscribeToChillRooms,
   createChillRoom,
 } from '../services/chillService';
+import { deductUserCoins } from '../services/coinService';
 import {
   LudoRoom,
   subscribeToLudoRooms,
@@ -330,6 +331,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
   const [charadeRooms, setCharadeRooms] = useState<ChillRoom[]>([]);
   const [ludoRooms, setLudoRooms] = useState<LudoRoom[]>([]);
   const [showCreateCharades, setShowCreateCharades] = useState(false);
+  const [ludoCreateModalVisible, setLudoCreateModalVisible] = useState(false);
   const [creatingLudo, setCreatingLudo] = useState(false);
   const [joiningLudoId, setJoiningLudoId] = useState<string | null>(null);
   const [langFilter, setLangFilter] = useState<string | null>(null);
@@ -357,15 +359,24 @@ export default function ChillScreen({ navigate, goBack }: Props) {
   }, [navigate]);
 
   // Ludo actions
-  const handleCreateLudo = useCallback(async () => {
+  const handleCreateLudo = useCallback(async (mode: 'per_game' | 'per_token') => {
+    if (!profile || profile.coins === undefined || profile.coins < 10) {
+      Alert.alert('Insufficient Coins', 'You need at least 10 coins to create a room.');
+      return;
+    }
     setCreatingLudo(true);
+    setLudoCreateModalVisible(false);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData);
+      await deductUserCoins(myUid, 10);
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', 'Failed to create room.');
     } finally {
       setCreatingLudo(false);
     }
-  }, [myUid, myName, myAvatarData, navigate]);
+  }, [myUid, myName, myAvatarData, navigate, profile]);
 
   const handleJoinLudo = useCallback(async (room: LudoRoom) => {
     if (!room.id || joiningLudoId) return;
@@ -525,7 +536,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                 <TouchableOpacity
                   style={[styles.createBtn, { backgroundColor: '#1A6B33', borderColor: 'rgba(94,187,98,0.3)' },
                     creatingLudo && styles.createBtnLoading]}
-                  onPress={handleCreateLudo}
+                  onPress={() => setLudoCreateModalVisible(true)}
                   disabled={creatingLudo}
                   activeOpacity={0.82}
                 >
@@ -562,7 +573,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                     <TouchableOpacity
                       style={[styles.emptyBtn, { backgroundColor: '#1A6B33' },
                         creatingLudo && styles.createBtnLoading]}
-                      onPress={handleCreateLudo}
+                      onPress={() => setLudoCreateModalVisible(true)}
                       disabled={creatingLudo}
                     >
                       {creatingLudo
@@ -584,24 +595,52 @@ export default function ChillScreen({ navigate, goBack }: Props) {
             </>
           )}
 
-          <View style={{ height: 110 }} />
         </ScrollView>
+
+        <Modal visible={ludoCreateModalVisible} transparent animationType="slide" onRequestClose={() => setLudoCreateModalVisible(false)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
+            <View style={{ backgroundColor: '#FFFDF8', width: '85%', borderRadius: 20, padding: 24, alignItems: 'center' }}>
+              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#4A3600', marginBottom: 8 }}>Choose Game Mode</Text>
+              <Text style={{ fontSize: 13, color: '#7E7368', textAlign: 'center', marginBottom: 20 }}>
+                Creating a room costs 10 coins. You will earn a 10% commission from player tickets and bets!
+              </Text>
+              
+              <TouchableOpacity style={[styles.createBtn, { width: '100%', marginBottom: 12, backgroundColor: '#4A3600', justifyContent: 'center' }]} onPress={() => handleCreateLudo('per_game')}>
+                <Text style={{color: '#FFF', fontWeight: '800'}}>Per Game Mode</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
+                Players buy a fixed ticket (50 coins) to join your table.
+              </Text>
+
+              <TouchableOpacity style={[styles.createBtn, { width: '100%', backgroundColor: '#1A6B33', marginBottom: 12, justifyContent: 'center' }]} onPress={() => handleCreateLudo('per_token')}>
+                <Text style={{color: '#FFF', fontWeight: '800'}}>Per Token Mode</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
+                Audience bets on colors, and every dice roll costs 15 coins.
+              </Text>
+
+              <TouchableOpacity onPress={() => setLudoCreateModalVisible(false)} style={{ padding: 10 }}>
+                <Text style={{ color: '#8B7A6A', fontWeight: 'bold' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        <CreateCharadesModal
+          visible={showCreateCharades}
+          onClose={() => setShowCreateCharades(false)}
+          onCreate={handleCreateCharades}
+        />
 
         <BottomNav active="Chill" navigate={navigate} />
       </View>
-
-      <CreateCharadesModal
-        visible={showCreateCharades}
-        onClose={() => setShowCreateCharades(false)}
-        onCreate={handleCreateCharades}
-      />
     </ScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 24 },
+  scroll: { paddingBottom: 110 },
   heroPanel: {
     marginHorizontal: 14,
     marginTop: 14,

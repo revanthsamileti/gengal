@@ -18,6 +18,7 @@ import { sendOTP, verifyOTP } from '../services/authService';
 import { collection, query, where, getDocs, updateDoc, doc } from 'firebase/firestore';
 import { db, auth } from '../config/firebase';
 import { signInWithCustomToken } from 'firebase/auth';
+import { getUserProfile } from '../services/userService';
 
 type Props = {
   navigate: (screen: string, params?: any) => void;
@@ -107,8 +108,20 @@ export default function ForgotPasswordScreen({ navigate, route }: Props) {
           }
           
           // Log in with the custom token
-          await signInWithCustomToken(auth, verifiedToken);
-          // App.tsx onAuthStateChanged will detect login and automatically navigate
+          const userCredential = await signInWithCustomToken(auth, verifiedToken);
+          
+          if (userCredential.user) {
+            const profile = await getUserProfile(userCredential.user.uid);
+            const isComplete = Boolean(profile && (profile.username || profile.nickname || profile.coins !== undefined || profile.createdAt));
+            
+            if (isComplete) {
+              navigate('Home');
+            } else {
+              navigate('ProfileDetails', { isEditMode: true, returnTo: 'Home' });
+            }
+          } else {
+            navigate('Home');
+          }
         } catch (error: any) {
           setErrorMsg(error.message || "Failed to reset password");
         } finally {

@@ -259,7 +259,7 @@ export default function ActivityScreen({ navigate }: Props) {
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { padding: 16, paddingBottom: 90 },
+  scroll: { padding: 16, paddingBottom: 110 },
 
   pageTitle: {
     fontSize: 26, fontWeight: '900', color: '#4B0054',

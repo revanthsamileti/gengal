@@ -1,13 +1,15 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Platform, Modal } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform, Modal } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { auth, db } from '../config/firebase';
-import { deleteUser, signOut } from 'firebase/auth';
+import { deleteUser } from 'firebase/auth';
 import { doc, deleteDoc } from 'firebase/firestore';
 import ScreenShell from '../components/ScreenShell';
 import { useUser } from '../context/UserContext';
 import GengalAvatar from '../components/GengalAvatar';
+import { clearAuthSession, logout } from '../services/authService';
 
 type SettingsScreenProps = {
   navigate: (screen: string, params?: any) => void;
@@ -15,7 +17,7 @@ type SettingsScreenProps = {
 };
 
 const MENU_ITEMS = [
-  { key: 'avatar', label: 'Edit Avatar & Profile', icon: 'face', color: '#9333EA', bg: '#F3E8FF', screen: 'FinalizeInvite' },
+  { key: 'avatar', label: 'Edit Avatar & Profile', icon: 'face', color: '#9333EA', bg: '#F3E8FF', screen: 'FinalizeInvite', params: { isEditMode: true } },
   { key: 'language', label: 'App Language', icon: 'language', color: '#F97316', bg: '#FFEDD5', screen: 'Language', params: { isEditMode: true, returnTo: 'Settings' } },
   { key: 'coins', label: 'Buy Coins', icon: 'monetization-on', color: '#D49A0B', bg: '#FFF8DD', screen: 'Coins' },
   { key: 'earnings', label: 'Earnings', icon: 'account-balance-wallet', color: '#16A34A', bg: '#DCFCE7', screen: 'Earnings' },
@@ -29,7 +31,7 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await logout();
     } catch (e) {
       Alert.alert('Error', 'Failed to log out.');
     }
@@ -42,11 +44,12 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
     setIsDeleting(true);
     try {
       await deleteDoc(doc(db, 'users', user.uid));
+      await clearAuthSession();
       await deleteUser(user);
     } catch (error: any) {
       if (error.code === 'auth/requires-recent-login') {
         Alert.alert('Security Verification', 'Please log in again before deleting your account.');
-        await signOut(auth);
+        await logout();
       } else {
         Alert.alert('Error', 'Could not delete account. Please try again.');
       }
@@ -54,7 +57,7 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
     }
   };
 
-  const tier = profile?.avatarUrl ? 'VIP' : 'Elite';
+  const tier = profile?.avatarUrl ? 'VIP' : 'Advance';
   const tierColor = tier === 'VIP' ? '#9A1E8A' : '#B99916';
 
   return (
@@ -71,7 +74,7 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
 
         {/* Profile card */}
         {profile && (
-          <TouchableOpacity style={styles.profileCard} activeOpacity={0.88} onPress={() => navigate('FinalizeInvite')}>
+          <TouchableOpacity style={styles.profileCard} activeOpacity={0.88} onPress={() => navigate('FinalizeInvite', { isEditMode: true, existingAvatarData: profile.avatarData, gender: profile.gender })}>
             <View style={styles.avatarWrap}>
               {profile.avatarData ? (
                 <GengalAvatar data={profile.avatarData as any} size={56} />

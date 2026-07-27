@@ -32,10 +32,30 @@ yarn-error.*
 
 # local env files
 .env*.local
+.env
+.env.*
+!/.env.example
+**/serviceAccountKey.json
 
 # typescript
 *.tsbuildinfo
 
+# generated diagnostics and local build artifacts
+*.log
+*.apk
+*.zip
+*.xml
+screen*.png
+audit*.png
+phone*_screen*.png
+window_dump*.xml
+backend/venv/
+temp_media/
+.gradle-user-home/
+.jdk/
+.tmp/
+
 # generated native folders
 /ios
 /android
+.aider*

@@ -7,6 +7,7 @@ import { skeuo } from '../theme/skeuomorphic';
 import { auth, db } from '../config/firebase';
 import { signInWithCustomToken } from 'firebase/auth';
 import { doc, setDoc } from 'firebase/firestore';
+import { saveAuthSession } from '../services/authService';
 
 export default function CreatePasswordScreen({ navigate, goBack, route }: any) {
   const { params } = route || {};
@@ -50,10 +51,16 @@ export default function CreatePasswordScreen({ navigate, goBack, route }: any) {
         avatarData: params.avatar,
         password: password, // Note: In a real app, hash this or use proper providers.
         coins: 0,
+        isActiveMode: true,
+        isOnline: true,
+        isSessionActive: true,
+        lastActive: new Date().toISOString(),
         createdAt: new Date().toISOString(),
       });
+      await saveAuthSession(params.phone, password);
 
-      // App.tsx onAuthStateChanged will detect the login and route to Home!
+      // 3. Navigate manually since App.tsx is ignoring auth changes during CreatePassword
+      navigate('Home');
     } catch (error: any) {
       setErrorMsg(error.message || 'Failed to create account');
       setIsLoading(false);

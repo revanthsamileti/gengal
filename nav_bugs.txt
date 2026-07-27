@@ -1,0 +1,126 @@
+## Full Navigation &amp; BottomNav Analysis — All Issues Found
+
+I've read every file requested. Here is the comprehensive list of issues:
+
+---
+
+### 1. BottomNav Component Issues (`src/components/BottomNav.tsx`)
+
+**A. Missing tab: "ExpertRoom" screen is absent from the nav tabs**
+- The TABS array defines 5 tabs: `Home`, `Club`, `Chill`, `Activity`, `Personal`
+- `ExpertRoom` is NOT in the tabs — but it has BottomNav with `active="Club"` (line 477 of ExpertRoomScreen). This is intentional (sub-screen of Club), but users inside an ExpertRoom can't navigate to ExpertRoom's parent or any other tab easily since they'll get pushed onto the stack.
+
+**B. "Celebs" tab is NOT in the BottomNav TABS array — but CelebsScreen renders `<BottomNav active="Celebs" />`**
+- **CelebsScreen (line 477)**: `<BottomNav active="Celebs" navigate={navigate} />`
+- But the TabId type includes `'Celebs'` and the TABS array does NOT include a Celebs entry.
+- **BUG**: On CelebsScreen, NO tab will be highlighted as active because none of the TABS have `id === 'Celebs'`. The user sees the bottom nav with zero active tabs — confusing UI.
+
+**C. TabId type includes `'Celebs' | 'Chill'` but only `'Chill'` has a TABS entry**
+- TabId = `'Home' | 'Club' | 'Personal' | 'Activity' | 'Celebs' | 'Chill'`
+- TABS array: Home, Club, Chill, Activity, Personal — **Celebs is declared in the type but missing from the rendered tabs**
+
+**D. No `zIndex` on the container**
+- `container` style: `position: 'absolute', bottom: 0, left: 0, right: 0` — but **no `zIndex`**.
+- On ExpertRoomScreen, the `loadingOverlay` uses `StyleSheet.absoluteFill` which will render OVER the BottomNav. Modals and overlays can visually cover the nav.
+
+**E. Accessibility issues**
+- No `accessibilityRole="tab"` on TouchableOpacity items
+- No `accessibilityLabel` on any tab
+- No `accessibilityState={{ selected: isActive }}` for screen readers
+- The icon + label structure has no semantic grouping for assistive tech
+
+**F. No safe area bottom padding on Android**
+- `paddingBottom: Platform.OS === 'ios' ? 24 : 12` — Android gets 12px which may not be enough for phones with gesture navigation bars (should use `useSafeAreaInsets()`)
+
+**G. No `elevation` / `boxShadow` for native Android/iOS**
+- `boxShadow` is only applied for `Platform.OS === 'web'`. On native platforms, the nav bar has no visual shadow/elevation, making it blend into content.
+
+---
+
+### 2. ScreenShell Issues (`src/components/ScreenShell.tsx`)
+
+**A. No bottom padding for BottomNav**
+- ScreenShell wraps children in `SafeAreaView` with `flex: 1` but provides **no bottom padding/margin** to account for the absolutely-positioned BottomNav (~90px tall).
+- Each screen must manually add `paddingBottom: 90-126` to its ScrollView content. This is fragile — some screens do it, some may not match.
+
+**B. `maxWidth: 480` on web vs screen `maxWidth: 430`**
+- ScreenShell uses `maxWidth: 480` for web, but every screen's `.phone` container uses `maxWidth: 430`. This creates a 50px discrepancy — the ScreenShell background extends 25px wider on each side than the content.
+
+**C. Unused import**
+- `import Svg, { Path } from 'react-native-svg'` is imported but never used in ScreenShell.
+
+---
+
+### 3. App.tsx Navigation Stack Issues
+
+**A. `navigate()` always PUSHES — tab switches create infinite stack growth**
+- The `navigate()` function (line 203-209) always does `[...prev, { name: next, params }]`.
+- When a user taps Home → Club → Personal → Home → Club repeatedly via BottomNav, the stack grows: `[Language, Home, Club, Personal, Home, Club, ...]`
+- **Tapping `goBack()` from Home will go to Personal, then Club, then Home again** — extremely confusing UX. Bottom tab screens should RESET the stack (or replace the top entry), not push.
+
+**B. `goBack()` on tab screens leads to wrong screen**
+- Because tab switches push, pressing hardware back on Android after tabbing through Home→Club→Chill→Personal will walk backwards through ALL visited tabs instead of exiting the app.
+
+**C. `goBack()` stale closure in BackHandler**
+- The `useEffect` for BackHandler (line 215-228) depends on `[navStack.length]` but calls `goBack()` which is captured via closure. Since `goBack` uses `setNavStack(prev => ...)` with a functional update this is technically safe, but the effect re-registers on every stack change (unnecessary overhead). More importantly, `navStack.length` change is the dependency — not `navStack` itself — so the `if (navStack.length > 1)` check inside the callback uses a stale `navStack.length` from the closure, not the current one. This could cause edge-case bugs.
+
+**D. `ActivityScreen` is NOT given `goBack` prop**
+- Line 307: `{screen === 'Activity' && <ActivityScreen navigate={navigate} />}` — **no `goBack` prop passed**
+- All other screens get `goBack`. If ActivityScreen ever needs to go back, it can't.
+
+**E. `resetTo()` is never called when switching tabs**
+- `resetTo()` is only called during auth flow (lines 242-253). Tab switches via BottomNav call `navigate()` which pushes. There's no mechanism for BottomNav to reset the stack.
+
+**F. No duplicate-screen guard**
+- If a user taps the same tab twice, `navigate()` will push a duplicate of the current screen onto the stack. There's no check for `if (next === currentRoute.name) return;`.
+
+---
+
+### 4. Screen-by-Screen BottomNav Integration Issues
+
+| Screen | Has BottomNav? | `active` value | Issues |
+|---|---|---|---|
+| **HomeScreen** | ✅ Yes (line 317) | `"Home"` | ✅ Correct |
+| **ClubScreen** | ✅ Yes (line 226) | `"Club"` | ✅ Correct |
+| **ExpertRoomScreen** | ✅ Yes (line 477) | `"Club"` | ⚠️ BottomNav shown in a live room — inappropriate. Users in a live Expert Room see a full bottom nav bar overlapping the action bar. The action bar (chat, raise hand, gift, exit) sits ABOVE the BottomNav, which is confusing. The BottomNav should likely be hidden on this immersive screen. |
+| **PersonalScreen** | ✅ Yes (line 531) | `"Personal"` | ✅ Correct |
+| **CelebsScreen** | ✅ Yes (line 477) | `"Celebs"` | ❌ **BUG**: `"Celebs"` is not in the TABS array — no tab is highlighted. User sees nav with no active indicator. |
+| **ChillScreen** | ✅ Yes (line 602) | `"Chill"` | ✅ Correct |
+| **ActivityScreen** | ✅ Yes (line 254) | `"Activity"` | ✅ Correct, but no `goBack` prop from App.tsx |
+
+**Screens that should probably NOT show BottomNav:**
+- **ExpertRoomScreen** — This is an immersive live room experience. Having the BottomNav here is odd. The action bar + BottomNav creates a double-bar at the bottom.
+
+---
+
+### 5. ExpertRoomScreen-Specific Nav Issues
+
+**A. Double bottom bar**
+- The screen renders both an `actionBar` (line 426-475: chat input, raise hand, gift, exit buttons) AND `<BottomNav>` (line 477).
+- The BottomNav is `position: absolute, bottom: 0` — it will visually overlap or sit beneath the action bar depending on layout. This creates a confusing double-bar UI.
+
+**B. BottomNav z-index conflict with `loadingOverlay`**
+- Line 589-593: `loadingOverlay` uses `StyleSheet.absoluteFill` which covers the entire screen including the BottomNav. No `zIndex` management.
+
+---
+
+### 6. ChillScreen Layout Issue
+
+**A. Modals rendered OUTSIDE the `<View style={styles.phone}>` container but INSIDE `<ScreenShell>`**
+- The `ludoCreateModalVisible` Modal (line 605-632) and `CreateCharadesModal` (line 634-638) are rendered between `</View>` (phone container close) and `</ScreenShell>`. This means they're siblings of the phone container, not children. On web, this could cause layout issues since ScreenShell has `maxWidth: 480`.
+
+---
+
+### 7. Summary of Critical Issues (Ranked by Severity)
+
+1. **🔴 CRITICAL: Tab navigation pushes instead of resetting** — infinite stack growth, broken back navigation
+2. **🔴 CRITICAL: CelebsScreen active="Celebs" doesn't match any tab** — no tab highlighted
+3. **🟡 HIGH: ExpertRoomScreen has double bottom bar** — action bar + BottomNav overlap
+4. **🟡 HIGH: No duplicate navigation guard** — same screen can be pushed repeatedly
+5. **🟡 HIGH: ActivityScreen missing `goBack` prop**
+6. **🟠 MEDIUM: No zIndex on BottomNav** — overlays can cover it
+7. **🟠 MEDIUM: No accessibility attributes on tabs**
+8. **🟠 MEDIUM: No native shadow/elevation on BottomNav** (web-only shadow)
+9. **🟡 LOW: ScreenShell maxWidth (480) vs screen maxWidth (430) mismatch**
+10. **🟡 LOW: Safe area not properly handled on Android gesture nav**
+11. **🟡 LOW: Unused SVG import in ScreenShell**
