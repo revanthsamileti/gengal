@@ -155,7 +155,7 @@ export const sendOTP = async (phoneNumber: string): Promise<void> => {
         'Content-Type': 'application/json',
         'Bypass-Tunnel-Reminder': 'true' // Bypass localtunnel warning page
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ phone: formattedPhone }),
     });
 
     if (!response.ok) {
@@ -199,7 +199,7 @@ export const checkUserExists = async (phoneNumber: string): Promise<boolean> => 
         'Content-Type': 'application/json',
         'Bypass-Tunnel-Reminder': 'true'
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ phone: formattedPhone }),
     });
 
     if (!response.ok) {
@@ -230,7 +230,7 @@ export const verifyOTP = async (phoneNumber: string, code: string, authMode: 'si
         'Content-Type': 'application/json',
         'Bypass-Tunnel-Reminder': 'true'
       },
-      body: JSON.stringify({ otp: code }),
+      body: JSON.stringify({ phone: formattedPhone, otp: code }),
     });
 
     if (!response.ok) {
@@ -271,7 +271,7 @@ export const loginWithPassword = async (phoneNumber: string, password: string, p
         'Content-Type': 'application/json',
         'Bypass-Tunnel-Reminder': 'true'
       },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ phone: formattedPhone, password }),
     });
 
     if (!response.ok) {
