@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from werkzeug.security import check_password_hash
 import json
 import os
 try:
@@ -44,6 +45,18 @@ def verify_password(password, stored):
         _, rounds, salt, expected = parts
         digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(rounds)).hex()
         return hmac.compare_digest(digest, expected)
+    # Werkzeug-format hashes ("scrypt:...$salt$hash", "pbkdf2:sha256:...$..."),
+    # written by an earlier code path into /user_credentials. Without this the
+    # verifier fell straight through to the plaintext branch below, which is
+    # off in production -- so every account holding one was locked out of its
+    # own password entirely. login_password migrates these to the native format
+    # on the next successful sign-in.
+    if ":" in parts[0]:
+        try:
+            return check_password_hash(stored, password)
+        except Exception as e:
+            print(f"[AUTH] Could not verify werkzeug-format hash: {e}", flush=True)
+            return False
     # Legacy plaintext comparison, kept only to migrate accounts created before
     # hashing existed. Opt in explicitly; leave it off in production.
     if os.environ.get("ALLOW_LEGACY_PLAINTEXT_LOGIN") == "true":
