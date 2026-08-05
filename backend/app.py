@@ -126,7 +126,13 @@ def parse_positive_number(value, field_name):
 
 # Initialize Firebase Admin
 try:
-    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_creds_json = env_value("FIREBASE_CREDENTIALS_JSON")
+    if firebase_creds_json:
+        # Load from environment variable (preferred; never stores credentials in git)
+        cred = credentials.Certificate(json.loads(firebase_creds_json))
+    else:
+        # Fallback to serviceAccountKey.json for backwards compatibility
+        cred = credentials.Certificate("serviceAccountKey.json")
     firebase_admin.initialize_app(cred)
     print("Firebase Admin initialized successfully.")
 except Exception as e:
