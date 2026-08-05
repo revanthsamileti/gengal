@@ -14,14 +14,14 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
-import { sendOTP, verifyOTP } from '../services/authService';
-import { collection, query, where, getDocs, updateDoc, doc } from 'firebase/firestore';
-import { db, auth } from '../config/firebase';
+import { sendOTP, verifyOTP, setAccountPassword } from '../services/authService';
+import { auth } from '../config/firebase';
 import { signInWithCustomToken } from 'firebase/auth';
 import { getUserProfile } from '../services/userService';
 
 type Props = {
   navigate: (screen: string, params?: any) => void;
+  goBack?: () => void;
   route?: any;
 };
 
@@ -50,9 +50,12 @@ export default function ForgotPasswordScreen({ navigate, route }: Props) {
   }, [resendTimer]);
 
   useEffect(() => {
-    // Send OTP automatically when user lands on this screen
+    // Send OTP automatically when user lands on this screen. A silent failure
+    // here left users waiting indefinitely for a code that was never sent.
     if (phone) {
-      sendOTP(phone).catch(err => console.error('Failed to auto-send OTP:', err));
+      sendOTP(phone).catch((err: any) =>
+        setErrorMsg(err?.message || 'We could not send your code. Tap Resend to try again.')
+      );
     }
   }, [phone]);
 
@@ -95,20 +98,9 @@ export default function ForgotPasswordScreen({ navigate, route }: Props) {
         setIsLoading(true);
         setErrorMsg('');
         try {
-          // Find user by phone and update password
-          const usersRef = collection(db, 'users');
-          const q = query(usersRef, where('phoneNumber', '==', phone));
-          const snapshot = await getDocs(q);
-          
-          if (!snapshot.empty) {
-            const userDoc = snapshot.docs[0];
-            await updateDoc(doc(db, 'users', userDoc.id), {
-              password: newPassword
-            });
-          }
-          
           // Log in with the custom token
           const userCredential = await signInWithCustomToken(auth, verifiedToken);
+          await setAccountPassword(newPassword);
           
           if (userCredential.user) {
             const profile = await getUserProfile(userCredential.user.uid);
@@ -139,7 +131,9 @@ export default function ForgotPasswordScreen({ navigate, route }: Props) {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <TouchableOpacity onPress={() => navigate('Phone', { step: 'password' })} style={styles.backBtn}>
+          <TouchableOpacity onPress={() => navigate('Phone', { step: 'password' })} style={styles.backBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={24} color="#5A155A" />
           </TouchableOpacity>
         </View>
@@ -200,8 +194,21 @@ export default function ForgotPasswordScreen({ navigate, route }: Props) {
               value={newPassword}
               onChangeText={setNewPassword}
               autoFocus
+              autoCapitalize="none"
+              autoCorrect={false}
+              textContentType="newPassword"
+              autoComplete="new-password"
+              returnKeyType="done"
+              onSubmitEditing={handleContinue}
+              accessibilityLabel="New password"
             />
-            <TouchableOpacity onPress={() => setIsPasswordVisible(!isPasswordVisible)} style={{ position: 'absolute', right: 15 }}>
+            <TouchableOpacity
+              onPress={() => setIsPasswordVisible(!isPasswordVisible)}
+              style={{ position: 'absolute', right: 15 }}
+              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+              accessibilityRole="button"
+              accessibilityLabel={isPasswordVisible ? 'Hide password' : 'Show password'}
+            >
               <MaterialIcons name={isPasswordVisible ? "visibility" : "visibility-off"} size={22} color="#A0A0A0" />
             </TouchableOpacity>
           </View>
@@ -241,11 +248,17 @@ export default function ForgotPasswordScreen({ navigate, route }: Props) {
 
           {step === 'otp' && (
             <View style={{ alignItems: 'center' }}>
-              <TouchableOpacity 
-                activeOpacity={resendTimer > 0 ? 1 : 0.7} 
+              <TouchableOpacity
+                activeOpacity={resendTimer > 0 ? 1 : 0.7}
                 style={{ marginTop: 20 }}
+                disabled={resendTimer > 0 || isLoading}
+                accessibilityRole="button"
+                accessibilityLabel={resendTimer > 0 ? `Resend code available in ${resendTimer} seconds` : 'Resend verification code'}
+                accessibilityState={{ disabled: resendTimer > 0 || isLoading }}
                 onPress={async () => {
-                  if (resendTimer === 0) {
+                  // Same race as the OTP screen: without the isLoading check a
+                  // resend could fire while a verify was still in flight.
+                  if (resendTimer === 0 && !isLoading) {
                     setIsLoading(true);
                     setErrorMsg('');
                     try {

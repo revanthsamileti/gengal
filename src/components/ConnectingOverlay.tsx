@@ -1,8 +1,7 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing, Dimensions, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing, Dimensions, Platform, Modal } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { skeuoGradients } from '../theme/skeuomorphic';
 
 type ConnectingOverlayProps = {
   mode: 'random' | 'private';
@@ -105,6 +104,7 @@ export default function ConnectingOverlay({ mode, targetName, onCancel, status =
   });
 
   return (
+    <Modal visible transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
     <View style={styles.container}>
       {mode === 'private' && (
         <>
@@ -195,6 +195,7 @@ export default function ConnectingOverlay({ mode, targetName, onCancel, status =
         )}
       </View>
     </View>
+    </Modal>
   );
 }
 

@@ -1,4 +1,5 @@
 import React from 'react';
+import { tap30, tap40, tap42 } from '../theme/touch';
 import { Platform, Image,
   ScrollView,
   StyleSheet,
@@ -10,6 +11,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import GengalAvatar from '../components/GengalAvatar';
 import CallPriceTag from '../components/CallPriceTag';
+import { useActionLock } from '../hooks/useActionLock';
 
 type MatchScreenProps = {
   profileName?: string;
@@ -44,10 +46,16 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
   const profile = matchData ? {
     name: matchData.nickname || matchData.name,
     uri: matchData.uri || matchData.avatarUrl || '',
-    tier: (matchData.avatarUrl || matchData.uri) ? 'VIP' : 'Advance',
+    tier: matchData.tier === 'VIP' ? 'VIP' : 'Standard',
     avatarData: matchData.avatarData,
     uid: matchData.uid,
-  } : { name: profileName || 'User', uri: '', tier: 'Advance', uid: undefined };
+  } : { name: profileName || 'User', uri: '', tier: 'Standard', uid: undefined };
+
+  const { locked: callLocked, run: runCall } = useActionLock();
+  const startCall = (mode: 'call' | 'video') =>
+    runCall(() => {
+      navigate('Call', { profileName: profile.name, mode, roomId, matchData, isCaller: true });
+    });
 
   return (
     <ScreenShell tone="dark">
@@ -56,9 +64,12 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
         <View style={styles.header}>
           <TouchableOpacity
             style={styles.headerIcon}
+            hitSlop={tap30}
             activeOpacity={0.78}
             onPress={() => navigate('Personal')}
-          >
+          
+            accessibilityRole="button"
+            accessibilityLabel="Close">
             <MaterialIcons name="close" size={22} color="#F9F2EC" />
           </TouchableOpacity>
           <Text style={styles.headerText} numberOfLines={1}>
@@ -105,6 +116,7 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
             <TouchableOpacity
               activeOpacity={0.86}
               style={styles.primaryAction}
+              hitSlop={tap42}
               onPress={() => navigate('Chat', { profileName: profile.name, matchData: { ...matchData, name: profile.name, uid: profile.uid } })}
             >
               <MaterialIcons name="chat-bubble-outline" size={16} color="#7E6507" />
@@ -114,8 +126,12 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
             <View style={styles.callRow}>
               <TouchableOpacity
                 activeOpacity={0.86}
-                style={styles.smallAction}
-                onPress={() => navigate('Call', { profileName: profile.name, mode: 'call', roomId, matchData, isCaller: true })}
+                style={[styles.smallAction, callLocked && { opacity: 0.5 }]}
+                hitSlop={tap40}
+                disabled={callLocked}
+                accessibilityRole="button"
+                accessibilityLabel={`Voice call ${profile.name}`}
+                onPress={() => startCall('call')}
               >
                 <MaterialIcons name="phone" size={15} color="#FFF" />
                 <Text style={styles.smallActionText}>VOICE CALL</Text>
@@ -123,8 +139,12 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
               </TouchableOpacity>
               <TouchableOpacity
                 activeOpacity={0.86}
-                style={[styles.smallAction, styles.smallActionVideo]}
-                onPress={() => navigate('Call', { profileName: profile.name, mode: 'video', roomId, matchData, isCaller: true })}
+                style={[styles.smallAction, styles.smallActionVideo, callLocked && { opacity: 0.5 }]}
+                hitSlop={tap40}
+                disabled={callLocked}
+                accessibilityRole="button"
+                accessibilityLabel={`Video call ${profile.name}`}
+                onPress={() => startCall('video')}
               >
                 <MaterialIcons name="videocam" size={15} color="#FFF" />
                 <Text style={[styles.smallActionText, styles.smallActionVideoText]}>VIDEO CALL</Text>
@@ -135,6 +155,7 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
             <TouchableOpacity
               activeOpacity={0.86}
               style={styles.outlineAction}
+              hitSlop={tap42}
               onPress={() => navigate('Personal')}
             >
               <MaterialIcons name="explore" size={16} color="#7E6507" />

@@ -1,168 +1,135 @@
-import { db } from '../config/firebase';
-import { doc, runTransaction, getDoc, updateDoc } from 'firebase/firestore';
+import { auth } from '../config/firebase';
+import { getBackendUrl } from './authService';
 
-/**
- * Deducts coins safely using an atomic transaction.
- * Use this when a user purchases an item or service.
- */
+const authedPost = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
+  const user = auth.currentUser;
+  if (!user) throw new Error('You must be logged in.');
+
+  const token = await user.getIdToken();
+  const response = await fetch(`${getBackendUrl()}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify(body),
+  });
+
+  const text = await response.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    // The server's machine-readable `code` is carried onto the Error so callers
+    // can tell "payments aren't set up" from a genuine failure. Without this it
+    // was dropped here and every caller's code check was dead.
+    const error: Error & { code?: string; status?: number } = new Error(
+      data.error || 'Coin operation failed.',
+    );
+    error.code = data.code;
+    error.status = response.status;
+    throw error;
+  }
+  return data as T;
+};
+
 export const deductUserCoins = async (userId: string, amount: number) => {
-  if (amount <= 0) throw new Error("Amount must be positive");
+  const data = await authedPost<{ newBalance: number }>('/api/v1/coins/deduct', { userId, amount });
+  return data.newBalance;
+};
 
-  const userRef = doc(db, 'users', userId);
-  return runTransaction(db, async (transaction) => {
-    const userDoc = await transaction.get(userRef);
-    if (!userDoc.exists()) {
-      throw new Error("User does not exist!");
-    }
-
-    const currentBalance = userDoc.data()?.coins || 0;
-    if (currentBalance < amount) {
-      throw new Error("Insufficient Gengal balance");
-    }
-
-    transaction.update(userRef, { coins: currentBalance - amount });
-    return currentBalance - amount; // Return the new balance
+export const deductUserCoinsWithCommission = async (
+  userId: string,
+  amount: number,
+  hostUid: string,
+  commissionAmount: number,
+) => {
+  const data = await authedPost<{ newBalance: number; hostNewBalance?: number }>('/api/v1/coins/deduct-with-commission', {
+    userId,
+    amount,
+    hostUid,
+    commissionAmount,
   });
+  return data;
+};
+
+export const creditUserCoins = async (_userId: string, _amount: number) => {
+  throw new Error('Direct client coin credits are disabled. Use a server-authorized purchase or game reward endpoint.');
+};
+
+export type CoinOrder = {
+  ok: boolean;
+  orderId: string;
+  amountInr: number;
+  coins: number;
+  checkoutUrl: string;
 };
 
 /**
- * Credits coins safely.
- * Use this when a user receives a gift, refund, or top-up.
+ * Opens a top-up order and returns the page to run checkout in.
+ *
+ * The coin yield is decided and frozen server-side here, so the number quoted
+ * on the store screen is the number credited even if an admin changes the rate
+ * while checkout is open.
  */
-export const creditUserCoins = async (userId: string, amount: number) => {
-  if (amount <= 0) throw new Error("Amount must be positive");
+export const createCoinOrder = async (packageId: string, amountInr: number) => {
+  return authedPost<CoinOrder>('/api/v1/coins/order', { packageId, amountInr });
+};
 
-  const userRef = doc(db, 'users', userId);
-  return runTransaction(db, async (transaction) => {
-    const userDoc = await transaction.get(userRef);
-    if (!userDoc.exists()) {
-      throw new Error("User does not exist!");
-    }
-
-    const currentBalance = userDoc.data()?.coins || 0;
-    transaction.update(userRef, { coins: currentBalance + amount });
-    return currentBalance + amount; // Return the new balance
-  });
+export type RazorpayResult = {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
 };
 
 /**
- * Safely transfers coins between two users in a single atomic transaction.
- * This guarantees that either BOTH operations succeed, or NEITHER do.
+ * Confirms a completed checkout. The client sends only the ids Razorpay handed
+ * back — no amount and no coin count — and the server credits the balance only
+ * after checking the signature and confirming with Razorpay that the payment
+ * was captured. Until a provider is configured this rejects with
+ * `payments_not_configured` rather than granting free coins.
  */
+export const purchaseCoins = async (result: RazorpayResult) => {
+  return authedPost<{ ok: boolean; newBalance: number; coinsCredited: number }>(
+    '/api/v1/coins/purchase',
+    result,
+  );
+};
+
 export const transferCoins = async (senderId: string, receiverId: string, amount: number) => {
-  if (amount <= 0) throw new Error("Amount must be positive");
-  if (senderId === receiverId) throw new Error("Cannot send gifts to yourself");
-
-  const senderRef = doc(db, 'users', senderId);
-  const receiverRef = doc(db, 'users', receiverId);
-
-  return runTransaction(db, async (transaction) => {
-    // 1. Read BOTH documents first (Firestore transactions require all reads before any writes)
-    const senderDoc = await transaction.get(senderRef);
-    const receiverDoc = await transaction.get(receiverRef);
-
-    if (!senderDoc.exists() || !receiverDoc.exists()) {
-      throw new Error("Sender or receiver does not exist.");
-    }
-
-    const senderBalance = senderDoc.data()?.coins || 0;
-    const receiverBalance = receiverDoc.data()?.coins || 0;
-
-    if (senderBalance < amount) {
-      throw new Error("Insufficient Gengal balance for transfer");
-    }
-
-    // 2. Perform BOTH writes
-    transaction.update(senderRef, { coins: senderBalance - amount });
-    transaction.update(receiverRef, { coins: receiverBalance + amount });
-
-    return {
-      success: true,
-      senderNewBalance: senderBalance - amount,
-      receiverNewBalance: receiverBalance + amount
-    };
-  });
+  return authedPost<{
+    success: boolean;
+    senderNewBalance: number;
+    receiverNewBalance: number;
+  }>('/api/v1/coins/transfer', { senderId, receiverId, amount });
 };
 
 /**
- * Processes per-minute call billing.
- * Deducts the total amount from the payer, and credits the specified share percentage to the receiver.
- * The remaining amount is effectively kept by the platform (admin).
+ * Advances billing for an in-progress call. The server derives the elapsed time
+ * and rate itself — the client only says which call to bill, so it can neither
+ * understate nor inflate the charge. Either participant may tick, and the
+ * result is the same, which is what stops a patched payer client from calling
+ * for free by simply never billing itself.
  */
-export const processCallBilling = async (payerId: string, receiverId: string, totalAmount: number, creatorSharePercentage: number) => {
-  if (totalAmount <= 0) throw new Error("Amount must be positive");
-  if (creatorSharePercentage < 0 || creatorSharePercentage > 100) throw new Error("Invalid share percentage");
-  if (payerId === receiverId) return { success: true, hasInsufficientFunds: false }; // No billing for self-testing
-
-  const payerRef = doc(db, 'users', payerId);
-  const receiverRef = doc(db, 'users', receiverId);
-
-  return runTransaction(db, async (transaction) => {
-    const payerDoc = await transaction.get(payerRef);
-    const receiverDoc = await transaction.get(receiverRef);
-
-    if (!payerDoc.exists() || !receiverDoc.exists()) {
-      throw new Error("Payer or receiver does not exist.");
-    }
-
-    const payerBalance = payerDoc.data()?.coins || 0;
-    const receiverBalance = receiverDoc.data()?.coins || 0;
-
-    let actualDeduction = totalAmount;
-    let hasInsufficientFunds = false;
-
-    if (payerBalance < totalAmount) {
-      actualDeduction = payerBalance;
-      hasInsufficientFunds = true;
-    }
-
-    // Dynamic fractional share for the receiver based on the global percentage
-    const receiverShare = actualDeduction * (creatorSharePercentage / 100);
-
-    transaction.update(payerRef, { coins: payerBalance - actualDeduction });
-    transaction.update(receiverRef, { coins: receiverBalance + receiverShare });
-
-    return {
-      success: true,
-      hasInsufficientFunds,
-      payerNewBalance: payerBalance - actualDeduction,
-      receiverNewBalance: receiverBalance + receiverShare
-    };
-  });
+export const processCallBilling = async (roomId: string) => {
+  return authedPost<{
+    success: boolean;
+    hasInsufficientFunds: boolean;
+    billedAmount: number;
+    billedSeconds: number;
+    payerNewBalance: number | null;
+    receiverNewBalance: number | null;
+  }>('/api/v1/coins/call-billing', { roomId });
 };
 
-/**
- * Updates a user's cumulative call time and awards hearts if they cross the threshold.
- */
-export const updateCallRewards = async (userId: string, secondsToAdd: number, thresholdMinutes: number, isReceiver: boolean = false) => {
-  const userRef = doc(db, 'users', userId);
-  return runTransaction(db, async (transaction) => {
-    const userDoc = await transaction.get(userRef);
-    if (!userDoc.exists()) return;
-
-    const data = userDoc.data();
-    let currentSeconds = data.unrewardedCallSeconds || 0;
-    let currentHearts = data.hearts || 0;
-    let totalReceived = data.totalReceivedCallSeconds || 0;
-
-    if (isReceiver) {
-      totalReceived += secondsToAdd;
-    }
-
-    currentSeconds += secondsToAdd;
-    const thresholdSeconds = thresholdMinutes * 60;
-
-    let newHearts = currentHearts;
-    if (thresholdSeconds > 0 && currentSeconds >= thresholdSeconds) {
-      const heartsToAward = Math.floor(currentSeconds / thresholdSeconds);
-      newHearts += heartsToAward;
-      currentSeconds = currentSeconds % thresholdSeconds;
-    }
-
-    transaction.update(userRef, {
-      unrewardedCallSeconds: currentSeconds,
-      hearts: newHearts,
-      ...(isReceiver ? { totalReceivedCallSeconds: totalReceived } : {})
-    });
+export const updateCallRewards = async (
+  userId: string,
+  secondsToAdd: number,
+  thresholdMinutes: number,
+  isReceiver: boolean = false,
+) => {
+  return authedPost<{ ok: boolean }>('/api/v1/coins/call-rewards', {
+    userId,
+    secondsToAdd,
+    thresholdMinutes,
+    isReceiver,
   });
 };

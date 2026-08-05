@@ -7,21 +7,32 @@ $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $backendDir = Join-Path $root "backend"
 $python = Join-Path $backendDir "venv\Scripts\python.exe"
-$cloudflared = Join-Path $root "cloudflared.exe"
-$backendLog = Join-Path $root "backend-server.log"
-$backendErr = Join-Path $root "backend-server.err.log"
-$tunnelOut = Join-Path $root "backend_tunnel.out.log"
-$tunnelErr = Join-Path $root "backend_tunnel.err.log"
+
+# Keep logs in a dedicated subfolder to keep root clean
+$logsDir = Join-Path $PSScriptRoot ".logs"
+if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir -Force | Out-Null }
+
+$cloudflared = Join-Path $PSScriptRoot "cloudflared.exe"
+$backendLog = Join-Path $logsDir "backend-server.log"
+$backendErr = Join-Path $logsDir "backend-server.err.log"
+$tunnelOut = Join-Path $logsDir "backend_tunnel.out.log"
+$tunnelErr = Join-Path $logsDir "backend_tunnel.err.log"
 
 if (-not (Test-Path $python)) {
   throw "Backend Python not found at $python"
 }
 
 if (-not (Test-Path $cloudflared)) {
-  throw "cloudflared.exe not found at $cloudflared"
+  Write-Host "cloudflared.exe not found in scripts. Downloading automatically..." -ForegroundColor Cyan
+  try {
+    Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile $cloudflared -UseBasicParsing
+  } catch {
+    Write-Host "WARNING: Cloudflare download failed, will try system path or skip tunnel." -ForegroundColor Yellow
+    $cloudflared = (Get-Command "cloudflared" -ErrorAction SilentlyContinue).Source
+  }
 }
 
-Write-Host "Stopping old GenGal backend/tunnel processes..."
+Write-Host "Cleaning old GenGal backend/tunnel sessions..." -ForegroundColor DarkGray
 Get-CimInstance Win32_Process |
   Where-Object {
     ($_.Name -eq "python.exe" -and $_.CommandLine -like "*app.py*") -or
@@ -31,17 +42,7 @@ Get-CimInstance Win32_Process |
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
   }
 
-# Free up Metro port 8081 if currently in use
-Write-Host "Freeing up Metro port 8081 if in use..."
-Get-NetTCPConnection -LocalPort 8081 -ErrorAction SilentlyContinue | ForEach-Object {
-  if ($_.OwningProcess -and $_.OwningProcess -ne $PID) {
-    Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
-  }
-}
-
-Start-Sleep -Seconds 2
-
-Write-Host "Starting backend on http://127.0.0.1:$BackendPort ..."
+Write-Host "Starting Python Backend on port $BackendPort..." -ForegroundColor White
 Start-Process `
   -FilePath $python `
   -ArgumentList "app.py" `
@@ -51,7 +52,7 @@ Start-Process `
   -RedirectStandardError $backendErr
 
 $backendReady = $false
-for ($i = 0; $i -lt 30; $i++) {
+for ($i = 0; $i -lt 15; $i++) {
   Start-Sleep -Seconds 1
   try {
     $body = @{ phone = "+919441488911" } | ConvertTo-Json
@@ -61,76 +62,59 @@ for ($i = 0; $i -lt 30; $i++) {
       -Body $body `
       -ContentType "application/json" `
       -UseBasicParsing `
-      -TimeoutSec 3 | Out-Null
+      -TimeoutSec 2 | Out-Null
     $backendReady = $true
     break
   } catch {}
 }
 
 if (-not $backendReady) {
-  Write-Host "Backend did not become ready. Last backend error log:"
-  if (Test-Path $backendErr) {
-    Get-Content $backendErr -Tail 80
-  }
-  throw "Backend startup failed"
-}
-
-Remove-Item -Force $tunnelOut, $tunnelErr -ErrorAction SilentlyContinue
-
-Write-Host "Starting Cloudflare tunnel for backend..."
-Start-Process `
-  -FilePath $cloudflared `
-  -ArgumentList "tunnel", "--url", "http://127.0.0.1:$BackendPort" `
-  -WorkingDirectory $root `
-  -WindowStyle Hidden `
-  -RedirectStandardOutput $tunnelOut `
-  -RedirectStandardError $tunnelErr
-
-$backendUrl = $null
-for ($i = 0; $i -lt 45; $i++) {
-  Start-Sleep -Seconds 2
-  $text = ""
-  if (Test-Path $tunnelOut) { $text += Get-Content $tunnelOut -Raw }
-  if (Test-Path $tunnelErr) { $text += Get-Content $tunnelErr -Raw }
-  $match = [regex]::Match($text, "https://[a-zA-Z0-9-]+\.trycloudflare\.com")
-  if ($match.Success) {
-    $backendUrl = $match.Value
-    break
-  }
-}
-
-if (-not $backendUrl) {
-  Write-Host "Tunnel URL was not found. Last tunnel logs:"
-  if (Test-Path $tunnelOut) { Get-Content $tunnelOut -Tail 80 }
-  if (Test-Path $tunnelErr) { Get-Content $tunnelErr -Tail 80 }
-  throw "Cloudflare tunnel startup failed"
-}
-
-# Automatically update .env file
-$envFile = Join-Path $root ".env"
-if (Test-Path $envFile) {
-  $envContent = Get-Content $envFile -Raw
-  if ($envContent -match "EXPO_PUBLIC_BACKEND_URL=.*") {
-    $envContent = $envContent -replace "EXPO_PUBLIC_BACKEND_URL=.*", "EXPO_PUBLIC_BACKEND_URL=$backendUrl"
-  } else {
-    $envContent += "`r`nEXPO_PUBLIC_BACKEND_URL=$backendUrl"
-  }
+  Write-Host "WARNING: Backend response delayed, proceeding to tunnel..." -ForegroundColor Yellow
 } else {
-  $envContent = "EXPO_PUBLIC_BACKEND_URL=$backendUrl"
+  Write-Host "Backend ready!" -ForegroundColor Green
 }
-[System.IO.File]::WriteAllText($envFile, $envContent)
-Write-Host "Auto-updated .env with EXPO_PUBLIC_BACKEND_URL=$backendUrl"
 
-Write-Host ""
-Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "          GENGAL DEV INFRASTRUCTURE READY                 " -ForegroundColor Green
-Write-Host "==========================================================" -ForegroundColor Green
-Write-Host "Backend Tunnel URL is: $backendUrl" -ForegroundColor Cyan
-Write-Host "The .env file has been updated automatically."
-Write-Host ""
-Write-Host "IMPORTANT REMINDER:"
-Write-Host "Please shake your phone (or pull down in Expo Go) and tap"
-Write-Host "RELOAD to load the new backend connection on your devices." -ForegroundColor Yellow
-Write-Host "==========================================================" -ForegroundColor Green
-Write-Host ""
+if ($cloudflared -and (Test-Path $cloudflared)) {
+  Remove-Item -Force $tunnelOut, $tunnelErr -ErrorAction SilentlyContinue
 
+  Write-Host "Establishing secure public tunnel for backend..." -ForegroundColor White
+  Start-Process `
+    -FilePath $cloudflared `
+    -ArgumentList "tunnel", "--url", "http://127.0.0.1:$BackendPort" `
+    -WorkingDirectory $root `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $tunnelOut `
+    -RedirectStandardError $tunnelErr
+
+  $backendUrl = $null
+  for ($i = 0; $i -lt 30; $i++) {
+    Start-Sleep -Seconds 1
+    $text = ""
+    if (Test-Path $tunnelOut) { $text += Get-Content $tunnelOut -Raw -ErrorAction SilentlyContinue }
+    if (Test-Path $tunnelErr) { $text += Get-Content $tunnelErr -Raw -ErrorAction SilentlyContinue }
+    $match = [regex]::Match($text, "https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+    if ($match.Success) {
+      $backendUrl = $match.Value
+      break
+    }
+  }
+
+  if ($backendUrl) {
+    Write-Host "Backend Public URL: $backendUrl" -ForegroundColor Green
+    $envFile = Join-Path $root ".env"
+    if (Test-Path $envFile) {
+      $envContent = Get-Content $envFile -Raw
+      if ($envContent -match "EXPO_PUBLIC_BACKEND_URL=.*") {
+        $envContent = $envContent -replace "EXPO_PUBLIC_BACKEND_URL=.*", "EXPO_PUBLIC_BACKEND_URL=$backendUrl"
+      } else {
+        $envContent += "`r`nEXPO_PUBLIC_BACKEND_URL=$backendUrl"
+      }
+    } else {
+      $envContent = "EXPO_PUBLIC_BACKEND_URL=$backendUrl"
+    }
+    [System.IO.File]::WriteAllText($envFile, $envContent.Trim())
+    Write-Host "Updated .env automatically!" -ForegroundColor Green
+  } else {
+    Write-Host "WARNING: Cloudflare Tunnel took too long to assign a URL. Using existing .env settings." -ForegroundColor Yellow
+  }
+}

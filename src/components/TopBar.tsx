@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, Image, StyleSheet } from 'react-native';
+import { MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from './GengalAvatar';
 import DiamondBadge from './DiamondBadge';
 import { useUser } from '../context/UserContext';
@@ -18,29 +19,37 @@ export default function TopBar({ navigate, title = 'Gengal', subtitle }: TopBarP
       <TouchableOpacity
         style={styles.avatarShadow}
         activeOpacity={0.85}
+        accessibilityRole="button"
+        accessibilityLabel="Open your profile"
         onPress={() => navigate('Profile', { profileName: myProfile?.nickname || myProfile?.username || 'User' })}
       >
         {myProfile?.avatarData ? (
           <GengalAvatar data={myProfile.avatarData} size={38} />
+        ) : myProfile?.avatarUrl ? (
+          <Image source={{ uri: myProfile.avatarUrl }} style={styles.avatar} />
         ) : myProfile ? (
-          <Image
-            source={{ uri: myProfile.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop' }}
-            style={styles.avatar}
-          />
+          <View style={[styles.avatar, styles.avatarEmpty]}>
+            <MaterialIcons name="person" size={22} color="#C9BDB2" />
+          </View>
         ) : (
           <View style={[styles.avatar, { backgroundColor: '#E2E8F0' }]} />
         )}
       </TouchableOpacity>
 
       <View style={styles.centerTitle}>
-        <Text style={styles.brand} numberOfLines={1} adjustsFontSizeToFit>{title}</Text>
+        <Text style={styles.brand} numberOfLines={1}>{title}</Text>
         {subtitle ? (
-          <Text style={styles.headerSub}>{subtitle}</Text>
+          <Text style={styles.headerSub} numberOfLines={1}>{subtitle}</Text>
         ) : null}
       </View>
 
-      <TouchableOpacity activeOpacity={0.85} onPress={() => navigate('Coins')}>
-        <DiamondBadge amount={myProfile ? (myProfile.coins ?? 0) : 0} />
+      <TouchableOpacity
+        activeOpacity={0.85}
+        onPress={() => navigate('Coins')}
+        accessibilityRole="button"
+        accessibilityLabel="Coin balance, opens the store"
+      >
+        <DiamondBadge amount={myProfile?.coins ?? 0} />
       </TouchableOpacity>
     </View>
   );
@@ -52,17 +61,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: 60,
-    paddingBottom: 15,
+    paddingTop: 48,
+    paddingBottom: 14,
     backgroundColor: '#FFFDF8',
     borderBottomWidth: 1,
-    borderBottomColor: '#F5E6E6',
+    borderBottomColor: '#F7E7EE',
     zIndex: 10,
   },
   avatarShadow: {
-    shadowColor: '#C4A000',
+    shadowColor: '#B45A82',
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.18,
     shadowRadius: 10,
     elevation: 6,
   },
@@ -71,23 +80,40 @@ const styles = StyleSheet.create({
     height: 38,
     borderRadius: 19,
     borderWidth: 2,
-    borderColor: '#FBE9B6',
+    borderColor: '#F3D3E0',
+  },
+  avatarEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F2ECE4',
   },
   centerTitle: {
+    // Takes the space between the avatar and the badge and centres within it.
+    // Previously this had no flex, so space-between positioned it by equal gaps
+    // and it slid sideways whenever the coin balance changed width.
+    flex: 1,
+    minWidth: 0,
+    marginHorizontal: 10,
     alignItems: 'center',
     flexDirection: 'column',
   },
   brand: {
-    fontFamily: 'Outfit_700Bold',
+    // Outfit was referenced here but never loaded (App.tsx registers only the
+    // MaterialIcons glyphs), so this silently fell back to the system face with
+    // different metrics. Install @expo-google-fonts/outfit and load it in
+    // useFonts if the Outfit look is wanted.
     fontSize: 24,
-    color: '#836A07',
+    fontWeight: '800',
+    color: '#7A256D',
     letterSpacing: -0.5,
+    includeFontPadding: false,
   },
   headerSub: {
-    fontFamily: 'Outfit_600SemiBold',
     fontSize: 10,
-    color: '#D4B84D',
+    fontWeight: '600',
+    color: '#C08AA8',
     letterSpacing: 1.2,
     marginTop: -2,
+    includeFontPadding: false,
   },
 });

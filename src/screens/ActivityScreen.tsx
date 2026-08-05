@@ -4,7 +4,6 @@ import {
   TouchableOpacity, Animated,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import ScreenShell from '../components/ScreenShell';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
@@ -114,6 +113,7 @@ function CallRow({ record, index }: { record: CallRecord; index: number }) {
 export default function ActivityScreen({ navigate }: Props) {
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -183,7 +183,11 @@ export default function ActivityScreen({ navigate }: Props) {
         }
       });
       processCalls();
-    }, () => {});
+    }, (e) => {
+      console.warn('[Activity] Call history subscription failed:', e?.message ?? e);
+      setLoadError(true);
+      setLoading(false);
+    });
 
     return () => { unsubCaller(); unsubReceiver(); };
   }, []);
@@ -232,6 +236,12 @@ export default function ActivityScreen({ navigate }: Props) {
             <View style={styles.empty}>
               <MaterialIcons name="hourglass-empty" size={44} color="#D1B23B" />
               <Text style={styles.emptyTitle}>Loading…</Text>
+            </View>
+          ) : loadError ? (
+            <View style={styles.empty}>
+              <MaterialIcons name="cloud-off" size={52} color="#D1B23B" />
+              <Text style={styles.emptyTitle}>Could not load your calls</Text>
+              <Text style={styles.emptySub}>Check your connection and try again.</Text>
             </View>
           ) : calls.length === 0 ? (
             <View style={styles.empty}>

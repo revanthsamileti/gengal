@@ -1,21 +1,46 @@
+# Files excluded from the archive uploaded to EAS Build.
+#
+# IMPORTANT: do not add source or manifest patterns here (*.ts, *.tsx, *.js,
+# *.json, *.md). Excluding those removes src/, App.tsx, package.json and
+# app.json from the upload, which breaks the build.
+
 android/
 ios/
 node_modules/
 .git/
-*.apk
-*.mp4
-*.zip
-*.aab
-.gradle-user-home/
-backend/
-temp_media/
-*.exe
-*.log
-*.txt
-*.xml
+.expo/
+.expo-cache/
 dist/
+coverage/
+.nyc_output/
+
+# Backend and its virtualenv are deployed separately.
+backend/
 venv/
-log*.txt
-*dump*.xml
+
+# Local tooling and editor state
+.agents/
+.gradle-user-home/
 .jdk/
 .tmp/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local artifacts and diagnostics
+*.apk
+*.aab
+*.zip
+*.exe
+*.mp4
+*.log
+*.orig.*
+temp_media/
+log*.txt
+*dump*.xml
+
+# Secrets: EXPO_PUBLIC_* values are injected by EAS from the project's
+# environment variables, not from a committed dotfile.
+.env
+.env.*

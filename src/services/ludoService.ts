@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { RosterPreviewEntry } from './presenceService';
 import {
   collection,
   doc,
@@ -89,6 +90,16 @@ export interface LudoRoom {
   // Players (up to 4)
   players: LudoPlayer[];
   activeMemberCount: number;
+  /**
+   * Everyone heartbeating in the room — players and spectators together.
+   * Spectators are this minus the seated players; `spectatorCount` was a bare
+   * counter that only ever grew when a watcher's client died without leaving.
+   */
+  presentCount?: number;
+  /** Host heartbeat. Absent on rooms created before presence existed. */
+  hostLastSeen?: Timestamp;
+  /** Up to four present members, denormalised by the host for lobby cards. */
+  roster?: RosterPreviewEntry[];
   // Game state
   tokens: Token[];           // all 16 tokens
   currentTurn: TokenColor;   // whose turn
@@ -100,7 +111,8 @@ export interface LudoRoom {
   finishRank: number;        // 1 for first to finish, increments
   winnersOrder: string[];    // uids in finish order
   // Spectator
-  spectatorCount: number;
+  /** @deprecated Drifting counter, replaced by `presentCount` minus seated players. */
+  spectatorCount?: number;
   // Meta
   createdAt?: Timestamp;
 }
@@ -288,6 +300,9 @@ export const createLudoRoom = async (
     audienceBets: {},
     players: [hostPlayer],
     activeMemberCount: 1,
+    presentCount: 1,
+    // Seeded so a host that dies before its first heartbeat still ages out.
+    hostLastSeen: Timestamp.now(),
     tokens: buildInitialTokens(),
     currentTurn: 'red',
     diceValue: null,
@@ -356,14 +371,14 @@ export const joinLudoRoom = async (
 
   if (room.phase !== 'waiting' || room.players.length >= 4) {
     // Join as spectator
-    await updateDoc(doc(db, 'ludo_rooms', roomId), { spectatorCount: increment(1) });
+    // Spectator headcount comes from heartbeat presence now, so there is no
+    // counter to bump — and none to leak when this client dies without leaving.
     await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
     return { joined: true, asSpectator: true };
   }
 
   // Join as spectator initially for all new monetized games unless host
   if (uid !== room.hostUid) {
-    await updateDoc(doc(db, 'ludo_rooms', roomId), { spectatorCount: increment(1) });
     await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
     return { joined: true, asSpectator: true };
   }
@@ -394,16 +409,9 @@ export const buyLudoTicket = async (
   hostUid: string,
   targetColor: TokenColor
 ) => {
-  // Deduct from buyer
-  const { deductUserCoins, transferCoins } = await import('./coinService');
-  await deductUserCoins(uid, ticketPrice);
-  // Give 10% commission to host
+  const { deductUserCoinsWithCommission } = await import('./coinService');
   const commission = Math.floor(ticketPrice * 0.1);
-  if (commission > 0) {
-    // We don't have transferCoins directly from app pool, so we just credit host
-    const { creditUserCoins } = await import('./coinService');
-    await creditUserCoins(hostUid, commission);
-  }
+  await deductUserCoinsWithCommission(uid, ticketPrice, hostUid, commission);
 
   const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
   const room = snap.data() as LudoRoom;
@@ -432,13 +440,9 @@ export const placeLudoBet = async (
   amount: number,
   hostUid: string
 ) => {
-  const { deductUserCoins, creditUserCoins } = await import('./coinService');
-  await deductUserCoins(uid, amount);
-  // 10% commission to host
+  const { deductUserCoinsWithCommission } = await import('./coinService');
   const commission = Math.floor(amount * 0.1);
-  if (commission > 0) {
-    await creditUserCoins(hostUid, commission);
-  }
+  await deductUserCoinsWithCommission(uid, amount, hostUid, commission);
 
   const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
   const room = snap.data() as LudoRoom;
@@ -456,7 +460,7 @@ export const placeLudoBet = async (
 
 export const leaveLudoRoom = async (roomId: string, uid: string, nickname: string, asSpectator: boolean) => {
   if (asSpectator) {
-    await updateDoc(doc(db, 'ludo_rooms', roomId), { spectatorCount: increment(-1) });
+    // Presence expiry handles this; see joinLudoRoom.
     return;
   }
   const snap = await getDoc(doc(db, 'ludo_rooms', roomId));

@@ -1,36 +1,48 @@
-import { Platform, NativeModules } from 'react-native';
-import { db } from '../config/firebase';
-import { doc, updateDoc } from 'firebase/firestore';
+import { Platform } from 'react-native';
+import Constants from 'expo-constants';
+import { savePrivateUserData } from './userService';
 
-// Safely require expo-notifications to prevent startup crashes if native module is absent
+// expo-notifications is loaded lazily and defensively: it is unavailable in Expo
+// Go and on web. The previous NativeModules probe never resolved under the new
+// architecture, so registration silently no-opped in every build.
 let Notifications: any = null;
 try {
-  // Only load if the native module is actually registered in this build
-  if (NativeModules && (NativeModules.ExpoNotifications || NativeModules.RNExpoNotifications)) {
-    Notifications = require('expo-notifications');
-    if (Notifications) {
-      Notifications.setNotificationHandler({
-        handleNotification: async () => ({
-          shouldShowAlert: true,
-          shouldPlaySound: true,
-          shouldSetBadge: false,
-        }),
-      });
-    }
-  } else {
-    console.warn('[NotificationService] ExpoNotifications native module not registered in this build, skipping.');
-  }
+  Notifications = require('expo-notifications');
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowBanner: true,
+      shouldShowList: true,
+      shouldPlaySound: true,
+      shouldSetBadge: false,
+    }),
+  });
 } catch (e) {
-  console.warn('[NotificationService] expo-notifications native module not available:', e);
+  console.warn('[NotificationService] expo-notifications is not available in this build:', e);
 }
+
+const getProjectId = () =>
+  (Constants.expoConfig as any)?.extra?.eas?.projectId ??
+  (Constants as any)?.easConfig?.projectId;
 
 export async function registerForPushNotificationsAsync(userId: string) {
   if (Platform.OS === 'web' || !Notifications) {
-    console.log('[NotificationService] Notifications native module is not loaded.');
+    console.log('[NotificationService] Notifications module is not loaded.');
     return null;
   }
 
   try {
+    // The Android channel must exist before a high-priority call notification
+    // can be delivered with sound, so create it first.
+    if (Platform.OS === 'android') {
+      await Notifications.setNotificationChannelAsync('calls', {
+        name: 'Incoming calls',
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 250, 250, 250],
+        lightColor: '#FF231F7C',
+        sound: 'default',
+      });
+    }
+
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
@@ -44,25 +56,17 @@ export async function registerForPushNotificationsAsync(userId: string) {
       return null;
     }
 
-    // EAS Project ID retrieved from app.json config
-    const token = (await Notifications.getExpoPushTokenAsync({
-      projectId: '5dad5e21-3524-4aff-98e7-d1c6bc12a2ef',
-    })).data;
-
-    console.log('[NotificationService] Generated Expo Push Token:', token);
-
-    // Save the token to the user document in Firestore so caller can query it
-    const userRef = doc(db, 'users', userId);
-    await updateDoc(userRef, { expoPushToken: token });
-
-    if (Platform.OS === 'android') {
-      await Notifications.setNotificationChannelAsync('default', {
-        name: 'default',
-        importance: Notifications.AndroidImportance.MAX,
-        vibrationPattern: [0, 250, 250, 250],
-        lightColor: '#FF231F7C',
-      });
+    const projectId = getProjectId();
+    if (!projectId) {
+      console.warn('[NotificationService] No EAS projectId in app config; cannot mint a push token.');
+      return null;
     }
+
+    const token = (await Notifications.getExpoPushTokenAsync({ projectId })).data;
+
+    // Push tokens are private: they live in /user_private, and the backend reads
+    // them with the Admin SDK when delivering a call notification.
+    await savePrivateUserData(userId, { expoPushToken: token });
 
     return token;
   } catch (error) {

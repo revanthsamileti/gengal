@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { RosterPreviewEntry } from './presenceService';
 import {
   collection,
   doc,
@@ -18,6 +19,7 @@ import {
   setDoc,
   deleteDoc,
   runTransaction,
+  QueryConstraint,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
 
@@ -56,6 +58,10 @@ export interface ExpertRoom {
   reviewingBio?: string | null;
   // pending private match connect {fromUid, toUid}
   pendingMatch?: { fromUid: string; toUid: string; fromName: string; toName: string } | null;
+  /** Host heartbeat. Absent on rooms created before presence existed. */
+  hostLastSeen?: Timestamp;
+  /** Up to four present members, denormalised by the host for lobby cards. */
+  roster?: RosterPreviewEntry[];
   createdAt?: Timestamp;
 }
 
@@ -144,6 +150,10 @@ export const createExpertRoom = async (
     reviewingAvatarData: null,
     reviewingBio: null,
     pendingMatch: null,
+    // Seeded so a host that dies before its first heartbeat still ages out of
+    // the lobby. Rooms with no value at all are treated as live, for the sake
+    // of rooms created before presence existed.
+    hostLastSeen: Timestamp.now(),
     createdAt: serverTimestamp() as any,
   } as Omit<ExpertRoom, 'id'>);
   return roomRef.id;
@@ -154,17 +164,22 @@ export const subscribeToActiveRooms = (
   tierFilter?: RoomTier,
   languageFilter?: string,
 ) => {
-  const roomsRef = collection(db, 'expert_rooms');
-  let q = query(roomsRef, where('status', '==', 'live'));
-  if (tierFilter) {
-    q = query(roomsRef, where('status', '==', 'live'), where('tier', '==', tierFilter));
-  }
-  if (languageFilter) {
-    q = query(roomsRef, where('status', '==', 'live'), where('language', '==', languageFilter));
-  }
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ExpertRoom)));
-  });
+  // Build the constraints up rather than rebuilding the query inside each
+  // branch — the previous version discarded the tier filter whenever a language
+  // filter was also supplied, so "VIP + Hindi" silently returned every Hindi
+  // room at any tier.
+  const constraints: QueryConstraint[] = [where('status', '==', 'live')];
+  if (tierFilter) constraints.push(where('tier', '==', tierFilter));
+  if (languageFilter) constraints.push(where('language', '==', languageFilter));
+  constraints.push(limit(50));
+
+  return onSnapshot(
+    query(collection(db, 'expert_rooms'), ...constraints),
+    (snap) => {
+      callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ExpertRoom)));
+    },
+    (error) => console.warn('Error subscribing to expert rooms:', error),
+  );
 };
 
 export const subscribeToRoom = (roomId: string, callback: (room: ExpertRoom | null) => void) => {
@@ -215,7 +230,24 @@ export const sendChatMessage = async (
 
 // ── Member join/leave ──────────────────────────────────────────────────────
 
+/**
+ * Membership is a document per member, not just a counter. The counter alone
+ * could never be reconciled after a crash, and per-minute billing needs
+ * somewhere server-owned to record when each member was last charged.
+ */
 export const joinRoom = async (roomId: string, uid: string, nickname: string, avatarData: any) => {
+  await setDoc(
+    doc(db, 'expert_rooms', roomId, 'members', uid),
+    {
+      uid,
+      nickname,
+      avatarData: avatarData || null,
+      joinedAt: serverTimestamp(),
+      // lastBilledAt is written by the server on the first billing tick, so the
+      // clock starts when billing starts rather than when the doc is created.
+    },
+    { merge: true },
+  );
   await updateDoc(doc(db, 'expert_rooms', roomId), { activeMemberCount: increment(1) });
   await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
 };
@@ -224,12 +256,30 @@ export const leaveRoom = async (roomId: string, uid: string, nickname: string) =
   try {
     await deleteDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid));
   } catch (e) {}
+  try {
+    await deleteDoc(doc(db, 'expert_rooms', roomId, 'members', uid));
+  } catch (e) {}
   await updateDoc(doc(db, 'expert_rooms', roomId), {
     activeMemberCount: increment(-1),
     handQueue: arrayRemove(uid),
     handQueueBoy: arrayRemove(uid),
     handQueueGirl: arrayRemove(uid),
   });
+};
+
+/**
+ * Advances billing for the caller's time in this room. The server derives the
+ * elapsed time and the rate, so the client cannot understate either.
+ */
+export const tickRoomBilling = async (roomId: string) => {
+  const { authedPost } = await import('./authService');
+  return authedPost<{
+    success: boolean;
+    billedAmount: number;
+    billedSeconds: number;
+    newBalance: number | null;
+    hasInsufficientFunds: boolean;
+  }>('/api/v1/rooms/billing', { roomId, collection: 'expert_rooms' });
 };
 
 // ── Raise Hand / Stage ─────────────────────────────────────────────────────
@@ -316,15 +366,31 @@ export const acceptOnStage = async (
   await logEvent(roomId, { type: 'stage_up', senderUid: uid, senderName: nickname });
 };
 
-export const removeFromStage = async (roomId: string, uid: string, currentSpeakers: SpeakerSlot[]) => {
-  const updated = currentSpeakers.filter((s) => s.uid !== uid);
-  await updateDoc(doc(db, 'expert_rooms', roomId), { speakers: updated });
+/**
+ * Stage changes read-modify-write a shared array, so they run in a transaction
+ * against the server's copy. Passing the caller's stale `speakers` snapshot
+ * meant two hosts acting at once silently clobbered each other — one speaker
+ * would pop back onto the stage, or a mute would be undone.
+ */
+const mutateSpeakers = async (
+  roomId: string,
+  mutate: (speakers: SpeakerSlot[]) => SpeakerSlot[],
+) => {
+  const roomRef = doc(db, 'expert_rooms', roomId);
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(roomRef);
+    if (!snap.exists()) throw new Error('Room no longer exists.');
+    const speakers = ((snap.data() as ExpertRoom).speakers ?? []);
+    transaction.update(roomRef, { speakers: mutate(speakers) });
+  });
 };
 
-export const toggleMute = async (roomId: string, uid: string, currentSpeakers: SpeakerSlot[]) => {
-  const updated = currentSpeakers.map((s) => s.uid === uid ? { ...s, isMuted: !s.isMuted } : s);
-  await updateDoc(doc(db, 'expert_rooms', roomId), { speakers: updated });
-};
+export const removeFromStage = async (roomId: string, uid: string) =>
+  mutateSpeakers(roomId, (speakers) => speakers.filter((s) => s.uid !== uid));
+
+export const toggleMute = async (roomId: string, uid: string) =>
+  mutateSpeakers(roomId, (speakers) =>
+    speakers.map((s) => (s.uid === uid ? { ...s, isMuted: !s.isMuted } : s)));
 
 // ── Profile Review ─────────────────────────────────────────────────────────
 
@@ -416,20 +482,4 @@ export const subscribeToTopGifters = (roomId: string, callback: (gifters: TopGif
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map((d) => d.data() as TopGifter));
   });
-};
-
-// ── Direct Join (coin-gated) ───────────────────────────────────────────────
-
-export const directJoinRoom = async (
-  roomId: string,
-  uid: string,
-  nickname: string,
-  avatarData: any,
-  hostUid: string,
-  ratePerMin: number,
-) => {
-  await transferCoins(uid, hostUid, ratePerMin);
-  await updateDoc(doc(db, 'expert_rooms', roomId), { activeMemberCount: increment(1) });
-  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
-  return ratePerMin;
 };

@@ -57,7 +57,9 @@ export default function LoginPasswordScreen({ navigate, goBack, route }: any) {
             style={styles.backButton}
             activeOpacity={0.78}
             onPress={() => goBack ? goBack() : navigate('Phone')}
-          >
+          
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={22} color="#5A075F" />
           </TouchableOpacity>
         </View>
@@ -83,10 +85,20 @@ export default function LoginPasswordScreen({ navigate, goBack, route }: any) {
                 value={password}
                 onChangeText={setPassword}
                 autoCapitalize="none"
+                autoCorrect={false}
+                // Without these a password manager never offers to fill.
+                textContentType="password"
+                autoComplete="current-password"
+                returnKeyType="done"
+                onSubmitEditing={handleLogin}
+                accessibilityLabel="Password"
               />
               <TouchableOpacity
                 onPress={() => setIsPasswordVisible(!isPasswordVisible)}
                 style={styles.eyeButton}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                accessibilityRole="button"
+                accessibilityLabel={isPasswordVisible ? 'Hide password' : 'Show password'}
               >
                 <MaterialIcons
                   name={isPasswordVisible ? 'visibility-off' : 'visibility'}

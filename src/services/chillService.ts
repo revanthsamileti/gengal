@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { RosterPreviewEntry } from './presenceService';
 import {
   collection,
   doc,
@@ -11,6 +12,7 @@ import {
   limit,
   serverTimestamp,
   increment,
+  setDoc,
   Timestamp,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
@@ -48,8 +50,11 @@ export interface ChillRoom {
   guesserUid: string | null;
   guesserNickname: string | null;
   guesserAvatarData?: any;
-  // movie visible only to actor — stored but clients ignore it unless they are actor
+  /** @deprecated Always null. The live answer lives in private/round; see
+   *  subscribeToRoundAnswer. Kept so existing documents still parse. */
   currentMovie: string | null;
+  /** Published only once the round ends, so everyone can see what it was. */
+  revealedMovie?: string | null;
   timerEndsAt: Timestamp | null;
   timerSeconds: number;
   winnerUid: string | null;
@@ -57,6 +62,10 @@ export interface ChillRoom {
   // scores map uid -> score (denormalised for quick read)
   scores: Record<string, number>;
   activeMemberCount: number;
+  /** Host heartbeat. Absent on rooms created before presence existed. */
+  hostLastSeen?: Timestamp;
+  /** Up to four present members, denormalised by the host for lobby cards. */
+  roster?: RosterPreviewEntry[];
   createdAt?: Timestamp;
 }
 
@@ -153,6 +162,8 @@ export const createChillRoom = async (
     winnerNickname: null,
     scores: {},
     activeMemberCount: 1,
+    // See the note in createExpertRoom — seeds host liveness from creation.
+    hostLastSeen: Timestamp.now(),
     createdAt: serverTimestamp(),
   } as Omit<ChillRoom, 'id'>);
   return ref.id;
@@ -235,6 +246,15 @@ export const startRound = async (
 ) => {
   // timerEndsAt calculated from now + timerSeconds
   const endsAt = Timestamp.fromMillis(Date.now() + timerSeconds * 1000);
+
+  // The answer lives in a private document readable only by the actor and the
+  // host. It used to sit on the room document, which every member can read, so
+  // any guesser on a modified client could simply read the answer.
+  await setDoc(doc(db, 'chill_rooms', roomId, 'private', 'round'), {
+    movie,
+    roundStartedAt: serverTimestamp(),
+  });
+
   await updateDoc(doc(db, 'chill_rooms', roomId), {
     phase: 'prompt',
     actorUid,
@@ -243,7 +263,8 @@ export const startRound = async (
     guesserUid,
     guesserNickname,
     guesserAvatarData: guesserAvatarData || null,
-    currentMovie: movie,
+    currentMovie: null,
+    revealedMovie: null,
     timerEndsAt: endsAt,
     timerSeconds,
     winnerUid: null,
@@ -275,6 +296,8 @@ export const markCorrect = async (
     winnerUid,
     winnerNickname,
     scores: newScores,
+    // Safe to publish now that the round has ended.
+    revealedMovie: movie,
   });
   await logEvent(roomId, {
     type: 'correct',
@@ -289,6 +312,7 @@ export const markTimeUp = async (roomId: string, movie: string) => {
     phase: 'result',
     winnerUid: null,
     winnerNickname: null,
+    revealedMovie: movie,
   });
   await logEvent(roomId, {
     type: 'round_end',
@@ -358,4 +382,20 @@ export const sendChillGift = async (
     giftName,
     giftCost,
   });
+};
+
+/**
+ * The round's answer. Readable only by the actor and the host — security rules
+ * enforce that, so a guesser subscribing here gets a permission error rather
+ * than the answer.
+ */
+export const subscribeToRoundAnswer = (
+  roomId: string,
+  callback: (movie: string | null) => void,
+) => {
+  return onSnapshot(
+    doc(db, 'chill_rooms', roomId, 'private', 'round'),
+    (snap) => callback(snap.exists() ? ((snap.data() as any).movie ?? null) : null),
+    () => callback(null),
+  );
 };

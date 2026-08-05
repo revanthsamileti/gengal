@@ -85,7 +85,6 @@ export const findMatch = async (
         transaction.set(newRoomRef, {
           status: 'active',
           audioProvider: 'agora', // Defaulting to Agora as the primary engine per the 40K architecture
-          audioTokenOrUrl: 'TEST_TOKEN', // Placeholder for actual token generation
           host: {
             uid: opponentDoc.id,
             nickname: opponentData.nickname || 'Host',
@@ -112,7 +111,6 @@ export const findMatch = async (
         nickname: opponentData.nickname || 'Host',
         avatarData: opponentData.avatarData || null,
         audioProvider: 'agora',
-        audioTokenOrUrl: 'TEST_TOKEN'
       });
 
       return () => {}; // Cleanup function (none needed for guest)
@@ -146,7 +144,7 @@ export const findMatch = async (
             onMatchFound(data.matchedRoomId, {
               ...roomData.guest,
               audioProvider: roomData.audioProvider || 'agora',
-              audioTokenOrUrl: roomData.audioTokenOrUrl || 'TEST_TOKEN'
+              audioTokenOrUrl: roomData.audioTokenOrUrl || ''
             });
           }
           

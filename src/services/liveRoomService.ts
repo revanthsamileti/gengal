@@ -1,115 +1,12 @@
 import { db } from '../config/firebase';
 import {
-  collection,
   doc,
   setDoc,
   updateDoc,
   deleteDoc,
   onSnapshot,
-  query,
   serverTimestamp,
-  getDocs,
-  getDoc,
 } from 'firebase/firestore';
-
-export interface LiveRoom {
-  hostUid: string;
-  status: 'available' | 'busy';
-  currentGuestUid?: string | null;
-  createdAt: any;
-}
-
-export interface CallRequest {
-  requesterUid: string;
-  requesterName: string;
-  requestedAt: any;
-}
-
-/**
- * Creates a public live room for the current user, marking them as available.
- */
-export const createLiveRoom = async (uid: string) => {
-  const roomRef = doc(db, 'public_rooms', uid);
-  await setDoc(roomRef, {
-    hostUid: uid,
-    status: 'available',
-    currentGuestUid: null,
-    createdAt: serverTimestamp(),
-  });
-};
-
-/**
- * Ends the live room for the current user.
- */
-export const endLiveRoom = async (uid: string) => {
-  const roomRef = doc(db, 'public_rooms', uid);
-  await deleteDoc(roomRef);
-};
-
-/**
- * Updates the status of the live room (e.g., to 'busy' when a call starts).
- */
-export const setLiveRoomStatus = async (uid: string, status: 'available' | 'busy', guestUid?: string) => {
-  const roomRef = doc(db, 'public_rooms', uid);
-  const updateData: Partial<LiveRoom> = { status };
-  if (guestUid !== undefined) {
-    updateData.currentGuestUid = guestUid;
-  }
-  try {
-    await setDoc(roomRef, updateData, { merge: true });
-  } catch (e) {
-    console.warn("Could not set live room status:", e);
-  }
-};
-
-/**
- * Adds a call request to a busy host's room.
- */
-export const requestToCall = async (hostUid: string, requesterUid: string, requesterName: string) => {
-  const requestRef = doc(db, 'public_rooms', hostUid, 'requests', requesterUid);
-  await setDoc(requestRef, {
-    requesterUid,
-    requesterName,
-    requestedAt: serverTimestamp(),
-  });
-};
-
-/**
- * Subscribes to all active live rooms.
- */
-export const subscribeToLiveRooms = (onUpdate: (rooms: Record<string, LiveRoom>) => void) => {
-  const q = query(collection(db, 'public_rooms'));
-  return onSnapshot(q, (snapshot) => {
-    const rooms: Record<string, LiveRoom> = {};
-    snapshot.forEach((docSnap) => {
-      rooms[docSnap.id] = docSnap.data() as LiveRoom;
-    });
-    onUpdate(rooms);
-  });
-};
-
-/**
- * Fetches pending requests for a host's room.
- */
-export const getPendingRequests = async (hostUid: string): Promise<CallRequest[]> => {
-  const requestsRef = collection(db, 'public_rooms', hostUid, 'requests');
-  const snapshot = await getDocs(requestsRef);
-  return snapshot.docs.map(doc => doc.data() as CallRequest).sort((a, b) => {
-    const timeA = a.requestedAt?.toMillis?.() || 0;
-    const timeB = b.requestedAt?.toMillis?.() || 0;
-    return timeA - timeB; // oldest first
-  });
-};
-
-/**
- * Clears all requests for a host
- */
-export const clearAllRequests = async (hostUid: string) => {
-  const requestsRef = collection(db, 'public_rooms', hostUid, 'requests');
-  const snapshot = await getDocs(requestsRef);
-  const deletePromises = snapshot.docs.map(d => deleteDoc(d.ref));
-  await Promise.all(deletePromises);
-};
 
 export interface IncomingCall {
   callerUid: string;
@@ -134,6 +31,9 @@ export const createCallOffer = async (
   const callRef = doc(db, 'incoming_calls', receiverUid);
   await setDoc(callRef, {
     callerUid,
+    // Security rules require receiverUid to match the document id on create.
+    // Without it every outbound offer is rejected.
+    receiverUid,
     callerName,
     callerAvatarUrl,
     callerAvatarData: callerAvatarData || null,
@@ -145,36 +45,30 @@ export const createCallOffer = async (
     receiverHeartbeat: Date.now(),
   });
 
-  // Attempt to fetch recipient's Expo push token for background signaling
-  try {
-    const userSnap = await getDoc(doc(db, 'users', receiverUid));
-    if (userSnap.exists()) {
-      const data = userSnap.data();
-      if (data && data.expoPushToken) {
-        console.log("[liveRoomService] Sending Expo push notification for incoming call...");
-        fetch('https://exp.host/--/api/v2/push/send', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            to: data.expoPushToken,
-            title: `Incoming ${mode === 'video' ? 'Video' : 'Voice'} Call`,
-            body: `${callerName} is calling you...`,
-            data: {
-              roomId,
-              mode,
-              callerUid,
-              callerName,
-              isIncomingPending: true,
-            },
-            sound: 'default',
-            priority: 'high',
-          })
-        }).catch(e => console.warn("Failed to dispatch push notification:", e));
-      }
-    }
-  } catch (err) {
-    console.warn("[liveRoomService] Failed to fetch push token for receiver:", err);
-  }
+  // Push delivery is server-side: the receiver's Expo token lives in a
+  // private document the caller cannot read.
+  notifyIncomingCall(receiverUid, mode).catch((e) =>
+    console.warn('[liveRoomService] Failed to dispatch push notification:', e)
+  );
+};
+
+const notifyIncomingCall = async (receiverUid: string, mode: 'call' | 'video') => {
+  const [{ auth }, { getBackendUrl }] = await Promise.all([
+    import('../config/firebase'),
+    import('./authService'),
+  ]);
+  const user = auth.currentUser;
+  if (!user) return;
+
+  const idToken = await user.getIdToken();
+  await fetch(`${getBackendUrl()}/api/v1/calls/notify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ receiverUid, mode }),
+  });
 };
 
 export const updateCallHeartbeat = async (receiverUid: string, role: 'caller' | 'receiver') => {
@@ -247,4 +141,50 @@ export const cancelCallOffer = async (receiverUid: string) => {
 export const clearCallOffer = async (receiverUid: string) => {
   const callRef = doc(db, 'incoming_calls', receiverUid);
   await deleteDoc(callRef);
+};
+
+/**
+ * Call history. ActivityScreen reads the `calls` collection, but nothing used to
+ * write to it, so the screen was permanently empty. The caller opens the record
+ * and whichever side hangs up first closes it.
+ */
+export const openCallRecord = async (
+  roomId: string,
+  caller: { uid: string; name: string; avatarUrl?: string | null; avatarData?: any },
+  receiver: { uid: string; name: string; avatarUrl?: string | null; avatarData?: any },
+  mode: 'call' | 'video'
+) => {
+  const callRef = doc(db, 'calls', roomId);
+  await setDoc(callRef, {
+    callerUid: caller.uid,
+    callerName: caller.name,
+    callerAvatarUrl: caller.avatarUrl || null,
+    callerAvatarData: caller.avatarData || null,
+    receiverUid: receiver.uid,
+    receiverName: receiver.name,
+    receiverAvatarUrl: receiver.avatarUrl || null,
+    receiverAvatarData: receiver.avatarData || null,
+    mode,
+    status: 'active',
+    durationSeconds: 0,
+    coinsDeducted: 0,
+    heartsEarned: 0,
+    createdAt: serverTimestamp(),
+  });
+};
+
+/**
+ * Marks the call finished. Duration and coins are deliberately not written here:
+ * the billing endpoint accumulates both from the server clock, and letting the
+ * client set them would overwrite the authoritative values.
+ */
+export const closeCallRecord = async (roomId: string) => {
+  try {
+    await updateDoc(doc(db, 'calls', roomId), {
+      status: 'ended',
+      endedAt: serverTimestamp(),
+    });
+  } catch (e) {
+    console.warn('[liveRoomService] Failed to close call record:', e);
+  }
 };

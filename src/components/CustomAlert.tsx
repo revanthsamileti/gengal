@@ -8,6 +8,7 @@ import {
   Animated,
   Platform,
   TouchableWithoutFeedback,
+  Alert as RNAlert,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 
@@ -112,12 +113,14 @@ export const CustomAlert = () => {
   // Safe wrapper for React Native Animated interpolation issues
   const overlayOpacity = fadeAnim;
   
-  if (!state.visible && (fadeAnim as any)._value === 0) return null;
+  // `state.visible` stays true until the close animation finishes, so it alone
+  // drives mounting. Reading Animated's private `._value` breaks under Fabric.
+  if (!state.visible) return null;
 
   return (
     <Modal
       transparent
-      visible={state.visible || (fadeAnim as any)._value > 0}
+      visible={state.visible}
       animationType="none"
       onRequestClose={handleBackdropPress}
     >
@@ -143,6 +146,8 @@ export const CustomAlert = () => {
                       <TouchableOpacity
                         key={index}
                         activeOpacity={0.8}
+                        accessibilityRole="button"
+                        accessibilityLabel={btn.text || (isCancel ? 'Cancel' : 'OK')}
                         onPress={() => handleClose(btn.onPress)}
                         style={[
                           styles.button,
@@ -187,12 +192,10 @@ export const Alert = {
     if (customAlertRef && customAlertRef.alert) {
       customAlertRef.alert(title, message, buttons, options);
     } else {
-      // Fallback if not mounted yet (should rarely happen)
-      console.warn('CustomAlert not mounted, falling back to console');
-      console.log(`Alert: ${title} - ${message}`);
-      if (buttons && buttons.length > 0) {
-          buttons[0].onPress && buttons[0].onPress();
-      }
+      // Only reachable if an alert fires before the root <CustomAlert /> mounts.
+      // Fall through to the platform dialog rather than auto-invoking the first
+      // button, which would run an action the user never actually confirmed.
+      RNAlert.alert(title, message, buttons as any, options);
     }
   },
 };

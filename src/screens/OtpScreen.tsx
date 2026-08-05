@@ -7,6 +7,7 @@ import {
   Platform,
   ScrollView,
   Pressable,
+  TextInput,
   ActivityIndicator
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
@@ -153,7 +154,9 @@ export default function OtpScreen({ navigate, goBack, route }: OtpScreenProps) {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <TouchableOpacity onPress={goBack} style={styles.backBtn}>
+          <TouchableOpacity onPress={goBack} style={styles.backBtn}
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={24} color="#5A155A" />
           </TouchableOpacity>
           <Text style={styles.brand}>Gengal</Text>
@@ -170,11 +173,24 @@ export default function OtpScreen({ navigate, goBack, route }: OtpScreenProps) {
 
         <View style={styles.inputWrapper}>
           <View style={styles.inputBox}>
-            <Text 
+            {/* A real TextInput, not a Text: this is what makes SMS autofill
+                and paste possible. The numpad below still drives the same
+                state, so both entry methods work. */}
+            <TextInput
               style={[styles.inputTextCenter, !otp && styles.placeholderText, { flex: 1 }, Platform.OS === 'web' && { outlineStyle: 'none' } as any]}
-            >
-              {formatOtp(otp)}
-            </Text>
+              value={otp}
+              onChangeText={(t) => setOtp(t.replace(/\D/g, '').slice(0, 6))}
+              placeholder={formatOtp('')}
+              placeholderTextColor="#B9A48F"
+              keyboardType="number-pad"
+              textContentType="oneTimeCode"
+              autoComplete="sms-otp"
+              maxLength={6}
+              returnKeyType="done"
+              onSubmitEditing={() => { if (otp.length === 6 && !isLoading) handleContinue(); }}
+              accessibilityLabel="Six digit verification code"
+              editable={!isLoading}
+            />
           </View>
         </View>
 
@@ -187,6 +203,8 @@ export default function OtpScreen({ navigate, goBack, route }: OtpScreenProps) {
               <Pressable
                 key={i}
                 onPress={() => handlePress(key)}
+                accessibilityRole="button"
+                accessibilityLabel={key === 'backspace' ? 'Delete last digit' : key}
                 style={({ pressed }) => [
                   styles.numpadKey, 
                   styles.numpadKeyElevated,
@@ -237,8 +255,15 @@ export default function OtpScreen({ navigate, goBack, route }: OtpScreenProps) {
             <TouchableOpacity 
               activeOpacity={resendTimer > 0 ? 1 : 0.7} 
               style={[styles.toggleAuthModeBtn, { marginTop: 10 }]}
+              disabled={resendTimer > 0 || isLoading}
+              accessibilityRole="button"
+              accessibilityLabel={resendTimer > 0 ? `Resend code available in ${resendTimer} seconds` : 'Resend verification code'}
+              accessibilityState={{ disabled: resendTimer > 0 || isLoading }}
               onPress={async () => {
-                if (resendTimer === 0) {
+                // isLoading matters as well as the timer: without it a resend
+                // could fire while a verify was still in flight, racing two
+                // auth requests against each other.
+                if (resendTimer === 0 && !isLoading) {
                   setIsLoading(true);
                   setErrorMsg('');
                   try {

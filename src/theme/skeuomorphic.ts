@@ -25,4 +25,7 @@ export const skeuoGradients = {
   inset: ['#EDE1D0', '#FFF9EF'] as const,
   gold: ['#FFF1BB', '#D0A92E', '#8F6D05'] as const,
   plumButton: ['#6E0875', '#4B0054', '#2B0030'] as const,
+  romanticHero: ['#FFF6F4', '#FBE7EC', '#F3D9E6'] as const,
+  romanticButton: ['#8E2A6B', '#6B1550', '#4B0054'] as const,
+  blushRing: ['#FFE3EC', '#E8A9C4', '#FFF1F5'] as const,
 };

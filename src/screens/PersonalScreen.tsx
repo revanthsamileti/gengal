@@ -1,249 +1,332 @@
 import React, { useMemo, useState, useEffect } from 'react';
-import { Platform, Image,
+import { tap33, tap34, tap38 } from '../theme/touch';
+import {
+  Platform,
+  Image,
   Modal,
   Pressable,
+  FlatList,
   ScrollView,
   StyleSheet,
   Text,
   TouchableOpacity,
-  View, } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+  View,
+  Dimensions,
+} from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
+import { BlurView } from 'expo-blur';
 
 import ScreenShell from '../components/ScreenShell';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
-import { skeuo } from '../theme/skeuomorphic';
-
-import CallPriceTag from '../components/CallPriceTag';
-import { subscribeToOnlineUsers, UserProfile as FirebaseUser } from '../services/userService';
+import { subscribeToOnlineUsers, toggleActiveMode, UserProfile as FirebaseUser } from '../services/userService';
 import { findMatch } from '../services/matchService';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import ConnectingOverlay from '../components/ConnectingOverlay';
+import { Alert } from '../components/CustomAlert';
+import { useActionLock } from '../hooks/useActionLock';
+import { SAMPLE_PROFILES } from '../data/sampleProfiles';
+import { subscribeToGlobalSettings } from '../services/adminService';
 
 type MatchNode = {
   uid?: string;
   name: string;
   age: number;
   language: string;
-  tier: 'Elite' | 'VIP';
-  side: 'left' | 'right';
+  tier: 'ELITE' | 'VIP' | 'STANDARD';
   image: string;
   avatarData?: any;
   modes: Array<'call' | 'video'>;
-  liveStatus?: string;
-  feedCategory?: string;
   city?: string;
+  isOnline?: boolean;
+  popularityScore?: number;
+  isBusy?: boolean;
+  waitlistPriorityActive?: boolean;
+  /**
+   * Seeded demo profile, not a real account. These keep the grid from looking
+   * empty but have no uid behind them, so they must never be callable — a call
+   * placed against one would ring a user that does not exist.
+   */
+  isSampleProfile?: boolean;
 };
 
 type PersonalScreenProps = {
   navigate: (screen: string, params?: any) => void;
+  goBack?: () => void;
 };
 
-// Moved constants inside component to make them reactive
+const SCREEN_WIDTH = Math.min(Dimensions.get('window').width, 460);
 
-// PROFILE_PATH_POINTS removed because paths are generated dynamically
-function heartPath(x: number, y: number, scale = 1) {
-  return [
-    `M ${x} ${y + 58 * scale}`,
-    `C ${x - 12 * scale} ${y + 45 * scale}, ${x - 78 * scale} ${y + 5 * scale}, ${x - 78 * scale} ${y - 40 * scale}`,
-    `C ${x - 78 * scale} ${y - 86 * scale}, ${x - 22 * scale} ${y - 99 * scale}, ${x} ${y - 58 * scale}`,
-    `C ${x + 22 * scale} ${y - 99 * scale}, ${x + 78 * scale} ${y - 86 * scale}, ${x + 78 * scale} ${y - 40 * scale}`,
-    `C ${x + 78 * scale} ${y + 5 * scale}, ${x + 12 * scale} ${y + 45 * scale}, ${x} ${y + 58 * scale}`,
-    'Z',
-  ].join(' ');
-}
-
-function PathBackground({ matchCount, isEndRight }: { matchCount: number; isEndRight: boolean }) {
-  if (matchCount === 0) return null;
-
-  const points = Array.from({ length: matchCount }).map((_, i) => ({
-    x: i % 2 === 0 ? 79 : 351,
-    y: 250 + i * 200
-  }));
-
-  const cardBottomY = 244 + (matchCount - 1) * 200;
-  const buttonCenterY = cardBottomY + 113;
-  const endY = buttonCenterY;
-  const endX = isEndRight ? 360 : 70;
-  const lastPoint = points[points.length - 1];
-
-  let d = `M 215 55 C 160 120, 79 160, 79 250`;
-  
-  for (let i = 1; i < points.length; i++) {
-    const prev = points[i - 1];
-    const curr = points[i];
-    d += ` C ${prev.x} ${prev.y + 90}, ${curr.x} ${curr.y - 100}, ${curr.x} ${curr.y}`;
-  }
-
-  // The '...' button is horizontally between the last card and the random button.
-  // We can just curve the line to pass perfectly through the center of the elements.
-  const moreButtonX = isEndRight ? 260 : 170; // rough guess based on flex-end/flex-start and gaps
-  
-  // Curve from last point down to the more button, then to the random button
-  d += ` C ${lastPoint.x} ${lastPoint.y + 60}, ${moreButtonX} ${endY}, ${endX} ${endY}`;
-
-  const svgHeight = endY + 100;
-  
-  const junctions = [];
-  for (let y = 350; y < points[points.length - 1].y; y += 200) {
-    junctions.push({
-      y,
-      x: ((y - 350) / 200) % 2 === 0 ? 215 : 210
-    });
-  }
-
+/** Per-minute cost shown inside a Call/Video pill. */
+function PriceStars({ amount, tone }: { amount: number; tone: 'gold' | 'light' | 'muted' }) {
+  const color = tone === 'light' ? '#F3D98A' : tone === 'muted' ? '#A99A86' : '#9A7A05';
   return (
-    <Svg
-      pointerEvents="none"
-      width="100%"
-      height={svgHeight}
-      viewBox={`0 0 430 ${svgHeight}`}
-      preserveAspectRatio="none"
-      style={styles.pathLayer}
-    >
-      <Path
-        d={d}
-        fill="none"
-        stroke="rgba(166, 132, 35, 0.48)"
-        strokeWidth={2.2}
-        strokeDasharray="5 8"
-        strokeLinecap="round"
-      />
-
-      {points.map((point, index) => {
-        const rotation = index % 2 === 0 ? 15 : -15;
-        return (
-          <G key={`heart-${point.y}`} transform={`rotate(${rotation}, ${point.x}, ${point.y})`}>
-            <Path
-              d={heartPath(point.x, point.y, index % 2 === 0 ? 1 : 0.96)}
-              fill="rgba(255, 237, 241, 0.12)"
-              stroke="rgba(195, 156, 169, 0.42)"
-              strokeWidth={1.8}
-              strokeDasharray="4 7"
-              strokeLinecap="round"
-            />
-          </G>
-        );
-      })}
-
-      {junctions.map((j) => (
-        <Path
-          key={`junction-${j.y}`}
-          d={heartPath(j.x, j.y, 0.12)}
-          fill="#F4A2B4"
-          stroke="#FFFCF7"
-          strokeWidth={3}
-        />
-      ))}
-
-      <Circle cx={215} cy={55} r={4} fill="#C5A444" />
-      <Circle cx={endX} cy={endY} r={4} fill="#C5A444" />
-    </Svg>
+    <View style={styles.pillPrice}>
+      <MaterialIcons name="star" size={12} color={tone === 'muted' ? '#C4B9A6' : '#F0B71C'} />
+      <Text style={[styles.pillPriceText, { color }]} numberOfLines={1}>{amount}/m</Text>
+    </View>
   );
 }
 
-function ModeButton({
-  mode,
+function ActionButtonsBar({
+  modes,
   node,
   navigate,
+  onCallPress,
+  onJoinWaitlist,
+  waitlistStatus,
+  rates,
 }: {
-  mode: 'call' | 'video';
+  modes: Array<'call' | 'video'>;
   node: MatchNode;
   navigate: PersonalScreenProps['navigate'];
+  onCallPress: (node: MatchNode, mode: 'call' | 'video') => void;
+  onJoinWaitlist: (node: MatchNode) => void;
+  waitlistStatus?: 'none' | 'waiting' | 'ready';
+  rates: { call: number; video: number };
 }) {
-  const isVideo = mode === 'video';
+  // Seeded demo profiles have no real account behind them. Keep the same two
+  // controls so the row still reads as a profile, but mute them and let the tap
+  // fall through to launchCall, which explains why it cannot connect. A full
+  // width grey pill here made every card in the list look broken.
+  if (node.isSampleProfile) {
+    return (
+      <View style={styles.buttonsRow}>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={[styles.callPillBtn, styles.pillMuted]}
+          onPress={() => onCallPress(node, 'call')}
+          accessibilityRole="button"
+          accessibilityLabel={`Call ${node.name} — sample profile, not connectable`}
+        >
+          <MaterialIcons name="phone" size={18} color="#A99A86" />
+          <PriceStars amount={rates.call} tone="muted" />
+        </TouchableOpacity>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={[styles.videoPillBtn, styles.pillMuted]}
+          hitSlop={tap38}
+          onPress={() => onCallPress(node, 'video')}
+          accessibilityRole="button"
+          accessibilityLabel={`Video call ${node.name} — sample profile, not connectable`}
+        >
+          <MaterialIcons name="videocam" size={19} color="#A99A86" />
+          <PriceStars amount={rates.video} tone="muted" />
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  if (node.isBusy) {
+    const isWaiting = waitlistStatus === 'waiting';
+    return (
+      <View style={styles.buttonsRow}>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={[styles.waitlistBtn, isWaiting && styles.waitlistBtnWaiting]}
+          hitSlop={tap38}
+          onPress={() => onJoinWaitlist(node)}
+          disabled={isWaiting}
+        >
+          <MaterialIcons name={isWaiting ? "check-circle" : "stars"} size={17} color={isWaiting ? "#15803D" : "#B45309"} />
+          <Text style={[styles.waitlistBtnText, isWaiting && styles.waitlistBtnTextWaiting]}>
+            {isWaiting ? 'On Priority Waitlist' : 'Join Priority Waitlist'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   return (
-    <TouchableOpacity
-      activeOpacity={0.84}
-      style={[styles.modeButton, isVideo && styles.modeButtonVideo]}
-      onPress={() => navigate('Call', { profileName: node.name, mode, isCaller: true, matchData: node })}
-    >
-      <MaterialIcons
-        name={isVideo ? 'videocam' : 'phone'}
-        size={17}
-        color={isVideo ? '#FFF' : '#FFF'}
-      />
-      <Text style={[styles.modeText, !isVideo && styles.modeTextCall]}>
-        {isVideo ? 'Video' : 'Call'}
-      </Text>
-      <CallPriceTag mode={mode} />
-    </TouchableOpacity>
+    <View style={styles.buttonsRow}>
+      {modes.includes('call') && (
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={styles.callPillBtn}
+          onPress={() => onCallPress(node, 'call')}
+          accessibilityRole="button"
+          accessibilityLabel={`Call ${node.name}, ${rates.call} coins per minute`}
+        >
+          <MaterialIcons name="phone" size={18} color="#6E5211" />
+          <PriceStars amount={rates.call} tone="gold" />
+        </TouchableOpacity>
+      )}
+
+      {modes.includes('video') && (
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={styles.videoPillBtn}
+          hitSlop={tap38}
+          onPress={() => onCallPress(node, 'video')}
+          accessibilityRole="button"
+          accessibilityLabel={`Video call ${node.name}, ${rates.video} coins per minute`}
+        >
+          <MaterialIcons name="videocam" size={19} color="#FFF" />
+          <PriceStars amount={rates.video} tone="light" />
+        </TouchableOpacity>
+      )}
+    </View>
   );
 }
 
-function AvatarNode({
+function FloatingProfileRow({
   node,
+  index,
+  isLast,
   navigate,
+  onCallPress,
+  onJoinWaitlist,
+  waitlistStatus,
+  rates,
 }: {
   node: MatchNode;
+  index: number;
+  isLast: boolean;
   navigate: PersonalScreenProps['navigate'];
+  onCallPress: (node: MatchNode, mode: 'call' | 'video') => void;
+  onJoinWaitlist: (node: MatchNode) => void;
+  waitlistStatus?: 'none' | 'waiting' | 'ready';
+  rates: { call: number; video: number };
 }) {
-  return (
-    <TouchableOpacity
-      activeOpacity={0.86}
-      style={[styles.avatarNode, node.side === 'right' && styles.avatarNodeRight]}
-      onPress={() => navigate('Profile', { profileName: node.name, matchData: node })}
-    >
-      <LinearGradient
-        colors={['#FFF4CA', '#9C8215', '#EAD06F']}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
-        style={styles.matchRing}
-      >
-        <View style={styles.matchPhotoInner}>
+  const isLeft = index % 2 === 0;
+  const [isLiked, setIsLiked] = useState(false);
+
+  // Avatar Assembly (Big golden rim circle + heart rim icon + background dashed heart)
+  const AvatarAssembly = (
+    <View style={styles.avatarAssembly}>
+      <TouchableOpacity
+        activeOpacity={0.92}
+        style={[
+          styles.avatarCircleOuter,
+          node.isBusy
+            ? { 
+                backgroundColor: '#9B1B30', // Red velvet for busy users
+                borderColor: '#FB7185',     // Luminous ruby glow rim
+                borderWidth: 2,
+                shadowColor: '#F43F5E',     // 360-degree red glow
+                shadowOffset: { width: 0, height: 0 },
+                shadowOpacity: 0.95,
+                shadowRadius: 15,
+                elevation: 20,
+              }
+            : node.isOnline
+            ? { 
+                backgroundColor: '#15803D', // Dark green for active users
+                borderColor: '#4ADE80',     // Luminous emerald glow rim
+                borderWidth: 2,
+                shadowColor: '#22C55E',     // 360-degree green glow
+                shadowOffset: { width: 0, height: 0 },
+                shadowOpacity: 0.95,
+                shadowRadius: 15,
+                elevation: 20,
+              }
+            : null
+        ]}
+        onPress={() => navigate('Profile', { profileName: node.name, matchData: node })}
+      
+        accessibilityRole="button"
+        accessibilityLabel="Open this profile">
+        <View style={styles.avatarCircleInner}>
           {node.avatarData ? (
-            <GengalAvatar data={node.avatarData} size={86} />
+            <GengalAvatar data={node.avatarData} size={102} />
           ) : (
-            <Image source={{ uri: node.image }} style={styles.matchPhoto} />
+            <Image source={{ uri: node.image }} style={styles.avatarImage} />
           )}
         </View>
-      </LinearGradient>
-
-      <TouchableOpacity style={styles.likeBubble} activeOpacity={0.8}>
-        <MaterialIcons name="favorite-border" size={22} color="#897006" />
       </TouchableOpacity>
-    </TouchableOpacity>
-  );
-}
 
-function InfoCard({
-  node,
-  navigate,
-}: {
-  node: MatchNode;
-  navigate: PersonalScreenProps['navigate'];
-}) {
-  return (
-    <View style={[styles.infoCard, node.side === 'right' && styles.infoCardLeft]}>
+      {/* Cute Rim Heart Like Button */}
+      <TouchableOpacity 
+        style={[
+          styles.rimHeartBadge,
+          isLiked && { backgroundColor: '#FFF0F5', borderColor: '#E83F6F' }
+        ]}
+        hitSlop={tap33} 
+        activeOpacity={0.8}
+        onPress={() => setIsLiked(!isLiked)}
+        accessibilityRole="button"
+        accessibilityLabel={isLiked ? `Unlike ${node.name}` : `Like ${node.name}`}
+        accessibilityState={{ selected: isLiked }}
+      >
+        <MaterialIcons 
+          name={isLiked ? "favorite" : "favorite-border"} 
+          size={17} 
+          color={isLiked ? "#E83F6F" : "#82611A"} 
+        />
+      </TouchableOpacity>
+    </View>
+  );
+
+  // Floating Cream-White Glass Card
+  const DetailsCard = (
+    <View style={[styles.detailsCard, isLeft ? { marginLeft: 14 } : { marginRight: 14 }]}>
       <TouchableOpacity
-        activeOpacity={0.78}
-        style={styles.infoTap}
+        activeOpacity={0.92}
         onPress={() => navigate('Profile', { profileName: node.name, matchData: node })}
       >
-        <View style={styles.memberBadge}>
-          <MaterialIcons name="diamond" size={9} color="#B68D1C" />
-          <Text style={styles.memberBadgeText}>{node.tier}</Text>
-        </View>
-        <View style={styles.nameRow}>
-          {node.side === 'right' ? <Text style={styles.age}>{node.age}</Text> : null}
-          <Text style={styles.matchName} numberOfLines={1} adjustsFontSizeToFit>
+        {/* Name and Age Row */}
+        <View style={styles.nameAgeRow}>
+          <Text style={styles.nameTypography} numberOfLines={1}>
             {node.name}
           </Text>
-          {node.side === 'left' ? <Text style={styles.age}>{node.age}</Text> : null}
+          <Text style={styles.ageTypography}>{node.age}</Text>
         </View>
-        <View style={styles.profileLanguageRow}>
-          <MaterialIcons name="language" size={12} color="#B18A20" />
-          <Text style={styles.profileLanguage}>{node.language}</Text>
+
+        {/* Busy or Priority status badges */}
+        {node.isBusy ? (
+          <View style={styles.busyBadge}>
+            <Text style={styles.busyBadgeText}>🔴 Busy in Call</Text>
+          </View>
+        ) : node.waitlistPriorityActive ? (
+          <View style={styles.priorityBadge}>
+            <Text style={styles.priorityBadgeText}>⚡ 5s Priority Window</Text>
+          </View>
+        ) : null}
+
+        {/* Language & Location */}
+        <View style={styles.langRow}>
+          <MaterialIcons name="language" size={14} color="#8A6C28" />
+          <Text style={styles.langText}>{node.language}</Text>
         </View>
+        {node.city ? (
+          <View style={styles.stateRow}>
+            <MaterialIcons name="location-on" size={13} color="#8A6C28" />
+            <Text style={styles.stateText}>{node.city}</Text>
+          </View>
+        ) : null}
       </TouchableOpacity>
-      <View style={styles.modeRow}>
-        {node.modes.map((mode) => (
-          <ModeButton key={mode} mode={mode} node={node} navigate={navigate} />
-        ))}
+
+      {/* Action Buttons */}
+      <View style={styles.actionSection}>
+        <ActionButtonsBar
+          modes={node.modes}
+          node={node}
+          navigate={navigate}
+          onCallPress={onCallPress}
+          onJoinWaitlist={onJoinWaitlist}
+          waitlistStatus={waitlistStatus}
+          rates={rates}
+        />
+      </View>
+    </View>
+  );
+
+  return (
+    <View style={styles.rowWrapper}>
+      <View style={styles.floatingContentRow}>
+        {isLeft ? (
+          <>
+            {AvatarAssembly}
+            {DetailsCard}
+          </>
+        ) : (
+          <>
+            {DetailsCard}
+            {AvatarAssembly}
+          </>
+        )}
       </View>
     </View>
   );
@@ -253,198 +336,358 @@ function LanguageFilter({
   selected,
   onSelect,
   languages,
-  navigate,
 }: {
   selected: string;
   onSelect: (lang: string) => void;
   languages: string[];
-  navigate: PersonalScreenProps['navigate'];
 }) {
   const [isOpen, setIsOpen] = useState(false);
-  const selectedLabel = selected === 'ALL'
-    ? 'All languages'
-    : selected.charAt(0) + selected.slice(1).toLowerCase();
-
-  const selectLanguage = (language: string) => {
-    onSelect(language);
-    setIsOpen(false);
-  };
+  const selectedLabel = selected === 'ALL' ? 'All Languages' : selected.toUpperCase();
 
   return (
-    <View style={[styles.languageFilter, { flexDirection: 'row', justifyContent: 'center', alignItems: 'center' }]}>
-      <TouchableOpacity
-        activeOpacity={0.8}
-        style={styles.languageSelect}
-        onPress={() => setIsOpen(true)}
-      >
-        <View style={styles.languageSelectIcon}>
-          <MaterialIcons name="translate" size={15} color="#8C7209" />
+    <View style={styles.filterWrap}>
+      <TouchableOpacity hitSlop={tap38} activeOpacity={0.86} style={styles.filterBtn} onPress={() => setIsOpen(true)}>
+        <View style={styles.globeCircle}>
+          <MaterialIcons name="translate" size={15} color="#826416" />
         </View>
-        <Text style={styles.languageSelectText}>{selectedLabel}</Text>
-        <MaterialIcons name="keyboard-arrow-down" size={20} color="#8E8379" />
+        <Text style={styles.filterText}>{selectedLabel}</Text>
+        <MaterialIcons name="expand-more" size={19} color="#826416" />
       </TouchableOpacity>
 
-
-
-      <Modal
-        visible={isOpen}
-        transparent
-        animationType="fade"
-        statusBarTranslucent
-        onRequestClose={() => setIsOpen(false)}
-      >
-        <View style={styles.languageModal}>
+      <Modal visible={isOpen} transparent animationType="fade" onRequestClose={() => setIsOpen(false)}>
+        <View style={styles.modalOverlay}>
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsOpen(false)} />
-          <View style={styles.languageSheet}>
-            <View style={styles.languageSheetHeader}>
-              <View style={styles.languageSheetTitleRow}>
-                <MaterialIcons name="translate" size={18} color="#8C7209" />
-                <Text style={styles.languageSheetTitle}>Choose language</Text>
+          <BlurView intensity={85} tint="light" style={styles.modalSheet}>
+            <View style={styles.sheetHeader}>
+              <View style={styles.sheetTitleRow}>
+                <MaterialIcons name="translate" size={21} color="#5C1A5A" />
+                <Text style={styles.sheetTitle}>Filter by Language</Text>
               </View>
-              <TouchableOpacity style={styles.languageClose} onPress={() => setIsOpen(false)}>
-                <MaterialIcons name="close" size={20} color="#746A62" />
+              <TouchableOpacity hitSlop={tap34} style={styles.closeBtn} onPress={() => setIsOpen(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close">
+                <MaterialIcons name="close" size={19} color="#5C1A5A" />
               </TouchableOpacity>
             </View>
 
-            <View style={styles.languageList}>
-              {languages.map((language) => {
-                const isSelected = language === selected;
-                const label = language === 'ALL'
-                  ? 'All languages'
-                  : language.charAt(0) + language.slice(1).toLowerCase();
+            <View style={styles.sheetList}>
+              {languages.map((lang) => {
+                const isSelected = lang === selected;
+                const label = lang === 'ALL' ? 'All Languages' : lang.toUpperCase();
                 return (
                   <TouchableOpacity
-                    key={language}
-                    activeOpacity={0.76}
-                    style={[styles.languageOption, isSelected && styles.languageOptionSelected]}
-                    onPress={() => selectLanguage(language)}
+                    key={lang}
+                    activeOpacity={0.8}
+                    style={[styles.sheetItem, isSelected && styles.sheetItemSelected]}
+                    onPress={() => {
+                      onSelect(lang);
+                      setIsOpen(false);
+                    }}
                   >
-                    <Text style={[styles.languageOptionText, isSelected && styles.languageOptionTextSelected]}>
-                      {label}
-                    </Text>
-                    {isSelected ? (
-                      <MaterialIcons name="check-circle" size={20} color="#5A075F" />
-                    ) : (
-                      <View style={styles.languageOptionCircle} />
-                    )}
+                    <Text style={[styles.sheetItemText, isSelected && styles.sheetItemTextSelected]}>{label}</Text>
+                    {isSelected && <MaterialIcons name="check-circle" size={21} color="#5C1A5A" />}
                   </TouchableOpacity>
                 );
               })}
             </View>
-          </View>
+          </BlurView>
         </View>
       </Modal>
     </View>
   );
 }
 
-function MatchRow({
-  node,
-  index,
-  navigate,
-}: {
-  node: MatchNode;
-  index: number;
-  navigate: PersonalScreenProps['navigate'];
-}) {
-  const isLeft = node.side === 'left';
+const STATUS_OPTIONS = [
+  { key: 'ALL', label: 'All Status', icon: 'groups', color: '#826416' },
+  { key: 'AVAILABLE_NOW', label: 'Available Now', icon: 'fiber-manual-record', color: '#10B981' },
+  { key: 'NON_BUSY', label: 'Non-Busy', icon: 'phone-enabled', color: '#3B82F6' },
+  { key: 'NON_WAITING_LIST', label: 'Non-Waiting List', icon: 'person-outline', color: '#8B5CF6' },
+  { key: 'WAITING_LIST', label: 'Waiting List', icon: 'hourglass-full', color: '#D97706' },
+];
 
-  return (
-    <View style={[styles.matchRow, index === 0 && styles.firstRow, isLeft ? styles.matchRowLeft : styles.matchRowRight]}>
-        {isLeft ? (
-          <>
-            <AvatarNode node={node} navigate={navigate} />
-            <InfoCard node={node} navigate={navigate} />
-          </>
-        ) : (
-          <>
-            <InfoCard node={node} navigate={navigate} />
-            <AvatarNode node={node} navigate={navigate} />
-          </>
-        )}
-    </View>
-  );
-}
+type SortOption = 'status' | 'state' | 'recent' | 'popular' | 'age' | 'mode';
 
-
-function ConnectCard({
-  node,
-  navigate,
-}: {
-  node: MatchNode;
-  navigate: PersonalScreenProps['navigate'];
-}) {
-  const isBusy = node.liveStatus === 'busy';
-  const tierColor = node.tier === 'VIP' ? '#9A1E8A' : '#B99916';
-  
-  return (
-    <View style={styles.connectCardWrapper}>
-      {node.feedCategory ? (
-        <View style={styles.cardCategoryBadge}>
-          <Text style={styles.cardCategoryBadgeText}>{node.feedCategory}</Text>
-        </View>
-      ) : null}
-      <TouchableOpacity
-        activeOpacity={0.88}
-        style={[styles.connectCard, isBusy && styles.connectCardBusy]}
-        onPress={() => navigate('Profile', { profileName: node.name, matchData: node })}
-      >
-        <LinearGradient
-          colors={node.liveStatus === 'available' ? ['#34D399', '#10B981'] : (isBusy ? ['#FF9999', '#CC0000'] : ['#FFF4CA', '#EAD06F'])}
-          style={styles.connectAvatarRing}
-        >
-          <View style={styles.connectAvatarInner}>
-            {node.avatarData ? (
-              <GengalAvatar data={node.avatarData} size={70} />
-            ) : (
-              <Image source={{ uri: node.image }} style={styles.connectAvatarImage} />
-            )}
-          </View>
-        </LinearGradient>
-        
-        <View style={styles.connectCardInfo}>
-          <View style={styles.connectNameRow}>
-            <Text style={styles.connectName} numberOfLines={1}>{node.name}, {node.age}</Text>
-            {node.liveStatus && (
-              <View style={[styles.connectLiveBadge, isBusy && { backgroundColor: '#CC0000' }]}>
-                <Text style={styles.connectLiveBadgeText}>{node.liveStatus.toUpperCase()}</Text>
-              </View>
-            )}
-          </View>
-          <View style={styles.connectMetaRow}>
-            <View style={[styles.connectTierBadge, { borderColor: tierColor }]}>
-              <MaterialIcons name="diamond" size={10} color={tierColor} />
-              <Text style={[styles.connectTierText, { color: tierColor }]}>{node.tier}</Text>
-            </View>
-            <View style={styles.connectDot} />
-            <MaterialIcons name="language" size={12} color="#8A7C70" />
-            <Text style={styles.connectMetaText}>{node.language}</Text>
-            {node.city && (
-              <>
-                <View style={styles.connectDot} />
-                <MaterialIcons name="location-on" size={12} color="#8A7C70" />
-                <Text style={styles.connectMetaText}>{node.city}</Text>
-              </>
-            )}
-          </View>
-          <View style={styles.connectActions}>
-            {node.modes.map((mode) => (
-              <ModeButton key={mode} mode={mode} node={node} navigate={navigate} />
-            ))}
-          </View>
-        </View>
-      </TouchableOpacity>
-    </View>
-  );
-}
+const SORT_OPTIONS: { key: SortOption; label: string; icon: string }[] = [
+  { key: 'status', label: 'All Status', icon: 'groups' },
+  { key: 'state', label: 'State', icon: 'location-on' },
+  { key: 'recent', label: 'Recently Joined', icon: 'schedule' },
+  { key: 'popular', label: 'Popular', icon: 'local-fire-department' },
+  { key: 'age', label: 'Age', icon: 'cake' },
+  { key: 'mode', label: 'Mode of Call', icon: 'phone-in-talk' },
+];
 
 export default function PersonalScreen({ navigate }: PersonalScreenProps) {
   const [selectedLanguage, setSelectedLanguage] = useState('ALL');
+  const [selectedStatus, setSelectedStatus] = useState('ALL');
+  const [isStatusPickerOpen, setIsStatusPickerOpen] = useState(false);
+  const [sortBy, setSortBy] = useState<SortOption | null>(null);
+  const [selectedState, setSelectedState] = useState('ALL');
+  const [isStatePickerOpen, setIsStatePickerOpen] = useState(false);
+  const [selectedMode, setSelectedMode] = useState<'ALL' | 'call' | 'video'>('ALL');
+  const [isModePickerOpen, setIsModePickerOpen] = useState(false);
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
   const { profile: myProfile } = useUser();
   const [isSearching, setIsSearching] = useState(false);
+  const { run: runCall } = useActionLock();
   const [searchCleanup, setSearchCleanup] = useState<(() => void) | null>(null);
-  const [vipOnly, setVipOnly] = useState(false);
+  const [isMyActiveMode, setIsMyActiveMode] = useState(true);
+  const [waitlistMap, setWaitlistMap] = useState<Record<string, 'waiting' | 'ready'>>({});
+  const [freedMatchIds, setFreedMatchIds] = useState<Record<string, boolean>>({});
+  // One listener for the whole list. CallPriceTag opens its own per instance,
+  // which would be two per profile row here. Defaults match its fallbacks.
+  const [rates, setRates] = useState({ call: 15, video: 30 });
+
+  useEffect(() => {
+    const unsub = subscribeToGlobalSettings((s) => {
+      if (!s) return;
+      setRates({
+        call: s.voiceCallRatePerMin ?? 15,
+        video: s.videoCallRatePerMin ?? 30,
+      });
+    });
+    return unsub;
+  }, []);
+  const [readyWaitlistModal, setReadyWaitlistModal] = useState<{ match: MatchNode; countdown: number } | null>(null);
+  const [holdModal, setHoldModal] = useState<{ match: MatchNode; mode: 'call' | 'video'; timeLeft: number } | null>(null);
+
+  useEffect(() => {
+    let timer: any;
+    if (readyWaitlistModal && readyWaitlistModal.countdown > 0) {
+      timer = setTimeout(() => {
+        setReadyWaitlistModal((prev) => (prev ? { ...prev, countdown: prev.countdown - 1 } : null));
+      }, 1000);
+    } else if (readyWaitlistModal && readyWaitlistModal.countdown === 0) {
+      setReadyWaitlistModal(null);
+    }
+    return () => clearTimeout(timer);
+  }, [readyWaitlistModal]);
+
+  useEffect(() => {
+    let timer: any;
+    if (holdModal && holdModal.timeLeft > 0) {
+      timer = setTimeout(() => {
+        setHoldModal((prev) => (prev ? { ...prev, timeLeft: prev.timeLeft - 1 } : null));
+      }, 1000);
+    } else if (holdModal && holdModal.timeLeft === 0) {
+      const { match, mode } = holdModal;
+      setHoldModal(null);
+      void launchCall(match, mode);
+    }
+    return () => clearTimeout(timer);
+  }, [holdModal]);
+
+  const handleJoinWaitlist = (node: MatchNode) => {
+    const key = node.uid || '';
+    setWaitlistMap((prev) => ({ ...prev, [key]: 'waiting' }));
+    // Simulate receiver finishing their call after 4 seconds
+    setTimeout(() => {
+      setWaitlistMap((prev) => ({ ...prev, [key]: 'ready' }));
+      setFreedMatchIds((prev) => ({ ...prev, [key]: true }));
+      setReadyWaitlistModal({ match: node, countdown: 5 });
+    }, 4000);
+  };
+
+  /**
+   * The single door to CallScreen. Every entry point (cards, hold modal,
+   * waitlist modal) goes through here so the sample-profile block and the
+   * double-tap lock cannot be bypassed by adding a new button later.
+   */
+  const launchCall = (node: MatchNode, mode: 'call' | 'video') =>
+    runCall(() => {
+      if (node.isSampleProfile) {
+        Alert.alert(
+          'Sample profile',
+          `${node.name} is a sample profile used to preview the app and cannot be called.`,
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      navigate('Call', { profileName: node.name, mode, isCaller: true, matchData: node });
+    });
+
+  const handleCallPress = (node: MatchNode, mode: 'call' | 'video') => {
+    if (node.isSampleProfile) {
+      void launchCall(node, mode);
+      return;
+    }
+    const key = node.uid || '';
+    const wasOnWaitlist = waitlistMap[key] === 'ready' || waitlistMap[key] === 'waiting';
+    const isPriorityWindowActive = node.waitlistPriorityActive || (freedMatchIds[key] && !wasOnWaitlist);
+
+    if (isPriorityWindowActive && !wasOnWaitlist) {
+      // Non-waitlist caller must wait 5 seconds for priority window!
+      setHoldModal({ match: node, mode, timeLeft: 5 });
+    } else {
+      void launchCall(node, mode);
+    }
+  };
+
+  useEffect(() => {
+    if (myProfile?.isActiveMode !== undefined) {
+      setIsMyActiveMode(myProfile.isActiveMode);
+    }
+  }, [myProfile]);
+
+  const handleToggleActiveMode = async () => {
+    const newVal = !isMyActiveMode;
+    setIsMyActiveMode(newVal);
+    if (auth.currentUser?.uid) {
+      try {
+        await toggleActiveMode(auth.currentUser.uid, newVal);
+      } catch (err) {
+        console.warn('Failed to toggle active mode', err);
+      }
+    }
+  };
+
+  useEffect(() => {
+    const unsubscribe = subscribeToOnlineUsers((users) => {
+      setFirebaseUsers(users);
+    }, auth.currentUser?.uid, false);
+    return () => unsubscribe();
+  }, []);
+
+  const MATCHES: MatchNode[] = useMemo(() => {
+    // Base data lives in src/data/sampleProfiles so the More Connects directory
+    // renders the same people. Only the busy/waitlist state is layered on here,
+    // because it depends on this screen's runtime freedMatchIds.
+    const defaultReferenceProfiles: MatchNode[] = SAMPLE_PROFILES.map((p) => {
+      if (p.uid === 'ref_aanya') {
+        return { ...p, isBusy: false, waitlistPriorityActive: true };
+      }
+      if (p.uid === 'ref_chloe' || p.uid === 'ref_valeria') {
+        return {
+          ...p,
+          isBusy: !freedMatchIds[p.uid],
+          waitlistPriorityActive: !!freedMatchIds[p.uid],
+        };
+      }
+      return { ...p };
+    });
+
+    if (!firebaseUsers || firebaseUsers.length === 0) {
+      return defaultReferenceProfiles.filter((p) => p.isOnline !== false);
+    }
+
+    const convertedFirebase: MatchNode[] = firebaseUsers.map((u, index) => {
+      const fallback = defaultReferenceProfiles[index % defaultReferenceProfiles.length];
+      const isOnline = u.isOnline ?? fallback.isOnline;
+      const popularityScore = (u.hearts || 0) * 10 + (u.totalReceivedCallSeconds || 0) + (isOnline ? 5000 : 0) + (fallback.popularityScore || 500);
+      const uid = u.uid || `fb_${index}`;
+      return {
+        uid,
+        name: u.nickname || u.username || fallback.name,
+        age: Number(u.age) || fallback.age,
+        language: u.language || fallback.language,
+        tier: u.tier === 'VIP' ? 'VIP' : 'STANDARD',
+        image: u.avatarUrl || fallback.image,
+        avatarData: u.avatarData,
+        modes: ['call', 'video'],
+        city: u.state || u.city || fallback.city,
+        isOnline,
+        popularityScore,
+        isBusy: fallback.isBusy && !freedMatchIds[uid],
+        waitlistPriorityActive: fallback.waitlistPriorityActive || !!freedMatchIds[uid],
+      };
+    });
+
+    return [...defaultReferenceProfiles, ...convertedFirebase].filter((p) => p.isOnline !== false);
+  }, [firebaseUsers, freedMatchIds]);
+
+  const LANGUAGES = useMemo(() => ['ALL', 'ENGLISH', 'HINDI', 'SPANISH', 'FRENCH'], []);
+
+  const STATES = useMemo(() => {
+    const stateSet = new Set<string>();
+    MATCHES.forEach((m) => { if (m.city) stateSet.add(m.city); });
+    return ['ALL', ...Array.from(stateSet).sort()];
+  }, [MATCHES]);
+
+  const sortedMatches = useMemo(() => {
+    let filtered = MATCHES;
+    if (selectedLanguage !== 'ALL') {
+      filtered = filtered.filter((match) => {
+        const matchLang = match.language.toUpperCase();
+        const target = selectedLanguage.toUpperCase();
+        if (target === 'HI' || target === 'HINDI') return matchLang === 'HINDI' || matchLang === 'HI';
+        if (target === 'EN' || target === 'ENGLISH') return matchLang === 'ENGLISH' || matchLang === 'EN';
+        if (target === 'ES' || target === 'SPANISH') return matchLang === 'SPANISH' || matchLang === 'ES';
+        return matchLang.includes(target);
+      });
+    }
+
+    // Filter by selected state
+    if (selectedState !== 'ALL') {
+      filtered = filtered.filter((match) => match.city === selectedState);
+    }
+
+    // Filter by selected mode of call
+    if (selectedMode !== 'ALL') {
+      filtered = filtered.filter((match) => match.modes.includes(selectedMode));
+    }
+
+    // Filter by selected status dropdown (Available Now, Non-Busy, Non-Waiting List, Waiting List)
+    if (selectedStatus === 'AVAILABLE_NOW') {
+      filtered = filtered.filter((match) => match.isOnline && !match.isBusy && !match.waitlistPriorityActive);
+    } else if (selectedStatus === 'NON_BUSY') {
+      filtered = filtered.filter((match) => !match.isBusy);
+    } else if (selectedStatus === 'WAITING_LIST') {
+      filtered = filtered.filter((match) => (match.uid && (waitlistMap[match.uid] === 'waiting' || waitlistMap[match.uid] === 'ready')) || match.waitlistPriorityActive);
+    } else if (selectedStatus === 'NON_WAITING_LIST') {
+      filtered = filtered.filter((match) => (!match.uid || (waitlistMap[match.uid] !== 'waiting' && waitlistMap[match.uid] !== 'ready')) && !match.waitlistPriorityActive);
+    }
+
+    // Priority helper: Active call users NOT in busy state get highest priority first!
+    const getActiveCallPriority = (m: any) => {
+      const isCallUser = m.modes && (m.modes.includes('call') || m.modes.includes('video'));
+      if (m.isOnline && !m.isBusy && isCallUser) return 3; // 1st Priority: Active call users NOT busy
+      if (m.isOnline && !m.isBusy) return 2;               // 2nd Priority: Active non-busy users
+      if (m.isOnline && m.isBusy) return 1;                // 3rd Priority: Active but busy users
+      return 0;                                            // 4th Priority: Offline users
+    };
+
+    // Apply primary sorting priority by default
+    filtered.sort((a, b) => {
+      const pDiff = getActiveCallPriority(b) - getActiveCallPriority(a);
+      return pDiff !== 0 ? pDiff : 0;
+    });
+
+    if (!sortBy) return filtered;
+
+    const sorted = [...filtered];
+    switch (sortBy) {
+      case 'age':
+        sorted.sort((a, b) => {
+          const pDiff = getActiveCallPriority(b) - getActiveCallPriority(a);
+          return pDiff !== 0 ? pDiff : a.age - b.age;
+        });
+        break;
+      case 'recent':
+        sorted.sort((a, b) => {
+          const pDiff = getActiveCallPriority(b) - getActiveCallPriority(a);
+          return pDiff !== 0 ? pDiff : 0;
+        });
+        break;
+      case 'popular':
+        sorted.sort((a, b) => {
+          const pDiff = getActiveCallPriority(b) - getActiveCallPriority(a);
+          return pDiff !== 0 ? pDiff : (b.popularityScore || 0) - (a.popularityScore || 0);
+        });
+        break;
+      case 'state':
+        sorted.sort((a, b) => {
+          const pDiff = getActiveCallPriority(b) - getActiveCallPriority(a);
+          return pDiff !== 0 ? pDiff : (a.city || '').localeCompare(b.city || '');
+        });
+        break;
+      case 'mode':
+        sorted.sort((a, b) => {
+          const pDiff = getActiveCallPriority(b) - getActiveCallPriority(a);
+          return pDiff !== 0 ? pDiff : b.modes.length - a.modes.length;
+        });
+        break;
+    }
+    return sorted;
+  }, [selectedLanguage, selectedState, selectedMode, selectedStatus, sortBy, MATCHES, waitlistMap]);
 
   const handleRandomMatch = async () => {
     if (!myProfile) return;
@@ -456,7 +699,7 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
     }
     setIsSearching(true);
     try {
-      const cleanup = await findMatch(myProfile, (roomId, matchData) => {
+      const cleanup = await findMatch(myProfile, 'call', (roomId: string, matchData: any) => {
         setIsSearching(false);
         setSearchCleanup(null);
         navigate('Match', { profileName: matchData.nickname, matchData, roomId } as any);
@@ -467,95 +710,9 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
     }
   };
 
-  useEffect(() => {
-    const unsubscribe = subscribeToOnlineUsers((users) => {
-      setFirebaseUsers(users);
-    }, auth.currentUser?.uid, vipOnly);
-    return () => {
-      unsubscribe();
-    };
-  }, [vipOnly]);
-
-  const combinedProfiles = useMemo(() => {
-    let profiles = firebaseUsers.map(u => ({
-      uid: u.uid,
-      name: u.nickname || u.username || 'User',
-      age: u.age || 20,
-      lang: u.language || 'EN',
-      tier: u.avatarUrl ? 'VIP' : 'Elite',
-      uri: u.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
-      avatarData: u.avatarData,
-      modes: ['call', 'video'] as Array<'call' | 'video'>
-    }));
-    
-    // Fallback dummy data for UI testing if empty
-    if (profiles.length === 0) {
-      profiles = [
-        {
-          uid: 'dummy1',
-          name: 'Sarah',
-          age: 24,
-          lang: 'EN',
-          tier: 'VIP',
-          uri: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=200',
-          modes: ['call', 'video'],
-          liveStatus: 'available',
-          feedCategory: '?? Top Stars',
-          city: 'New York',
-        } as any,
-        {
-          uid: 'dummy2',
-          name: 'Priya',
-          age: 22,
-          lang: 'HI',
-          tier: 'Elite',
-          uri: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=200',
-          modes: ['video'],
-          liveStatus: 'busy',
-          feedCategory: '?? Discovery',
-          city: 'Mumbai',
-        } as any
-      ];
-    }
-    
-    return profiles;
-  }, [firebaseUsers]);
-
-  const MATCHES: MatchNode[] = useMemo(() => {
-    return combinedProfiles.map((profile, index) => ({
-      uid: profile.uid,
-      name: profile.name,
-      age: profile.age as number,
-      language: profile.lang,
-      tier: profile.tier as any,
-      side: index % 2 === 0 ? 'left' : 'right',
-      image: profile.uri,
-      avatarData: (profile as any).avatarData,
-      modes: profile.modes,
-    }));
-  }, [combinedProfiles]);
-
-  const LANGUAGES = useMemo(() => ['ALL', ...Array.from(new Set(combinedProfiles.map(p => p.lang)))], [combinedProfiles]);
-
-  const sortedMatches = useMemo(() => {
-    const ordered = selectedLanguage === 'ALL'
-      ? MATCHES
-      : [
-          ...MATCHES.filter((match) => match.language === selectedLanguage),
-          ...MATCHES.filter((match) => match.language !== selectedLanguage),
-        ];
-
-    return ordered.map((match, index) => ({
-      ...match,
-      side: (index % 2 === 0 ? 'left' : 'right') as MatchNode['side'],
-    }));
-  }, [selectedLanguage, MATCHES]);
-
-  const isEndRight = sortedMatches.length % 2 !== 0;
-
   return (
     <ScreenShell tone="light">
-      <View style={styles.phone}>
+      <View style={styles.mainBox}>
         {isSearching && (
           <ConnectingOverlay
             mode="random"
@@ -568,102 +725,379 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
         )}
         <TopBar navigate={navigate} />
 
-        <ScrollView
-          contentInsetAdjustmentBehavior="automatic"
+        <FlatList
+          data={sortedMatches.length > 0 ? sortedMatches : MATCHES}
+          keyExtractor={(item, idx) => item.uid || `perf-${idx}`}
           showsVerticalScrollIndicator={false}
-          contentContainerStyle={styles.scroll}
+          contentContainerStyle={styles.listContent}
+          ListHeaderComponent={
+            <View style={styles.headerArea}>
+              <View style={styles.pillsRow}>
+                <TouchableOpacity style={styles.randomPill} activeOpacity={0.86} onPress={handleRandomMatch}>
+                  <MaterialIcons name={isSearching ? 'close' : 'bolt'} size={21} color="#B8820B" />
+                  <Text style={styles.randomPillText}>{isSearching ? 'Cancel Search' : 'Random Match'}</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.connectsPill}
+                  activeOpacity={0.86}
+                  onPress={() => navigate('ActiveConnects')}
+                  accessibilityRole="button"
+                  accessibilityLabel="More connects, browse and search all profiles"
+                >
+                  <MaterialIcons name="groups" size={19} color="#B8820B" />
+                  <Text style={styles.connectsPillText}>More Connects</Text>
+                </TouchableOpacity>
+              </View>
+
+              {/* Show Active Status Toggle Banner */}
+              <View style={styles.activeToggleBanner}>
+                <View style={styles.activeToggleLeft}>
+                  <View style={[styles.statusIndicatorDot, isMyActiveMode && styles.statusIndicatorDotOnline]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.activeToggleTitle}>
+                      {isMyActiveMode ? 'Show Active to People: ON' : 'Show Active to People: OFF'}
+                    </Text>
+                    <Text style={styles.activeToggleSubtitle}>
+                      {isMyActiveMode ? 'People can see your online status' : 'You appear offline to the community'}
+                    </Text>
+                  </View>
+                </View>
+                <TouchableOpacity
+                  style={[styles.activeToggleBtn, isMyActiveMode && styles.activeToggleBtnOn]}
+                  activeOpacity={0.85}
+                  onPress={handleToggleActiveMode}
+                >
+                  <MaterialIcons
+                    name={isMyActiveMode ? 'visibility' : 'visibility-off'}
+                    size={17}
+                    color={isMyActiveMode ? '#FFFFFF' : '#7A5C1F'}
+                  />
+                  <Text style={[styles.activeToggleBtnText, isMyActiveMode && styles.activeToggleBtnTextOn]}>
+                    {isMyActiveMode ? 'Active' : 'Hidden'}
+                  </Text>
+                </TouchableOpacity>
+              </View>
+
+              <LanguageFilter selected={selectedLanguage} onSelect={setSelectedLanguage} languages={LANGUAGES} />
+
+              {/* Sort Pills Row */}
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.sortPillsScroll}
+                style={styles.sortPillsContainer}
+              >
+                {SORT_OPTIONS.map((opt) => {
+                  const isStatusActive = opt.key === 'status' && selectedStatus !== 'ALL';
+                  const isStateActive = opt.key === 'state' && selectedState !== 'ALL';
+                  const isModeActive = opt.key === 'mode' && selectedMode !== 'ALL';
+                  const isFilterOpt = opt.key === 'status' || opt.key === 'state' || opt.key === 'mode';
+                  const isActive = (!isFilterOpt && sortBy === opt.key) || isStatusActive || isStateActive || isModeActive;
+                  
+                  let labelText = opt.label;
+                  if (isStatusActive) {
+                    const found = STATUS_OPTIONS.find((s) => s.key === selectedStatus);
+                    if (found) labelText = found.label;
+                  }
+                  if (isStateActive) labelText = selectedState;
+                  if (isModeActive) labelText = selectedMode === 'call' ? 'Audio Call' : 'Video Call';
+
+                  return (
+                    <TouchableOpacity
+                      key={opt.key}
+                      activeOpacity={0.8}
+                      style={[styles.sortPill, isActive && styles.sortPillActive]}
+                      hitSlop={tap34}
+                      onPress={() => {
+                        if (opt.key === 'status') {
+                          setIsStatusPickerOpen(true);
+                        } else if (opt.key === 'state') {
+                          setIsStatePickerOpen(true);
+                        } else if (opt.key === 'mode') {
+                          setIsModePickerOpen(true);
+                        } else {
+                          setSortBy(sortBy === opt.key ? null : opt.key);
+                        }
+                      }}
+                    >
+                      <MaterialIcons
+                        name={opt.icon as any}
+                        size={14}
+                        color={isActive ? '#FFF' : '#7A5C1F'}
+                      />
+                      <Text style={[styles.sortPillText, isActive && styles.sortPillTextActive]}>
+                        {labelText}
+                      </Text>
+                      {isStatusActive && (
+                        <TouchableOpacity
+                          onPress={(e) => { e.stopPropagation(); setSelectedStatus('ALL'); }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        
+                          accessibilityRole="button"
+                          accessibilityLabel="Close">
+                          <MaterialIcons name="close" size={12} color="#FFF" style={{ marginLeft: 2 }} />
+                        </TouchableOpacity>
+                      )}
+                      {isStateActive && (
+                        <TouchableOpacity
+                          onPress={(e) => { e.stopPropagation(); setSelectedState('ALL'); }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        
+                          accessibilityRole="button"
+                          accessibilityLabel="Close">
+                          <MaterialIcons name="close" size={12} color="#FFF" style={{ marginLeft: 2 }} />
+                        </TouchableOpacity>
+                      )}
+                      {isModeActive && (
+                        <TouchableOpacity
+                          onPress={(e) => { e.stopPropagation(); setSelectedMode('ALL'); }}
+                          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        
+                          accessibilityRole="button"
+                          accessibilityLabel="Close">
+                          <MaterialIcons name="close" size={12} color="#FFF" style={{ marginLeft: 2 }} />
+                        </TouchableOpacity>
+                      )}
+                      {!isFilterOpt && isActive && (
+                        <MaterialIcons name="close" size={12} color="#FFF" style={{ marginLeft: 2 }} />
+                      )}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              {/* Status Picker Modal */}
+              <Modal visible={isStatusPickerOpen} transparent animationType="fade" onRequestClose={() => setIsStatusPickerOpen(false)}>
+                <View style={styles.modalOverlay}>
+                  <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsStatusPickerOpen(false)} />
+                  <BlurView intensity={85} tint="light" style={styles.modalSheet}>
+                    <View style={styles.sheetHeader}>
+                      <View style={styles.sheetTitleRow}>
+                        <MaterialIcons name="filter-list" size={21} color="#5C1A5A" />
+                        <Text style={styles.sheetTitle}>Filter by Status</Text>
+                      </View>
+                      <TouchableOpacity hitSlop={tap34} style={styles.closeBtn} onPress={() => setIsStatusPickerOpen(false)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Close">
+                        <MaterialIcons name="close" size={19} color="#5C1A5A" />
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={styles.sheetList}>
+                      {STATUS_OPTIONS.map((opt) => {
+                        const isSelected = opt.key === selectedStatus;
+                        return (
+                          <TouchableOpacity
+                            key={opt.key}
+                            activeOpacity={0.8}
+                            style={[styles.sheetItem, isSelected && styles.sheetItemSelected]}
+                            onPress={() => {
+                              setSelectedStatus(opt.key);
+                              setIsStatusPickerOpen(false);
+                            }}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                              <MaterialIcons name={opt.icon as any} size={18} color={opt.color} />
+                              <Text style={[styles.sheetItemText, isSelected && styles.sheetItemTextSelected]}>{opt.label}</Text>
+                            </View>
+                            {isSelected && <MaterialIcons name="check-circle" size={21} color="#5C1A5A" />}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </BlurView>
+                </View>
+              </Modal>
+
+              {/* State Picker Modal */}
+              <Modal visible={isStatePickerOpen} transparent animationType="fade" onRequestClose={() => setIsStatePickerOpen(false)}>
+                <View style={styles.modalOverlay}>
+                  <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsStatePickerOpen(false)} />
+                  <BlurView intensity={85} tint="light" style={styles.modalSheet}>
+                    <View style={styles.sheetHeader}>
+                      <View style={styles.sheetTitleRow}>
+                        <MaterialIcons name="location-on" size={21} color="#5C1A5A" />
+                        <Text style={styles.sheetTitle}>Filter by State</Text>
+                      </View>
+                      <TouchableOpacity hitSlop={tap34} style={styles.closeBtn} onPress={() => setIsStatePickerOpen(false)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Close">
+                        <MaterialIcons name="close" size={19} color="#5C1A5A" />
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={styles.sheetList}>
+                      {STATES.map((state) => {
+                        const isSelected = state === selectedState;
+                        const label = state === 'ALL' ? 'All States' : state;
+                        return (
+                          <TouchableOpacity
+                            key={state}
+                            activeOpacity={0.8}
+                            style={[styles.sheetItem, isSelected && styles.sheetItemSelected]}
+                            onPress={() => {
+                              setSelectedState(state);
+                              setIsStatePickerOpen(false);
+                            }}
+                          >
+                            <Text style={[styles.sheetItemText, isSelected && styles.sheetItemTextSelected]}>{label}</Text>
+                            {isSelected && <MaterialIcons name="check-circle" size={21} color="#5C1A5A" />}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </BlurView>
+                </View>
+              </Modal>
+
+              {/* Mode of Call Picker Modal */}
+              <Modal visible={isModePickerOpen} transparent animationType="fade" onRequestClose={() => setIsModePickerOpen(false)}>
+                <View style={styles.modalOverlay}>
+                  <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsModePickerOpen(false)} />
+                  <BlurView intensity={85} tint="light" style={styles.modalSheet}>
+                    <View style={styles.sheetHeader}>
+                      <View style={styles.sheetTitleRow}>
+                        <MaterialIcons name="phone-in-talk" size={21} color="#5C1A5A" />
+                        <Text style={styles.sheetTitle}>Select Mode of Call</Text>
+                      </View>
+                      <TouchableOpacity hitSlop={tap34} style={styles.closeBtn} onPress={() => setIsModePickerOpen(false)}
+                        accessibilityRole="button"
+                        accessibilityLabel="Close">
+                        <MaterialIcons name="close" size={19} color="#5C1A5A" />
+                      </TouchableOpacity>
+                    </View>
+
+                    <View style={styles.sheetList}>
+                      {[
+                        { key: 'ALL', label: 'All Modes (Audio & Video)', icon: 'all-inclusive' },
+                        { key: 'call', label: 'Audio Call Only', icon: 'phone' },
+                        { key: 'video', label: 'Video Call Only', icon: 'videocam' },
+                      ].map((m) => {
+                        const isSelected = m.key === selectedMode;
+                        return (
+                          <TouchableOpacity
+                            key={m.key}
+                            activeOpacity={0.8}
+                            style={[styles.sheetItem, isSelected && styles.sheetItemSelected]}
+                            onPress={() => {
+                              setSelectedMode(m.key as any);
+                              setIsModePickerOpen(false);
+                            }}
+                          >
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+                              <MaterialIcons name={m.icon as any} size={20} color={isSelected ? '#5C1A5A' : '#7A5C1F'} />
+                              <Text style={[styles.sheetItemText, isSelected && styles.sheetItemTextSelected]}>{m.label}</Text>
+                            </View>
+                            {isSelected && <MaterialIcons name="check-circle" size={21} color="#5C1A5A" />}
+                          </TouchableOpacity>
+                        );
+                      })}
+                    </View>
+                  </BlurView>
+                </View>
+              </Modal>
+            </View>
+          }
+          renderItem={({ item, index }) => (
+            <FloatingProfileRow
+              node={item}
+              index={index}
+              isLast={index === (sortedMatches.length > 0 ? sortedMatches.length - 1 : MATCHES.length - 1)}
+              navigate={navigate}
+              onCallPress={handleCallPress}
+              onJoinWaitlist={handleJoinWaitlist}
+              waitlistStatus={waitlistMap[item.uid || ''] || 'none'}
+              rates={rates}
+            />
+          )}
+        />
+
+        {/* Ready Waitlist Modal (When Receiver Ends Call) */}
+        <Modal
+          visible={!!readyWaitlistModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setReadyWaitlistModal(null)}
         >
-          
-          <View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', justifyContent: 'center', marginTop: 10, marginBottom: 10 }}>
-            <TouchableOpacity 
-              style={styles.randomButtonSmall}
-              activeOpacity={0.85}
-              onPress={() => handleRandomMatch()}
-              accessibilityLabel="Random match"
-            >
-              <MaterialIcons name={isSearching ? 'close' : 'favorite'} size={24} color="#D2B243" />
-              <Text style={{fontWeight: 'bold', color: '#D2B243', marginLeft: 4}}>Random Match</Text>
-            </TouchableOpacity>
-            <TouchableOpacity 
-              activeOpacity={0.85} 
-              style={styles.moreButtonSmall}
-              onPress={() => navigate('ActiveConnects')}
-              accessibilityLabel="More profiles"
-            >
-              <MaterialIcons name="more-horiz" size={24} color="#887006" />
-              <Text style={{fontWeight: 'bold', color: '#887006', marginLeft: 4}}>All Connects</Text>
-            </TouchableOpacity>
-          </View>
-
-
-
-
-          <LanguageFilter selected={selectedLanguage} onSelect={setSelectedLanguage} languages={LANGUAGES} navigate={navigate} />
-
-          <View style={styles.vipFilterRow}>
-            <TouchableOpacity
-              activeOpacity={0.75}
-              style={[styles.vipPill, !vipOnly && styles.vipPillActive]}
-              onPress={() => setVipOnly(false)}
-            >
-              <Text style={[styles.vipPillText, !vipOnly && styles.vipPillTextActive]}>All Online</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              activeOpacity={0.75}
-              style={[styles.vipPill, vipOnly && styles.vipPillActive]}
-              onPress={() => setVipOnly(true)}
-            >
-              <MaterialIcons name="diamond" size={11} color={vipOnly ? '#AA7C00' : '#B3A9A4'} />
-              <Text style={[styles.vipPillText, vipOnly && styles.vipPillTextActive]}>VIP Only</Text>
-            </TouchableOpacity>
-          </View>
-
-          
-          <View style={styles.feedArea}>
-            {sortedMatches.map((node: MatchNode, index: number) => {
-              const isFirstInCategory = index === 0 || sortedMatches[index - 1].feedCategory !== node.feedCategory;
-              return (
-                <ConnectCard 
-                  key={node.uid || (node.name + index)} 
-                  node={{ ...node, feedCategory: isFirstInCategory ? node.feedCategory : undefined }} 
-                  navigate={navigate} 
-                />
-              );
-            })}
-          </View>
-
-
-          <View style={[
-            undefined,
-            !isEndRight ? { justifyContent: 'flex-start', paddingLeft: 28, paddingRight: 0 } : {}
-          ]}>
-            {!isEndRight && (
-              <View>
-                <TouchableOpacity activeOpacity={0.85} style={styles.randomButton} onPress={handleRandomMatch}>
-                  <MaterialIcons name={isSearching ? 'close' : 'favorite-border'} size={38} color="#887006" />
-                </TouchableOpacity>
-                <Text style={styles.randomLabel}>{isSearching ? 'Cancel' : 'Random Match'}</Text>
+          <View style={styles.modalOverlay}>
+            <BlurView intensity={90} tint="dark" style={styles.priorityModalSheet}>
+              <View style={styles.priorityModalHeader}>
+                <Text style={styles.priorityModalEmoji}>🎉</Text>
+                <Text style={styles.priorityModalTitle}>Your Wait is Finished!</Text>
               </View>
-            )}
-
-            <TouchableOpacity 
-              activeOpacity={0.85} 
-              style={styles.moreButton}
-              onPress={() => navigate('ActiveConnects')}
-            >
-              <MaterialIcons name="more-horiz" size={32} color="#887006" />
-            </TouchableOpacity>
-
-            {isEndRight && (
-              <View>
-                <TouchableOpacity activeOpacity={0.85} style={styles.randomButton} onPress={handleRandomMatch}>
-                  <MaterialIcons name={isSearching ? 'close' : 'favorite-border'} size={38} color="#887006" />
-                </TouchableOpacity>
-                <Text style={styles.randomLabel}>{isSearching ? 'Cancel' : 'Random Match'}</Text>
+              <Text style={styles.priorityModalDesc}>
+                <Text style={{ fontWeight: '800', color: '#E83F6F' }}>{readyWaitlistModal?.match.name}</Text> just ended their call and is now free!
+              </Text>
+              <View style={styles.priorityBannerBox}>
+                <MaterialIcons name="timer" size={20} color="#E83F6F" />
+                <Text style={styles.priorityBannerText}>
+                  Priority VIP Window: <Text style={{ fontWeight: '900', color: '#FFF' }}>00:0{readyWaitlistModal?.countdown || 0}s</Text>
+                </Text>
               </View>
-            )}
+              <View style={styles.priorityModalButtons}>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  style={styles.priorityCallBtn}
+                  onPress={() => {
+                    const match = readyWaitlistModal?.match;
+                    setReadyWaitlistModal(null);
+                    if (match) void launchCall(match, 'call');
+                  }}
+                >
+                  <MaterialIcons name="phone" size={20} color="#FFFFFF" />
+                  <Text style={styles.priorityCallBtnText}>Audio Call Now</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  activeOpacity={0.85}
+                  style={styles.priorityVideoBtn}
+                  onPress={() => {
+                    const match = readyWaitlistModal?.match;
+                    setReadyWaitlistModal(null);
+                    if (match) void launchCall(match, 'video');
+                  }}
+                >
+                  <MaterialIcons name="videocam" size={20} color="#FFFFFF" />
+                  <Text style={styles.priorityVideoBtnText}>Video Call Now</Text>
+                </TouchableOpacity>
+              </View>
+              <TouchableOpacity style={styles.priorityDismissBtn} onPress={() => setReadyWaitlistModal(null)}>
+                <Text style={styles.priorityDismissText}>Skip / Dismiss</Text>
+              </TouchableOpacity>
+            </BlurView>
           </View>
-        </ScrollView>
+        </Modal>
+
+        {/* Priority Hold Modal (Non-Waitlist Caller Waiting 5s) */}
+        <Modal
+          visible={!!holdModal}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setHoldModal(null)}
+        >
+          <View style={styles.modalOverlay}>
+            <BlurView intensity={90} tint="dark" style={styles.priorityModalSheet}>
+              <View style={styles.priorityModalHeader}>
+                <MaterialIcons name="hourglass-empty" size={32} color="#F97316" />
+                <Text style={styles.priorityModalTitle}>Priority Waitlist Hold</Text>
+              </View>
+              <Text style={styles.priorityModalDesc}>
+                <Text style={{ fontWeight: '800', color: '#F97316' }}>{holdModal?.match.name}</Text> just finished a call. Users on the Waitlist have exclusive first-calling rights for <Text style={{ color: '#FFF', fontWeight: '800' }}>5 seconds</Text>.
+              </Text>
+              <View style={styles.holdCircleContainer}>
+                <View style={styles.holdCircle}>
+                  <Text style={styles.holdNumber}>{holdModal?.timeLeft || 0}s</Text>
+                </View>
+              </View>
+              <Text style={styles.holdSubtext}>
+                Please hold... connecting your call automatically as soon as the priority timer ends!
+              </Text>
+              <TouchableOpacity style={styles.priorityDismissBtn} onPress={() => setHoldModal(null)}>
+                <Text style={styles.priorityDismissText}>Cancel Call</Text>
+              </TouchableOpacity>
+            </BlurView>
+          </View>
+        </Modal>
 
         <BottomNav active="Personal" navigate={navigate} />
       </View>
@@ -672,540 +1106,624 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
 }
 
 const styles = StyleSheet.create({
-  phone: {
+  mainBox: {
     flex: 1,
-    alignSelf: 'center',
     width: '100%',
-    maxWidth: 430,
-    backgroundColor: 'transparent',
+    maxWidth: 460,
+    alignSelf: 'center',
+    backgroundColor: '#FBF8F2',
   },
-  header: {
-    height: 72,
+  listContent: {
+    paddingTop: 8,
+    paddingBottom: 140,
+  },
+  headerArea: {
+    paddingHorizontal: 16,
+    marginBottom: 26,
+  },
+  pillsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 14,
+  },
+  activeToggleBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    borderBottomWidth: 1,
-    borderBottomColor: '#F0E9DF',
-    backgroundColor: '#FFFCF7',
-    boxShadow: Platform.OS === 'web' ? '0 6px 22px rgba(88, 61, 27, 0.06)' : undefined,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 20,
+    paddingHorizontal: 15,
+    paddingVertical: 12,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: '#E6D3A3',
+    ...Platform.select({
+      android: { elevation: 3 },
+      ios: { shadowColor: '#7E6507', shadowOpacity: 0.08, shadowOffset: { width: 0, height: 3 }, shadowRadius: 6 },
+    }),
   },
-  avatarRing: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    padding: 2,
+  activeToggleLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+    marginRight: 8,
+  },
+  statusIndicatorDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#C8B99C',
     borderWidth: 2,
-    borderColor: '#D4B142',
-    backgroundColor: '#FFFDF8',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    borderColor: '#FFF',
   },
-  headerAvatar: {
+  statusIndicatorDotOnline: {
+    backgroundColor: '#10B981',
+  },
+  activeToggleTitle: {
+    fontSize: 13.5,
+    fontWeight: '800',
+    color: '#3F1A3E',
+  },
+  activeToggleSubtitle: {
+    fontSize: 11,
+    color: '#7C673E',
+    marginTop: 2,
+  },
+  activeToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 13,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: '#FFF8EA',
+    borderWidth: 1,
+    borderColor: '#D4B86A',
+    gap: 5,
+  },
+  activeToggleBtnOn: {
+    backgroundColor: '#52104F',
+    borderColor: '#52104F',
+  },
+  activeToggleBtnText: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: '#7A5C1F',
+  },
+  activeToggleBtnTextOn: {
+    color: '#FFFFFF',
+  },
+  randomPill: {
+    flex: 1.1,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#FFFBF0',
+    borderWidth: 1,
+    borderColor: '#E6C972',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    ...Platform.select({
+      android: { elevation: 3 },
+      ios: { shadowColor: '#B8820B', shadowOpacity: 0.12, shadowOffset: { width: 0, height: 3 }, shadowRadius: 5 },
+    }),
+  },
+  randomPillText: {
+    color: '#805D0F',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  connectsPill: {
+    flex: 0.9,
+    height: 46,
+    borderRadius: 23,
+    // Same surface, border and label colour as randomPill: these are two peer
+    // actions, so giving one its own tint made it read as the selected tab.
+    backgroundColor: '#FFFBF0',
+    borderWidth: 1,
+    borderColor: '#E6C972',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    ...Platform.select({
+      android: { elevation: 3 },
+      ios: { shadowColor: '#B8820B', shadowOpacity: 0.12, shadowOffset: { width: 0, height: 3 }, shadowRadius: 5 },
+    }),
+  },
+  connectsPillText: {
+    color: '#805D0F',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  filterWrap: {
+    alignItems: 'center',
+  },
+  filterBtn: {
+    height: 38,
+    borderRadius: 19,
+    paddingHorizontal: 16,
+    backgroundColor: '#FFFDF9',
+    borderWidth: 1,
+    borderColor: '#E6DBC6',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    ...Platform.select({
+      android: { elevation: 2 },
+      ios: { shadowColor: '#000', shadowOpacity: 0.06, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4 },
+    }),
+  },
+  globeCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#FFF5DC',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  filterText: {
+    color: '#5C4926',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  sortPillsContainer: {
+    marginTop: 12,
+    maxHeight: 38,
+  },
+  sortPillsScroll: {
+    gap: 8,
+    paddingHorizontal: 2,
+  },
+  sortPill: {
+    height: 34,
+    borderRadius: 17,
+    paddingHorizontal: 14,
+    backgroundColor: '#FFFBF0',
+    borderWidth: 1,
+    borderColor: '#E4CC8B',
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 5,
+  },
+  sortPillActive: {
+    backgroundColor: '#52104F',
+    borderColor: '#52104F',
+  },
+  sortPillText: {
+    fontSize: 12,
+    fontWeight: '700' as const,
+    color: '#7A5C1F',
+  },
+  sortPillTextActive: {
+    color: '#FFF',
+  },
+  rowWrapper: {
+    paddingHorizontal: 16,
+    marginBottom: 16,
+  },
+  floatingContentRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    zIndex: 2,
+  },
+  avatarAssembly: {
+    position: 'relative',
+    width: 118,
+    height: 118,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+  avatarCircleOuter: {
+    width: 112,
+    height: 112,
+    borderRadius: 56,
+    backgroundColor: '#DCB25B',
+    padding: 3.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+    ...Platform.select({
+      android: { elevation: 12 },
+      ios: { shadowColor: '#A47D28', shadowOpacity: 0.25, shadowOffset: { width: 0, height: 4 }, shadowRadius: 8 },
+    }),
+  },
+  avatarCircleInner: {
+    width: 105,
+    height: 105,
+    borderRadius: 52.5,
+    overflow: 'hidden',
+    backgroundColor: '#F5ECE1',
+  },
+  avatarImage: {
     width: '100%',
     height: '100%',
-    borderRadius: 19,
+    resizeMode: 'cover',
   },
-  brand: {
-    flex: 1,
-    textAlign: 'center',
-    paddingHorizontal: 8,
-    color: '#4B0054',
-    fontFamily: 'serif',
-    fontSize: 28,
-    fontWeight: '900',
-  },
-  scroll: {
-    flexGrow: 1,
-    paddingTop: 34,
-    paddingBottom: 126,
-  },
-  heroTitle: {
+  rimHeartBadge: {
+    position: 'absolute',
+    bottom: 3,
+    right: 3,
+    width: 33,
+    height: 33,
+    borderRadius: 16.5,
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1.5,
+    borderColor: '#E6D3A3',
     alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 25,
+    ...Platform.select({
+      android: { elevation: 16 },
+      ios: { shadowColor: '#000', shadowOpacity: 0.15, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4 },
+    }),
+  },
+  detailsCard: {
+    flex: 1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 22,
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    borderWidth: 1,
+    borderColor: '#F3E9D5',
+    zIndex: 10,
+    ...Platform.select({
+      android: { elevation: 12 },
+      ios: { shadowColor: '#785D2B', shadowOpacity: 0.1, shadowOffset: { width: 0, height: 5 }, shadowRadius: 10 },
+    }),
+  },
+  nameAgeRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
     gap: 7,
-    paddingHorizontal: 24,
-    marginBottom: 20,
+    marginBottom: 6,
   },
-  title: {
-    width: '100%',
-    textAlign: 'center',
-    color: '#4B0054',
-    fontFamily: 'serif',
-    fontSize: 30,
+  nameTypography: {
+    fontSize: 22,
     fontWeight: '900',
+    color: '#4B1648',
   },
-  subtitle: {
-    width: '100%',
-    textAlign: 'center',
-    color: '#9D9798',
+  ageTypography: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#8C828C',
+  },
+  langRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    marginBottom: 14,
+  },
+  langText: {
     fontSize: 12,
-    fontWeight: '900',
-    letterSpacing: 0.7,
+    fontWeight: '800',
+    color: '#7D6123',
+    letterSpacing: 0.4,
   },
-  languageFilter: {
+  stateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: -8,
+    marginBottom: 10,
+  },
+  stateText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#8A6C28',
+    letterSpacing: 0.3,
+  },
+  actionSection: {
+    marginTop: 2,
+    width: '100%',
+  },
+  buttonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    width: '100%',
+  },
+  // Applied over callPillBtn / videoPillBtn for seeded demo profiles. These must
+  // stay visibly inert: without them the demo rows are indistinguishable from a
+  // real, callable profile.
+  pillMuted: {
+    backgroundColor: '#F2F0EC',
+    borderColor: '#DFD9CF',
+    opacity: 0.75,
+  },
+  callPillBtn: {
+    flex: 1,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFF9E8',
+    borderWidth: 1.5,
+    borderColor: '#E4CC8B',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Tight: these pills sit two-across inside an already narrow card and now
+    // carry a price as well as an icon and label.
+    paddingHorizontal: 12,
+    gap: 3,
+    ...Platform.select({
+      android: { elevation: 2 },
+      ios: { shadowColor: '#B8820B', shadowOpacity: 0.1, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4 },
+    }),
+  },
+  pillPrice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 1,
+    // Must not be squeezed out by the label: the price is the point of the pill.
+    flexShrink: 0,
+  },
+  pillPriceText: {
+    fontSize: 12.5,
+    fontWeight: '800',
+  },
+  videoPillBtn: {
+    flex: 1,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#52104F',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    gap: 3,
+    ...Platform.select({
+      android: { elevation: 3 },
+      ios: { shadowColor: '#52104F', shadowOpacity: 0.25, shadowOffset: { width: 0, height: 3 }, shadowRadius: 5 },
+    }),
+  },
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+    backgroundColor: 'rgba(38, 14, 34, 0.35)',
+  },
+  modalSheet: {
+    width: '100%',
+    maxWidth: 460,
+    alignSelf: 'center',
+    backgroundColor: '#FFFDF9',
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    paddingHorizontal: 22,
+    paddingTop: 18,
+    paddingBottom: Platform.OS === 'ios' ? 42 : 28,
+  },
+  sheetHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 14,
   },
-  languageSelect: {
-    width: 176,
-    height: 40,
-    borderRadius: 20,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 7,
-    gap: 8,
-    backgroundColor: 'rgba(255, 253, 248, 0.94)',
-    borderWidth: 1,
-    borderColor: '#E6DAC1',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  languageSelectIcon: {
-    width: 27,
-    height: 27,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFF2C7',
-  },
-  languageSelectText: {
-    flex: 1,
-    color: '#5D3E50',
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  languageModal: {
-    flex: 1,
-    justifyContent: 'flex-end',
-    backgroundColor: 'rgba(45, 21, 40, 0.26)',
-  },
-  languageSheet: {
-    alignSelf: 'center',
-    width: '100%',
-    maxWidth: 430,
-    paddingHorizontal: 22,
-    paddingTop: 18,
-    paddingBottom: 28,
-    borderTopLeftRadius: 22,
-    borderTopRightRadius: 22,
-    backgroundColor: '#FFFCF7',
-    boxShadow: Platform.OS === 'web' ? '0 -14px 32px rgba(57, 34, 48, 0.16)' : undefined,
-  },
-  languageSheetHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingBottom: 14,
-  },
-  languageSheetTitleRow: {
+  sheetTitleRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
-  languageSheetTitle: {
-    color: '#4F174F',
-    fontFamily: 'serif',
-    fontSize: 19,
+  sheetTitle: {
+    fontSize: 18,
     fontWeight: '800',
+    color: '#5C1A5A',
   },
-  languageClose: {
+  closeBtn: {
     width: 34,
     height: 34,
     borderRadius: 17,
+    backgroundColor: '#F3EBE3',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#F4EEE5',
   },
-  languageList: {
-    gap: 5,
+  sheetList: {
+    gap: 8,
   },
-  languageOption: {
-    height: 43,
-    borderRadius: 10,
-    paddingHorizontal: 14,
+  sheetItem: {
+    height: 46,
+    borderRadius: 14,
+    paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    backgroundColor: '#FAF5ED',
   },
-  languageOptionSelected: {
-    backgroundColor: '#F9ECF8',
-  },
-  languageOptionText: {
-    color: '#786E67',
-    fontSize: 13,
-    fontWeight: '800',
-  },
-  languageOptionTextSelected: {
-    color: '#5A075F',
-  },
-  languageOptionCircle: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
+  sheetItemSelected: {
+    backgroundColor: '#F9EAF6',
     borderWidth: 1,
-    borderColor: '#D9CEC0',
+    borderColor: '#DFC6DC',
   },
-  matchList: {
-    gap: 64,
+  sheetItemText: {
+    fontSize: 14.5,
+    color: '#5D505B',
+    fontWeight: '700',
   },
-  vipFilterRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 10,
-    marginBottom: 28,
+  sheetItemTextSelected: {
+    color: '#5A1257',
+    fontWeight: '900',
   },
-  vipPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: '#E6DAC1',
-    backgroundColor: '#FFFDF8',
+  busyBadge: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    marginBottom: 2,
   },
-  vipPillActive: {
-    backgroundColor: '#FFF4CF',
-    borderColor: '#D4B142',
-  },
-  vipPillText: {
-    color: '#B3A9A4',
+  busyBadgeText: {
+    color: '#B91C1C',
     fontSize: 11,
     fontWeight: '800',
   },
-  vipPillTextActive: {
-    color: '#8A6715',
+  priorityBadge: {
+    backgroundColor: '#FEF3C7',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 8,
+    alignSelf: 'flex-start',
+    marginTop: 4,
+    marginBottom: 2,
   },
-  matchRow: {
-    minHeight: 136,
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 22,
-    gap: 10,
-    width: '100%',
+  priorityBadgeText: {
+    color: '#D97706',
+    fontSize: 11,
+    fontWeight: '800',
   },
-  matchRowLeft: {
-    justifyContent: 'flex-start',
-  },
-  matchRowRight: {
-    justifyContent: 'flex-end',
-  },
-  firstRow: {
-    marginTop: 6,
-  },
-  avatarNode: {
-    width: 114,
-    alignItems: 'center',
-  },
-  avatarNodeRight: {
-    marginTop: -10,
-  },
-  matchRing: {
-    width: 96,
-    height: 96,
-    borderRadius: 48,
-    padding: 3,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  matchPhotoInner: {
+  waitlistBtn: {
     flex: 1,
-    borderRadius: 45,
-    padding: 2,
-    backgroundColor: '#FFFDF8',
-    overflow: 'hidden',
-  },
-  matchPhoto: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 43,
-  },
-  likeBubble: {
-    position: 'absolute',
-    right: 2,
-    bottom: 28,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFFBEB',
+    borderWidth: 1.5,
+    borderColor: '#F59E0B',
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-    borderWidth: 2,
-    borderColor: '#D9BB56',
-    boxShadow: Platform.OS === 'web' ? '0 7px 14px rgba(74, 0, 78, 0.16)' : undefined,
-  },
-  infoCard: {
-    minWidth: 140,
-    alignItems: 'flex-end',
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(255, 253, 248, 0.9)',
-    borderWidth: 1,
-    borderColor: '#EEE4D3',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  infoCardLeft: {
-    alignItems: 'flex-start',
-  },
-  infoTap: {
-    width: '100%',
-    gap: 5,
-  },
-  memberBadge: {
-    alignSelf: 'flex-start',
-    height: 20,
-    borderRadius: 10,
-    paddingHorizontal: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
+    paddingHorizontal: 12,
     gap: 3,
-    backgroundColor: '#FFF4CF',
-    borderWidth: 1,
-    borderColor: '#E3C867',
+    ...Platform.select({
+      android: { elevation: 2 },
+      ios: { shadowColor: '#D97706', shadowOpacity: 0.15, shadowOffset: { width: 0, height: 2 }, shadowRadius: 4 },
+    }),
   },
-  memberBadgeText: {
-    color: '#8A6715',
-    fontSize: 8,
-    fontWeight: '900',
-    textTransform: 'uppercase',
+  waitlistBtnWaiting: {
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1.5,
+    borderColor: '#10B981',
   },
-  nameRow: {
+  waitlistBtnText: {
+    color: '#B45309',
+    fontSize: 13.5,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  waitlistBtnTextWaiting: {
+    color: '#15803D',
+    fontSize: 13.5,
+    fontWeight: '800',
+  },
+  priorityModalSheet: {
+    width: '88%',
+    maxWidth: 380,
+    backgroundColor: 'rgba(35, 10, 35, 0.96)',
+    borderRadius: 26,
+    padding: 24,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.2)',
+    ...Platform.select({
+      android: { elevation: 20 },
+      ios: { shadowColor: '#000', shadowOpacity: 0.5, shadowOffset: { width: 0, height: 10 }, shadowRadius: 20 },
+    }),
+  },
+  priorityModalHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 7,
+    gap: 10,
+    marginBottom: 14,
   },
-  matchName: {
-    flexShrink: 1,
-    color: '#56105C',
-    fontFamily: 'serif',
+  priorityModalEmoji: {
+    fontSize: 30,
+  },
+  priorityModalTitle: {
+    color: '#FFFFFF',
     fontSize: 20,
     fontWeight: '800',
   },
-  age: {
-    color: '#A8A2A3',
-    fontSize: 13,
-    lineHeight: 23,
-    fontWeight: '700',
-  },
-  profileLanguageRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  profileLanguage: {
-    color: '#9A856E',
-    fontSize: 9,
-    fontWeight: '900',
-  },
-  modeRow: {
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: 6,
-  },
-  modeButton: {
-    height: 30,
-    minWidth: 58,
-    borderRadius: 15,
-    paddingHorizontal: 9,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    backgroundColor: '#7A256D',
-    borderWidth: 1,
-    borderColor: '#7A256D',
-    boxShadow: Platform.OS === 'web' ? '0 8px 14px rgba(122, 37, 109, 0.3)' : undefined,
-  },
-  modeButtonVideo: {},
-  modeText: {
-    color: '#FFF',
-    fontSize: 10,
-    fontWeight: '900',
-  },
-  modeTextCall: {},
-  randomWrap: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    alignItems: 'center',
-    paddingRight: 28,
-    marginTop: 72,
-    gap: 16,
-  },
-  moreButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-    borderWidth: 2,
-    borderColor: '#D2B243',
-    boxShadow: Platform.OS === 'web' ? skeuo.deepShadow : undefined,
-  },
-  randomButton: {
-    width: 82,
-    height: 82,
-    borderRadius: 41,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-    borderWidth: 3,
-    borderColor: '#D2B243',
-    boxShadow: Platform.OS === 'web' ? skeuo.deepShadow : undefined,
-  },
-  randomLabel: {
-    position: 'absolute',
-    bottom: -24,
-    width: 120,
+  priorityModalDesc: {
+    color: '#E2E8F0',
+    fontSize: 14.5,
     textAlign: 'center',
-    left: '50%',
-    marginLeft: -60,
-    color: '#A2871A',
-    fontFamily: 'serif',
-    fontSize: 13,
+    lineHeight: 22,
+    marginBottom: 16,
+  },
+  priorityBannerBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(232, 63, 111, 0.25)',
+    borderWidth: 1,
+    borderColor: '#E83F6F',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 14,
+    gap: 8,
+    marginBottom: 20,
+  },
+  priorityBannerText: {
+    color: '#FCE7F3',
+    fontSize: 13.5,
+    fontWeight: '600',
+  },
+  priorityModalButtons: {
+    width: '100%',
+    gap: 12,
+    marginBottom: 16,
+  },
+  priorityCallBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#10B981',
+    paddingVertical: 15,
+    borderRadius: 16,
+    gap: 8,
+  },
+  priorityCallBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15.5,
     fontWeight: '800',
   },
-  pathLayer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-  },
-
-  feedArea: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 40,
-    gap: 16,
-  },
-  connectCardWrapper: {
-    marginBottom: 8,
-  },
-  cardCategoryBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: '#4B0054',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 12,
-    marginBottom: -10,
-    marginLeft: 16,
-    zIndex: 2,
-    borderWidth: 1,
-    borderColor: '#7A256D',
-  },
-  cardCategoryBadgeText: {
-    color: '#FFF',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  connectCard: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(255, 253, 248, 0.95)',
-    borderRadius: 20,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: '#E8D1A7',
-    alignItems: 'center',
-    gap: 12,
-  },
-  connectCardBusy: {
-    borderColor: '#FFCCCC',
-    backgroundColor: '#FFF5F5',
-  },
-  connectAvatarRing: {
-    padding: 3,
-    borderRadius: 40,
-  },
-  connectAvatarInner: {
-    backgroundColor: '#FFF',
-    borderRadius: 37,
-    padding: 2,
-  },
-  connectAvatarImage: {
-    width: 70,
-    height: 70,
-    borderRadius: 35,
-  },
-  connectCardInfo: {
-    flex: 1,
-    gap: 6,
-  },
-  connectNameRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  connectName: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: '#4B0054',
-    flexShrink: 1,
-  },
-  connectLiveBadge: {
-    backgroundColor: '#10B981',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
-  },
-  connectLiveBadgeText: {
-    color: '#FFF',
-    fontSize: 9,
-    fontWeight: 'bold',
-  },
-  connectMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    flexWrap: 'wrap',
-  },
-  connectTierBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 2,
-    borderWidth: 1,
-    paddingHorizontal: 4,
-    paddingVertical: 1,
-    borderRadius: 8,
-  },
-  connectTierText: {
-    fontSize: 9,
-    fontWeight: 'bold',
-  },
-  connectMetaText: {
-    fontSize: 12,
-    color: '#8A7C70',
-  },
-  connectDot: {
-    width: 3,
-    height: 3,
-    borderRadius: 1.5,
-    backgroundColor: '#D1C8C0',
-    marginHorizontal: 2,
-  },
-  connectActions: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 4,
-  },
-  randomButtonSmall: {
-    height: 44,
-    paddingHorizontal: 16,
-    borderRadius: 22,
+  priorityVideoBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-    borderWidth: 1.5,
-    borderColor: '#D2B243',
+    backgroundColor: '#E83F6F',
+    paddingVertical: 15,
+    borderRadius: 16,
+    gap: 8,
   },
-  moreButtonSmall: {
-    height: 44,
-    paddingHorizontal: 16,
-    borderRadius: 22,
-    flexDirection: 'row',
+  priorityVideoBtnText: {
+    color: '#FFFFFF',
+    fontSize: 15.5,
+    fontWeight: '800',
+  },
+  priorityDismissBtn: {
+    paddingVertical: 8,
+  },
+  priorityDismissText: {
+    color: '#94A3B8',
+    fontSize: 13.5,
+    fontWeight: '600',
+  },
+  holdCircleContainer: {
+    marginVertical: 18,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-    borderWidth: 1.5,
-    borderColor: '#D2B243',
+  },
+  holdCircle: {
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+    borderWidth: 4,
+    borderColor: '#F97316',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(249, 115, 22, 0.15)',
+  },
+  holdNumber: {
+    color: '#FFFFFF',
+    fontSize: 28,
+    fontWeight: '900',
+  },
+  holdSubtext: {
+    color: '#CBD5E1',
+    fontSize: 13.5,
+    textAlign: 'center',
+    marginBottom: 22,
+    lineHeight: 20,
   },
 });

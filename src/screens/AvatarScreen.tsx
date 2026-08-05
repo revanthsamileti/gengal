@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
+import { tap38, tap40 } from '../theme/touch';
 import { StyleSheet, Text, TouchableOpacity, View, Platform, ScrollView } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
+import { Alert } from '../components/CustomAlert';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 import GengalAvatar, { AvatarData, DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';
 import { doc, updateDoc } from 'firebase/firestore';
@@ -24,7 +26,7 @@ const ACCESSORIES = ['none', 'designerEyewear', 'goldHoops', 'pearlChoker'];
 const TABS = ['Hair', 'Face', 'Clothes', 'Background'];
 
 export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenProps) {
-  const { profile, updateProfile } = useUser();
+  const { profile } = useUser();
   const [isSaving, setIsSaving] = useState(false);
   const [avatarData, setAvatarData] = useState<AvatarData>(
     route?.params?.isEditMode && profile?.avatarData ? (profile.avatarData as AvatarData) : DEFAULT_AVATAR_DNA
@@ -48,15 +50,16 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
   };
 
   const handleContinue = async () => {
-    if (route?.params?.isEditMode && profile) {
+    if (route?.params?.isEditMode && profile?.uid) {
       try {
         setIsSaving(true);
         const userRef = doc(db, 'users', profile.uid);
         await updateDoc(userRef, { avatarData });
-        updateProfile({ ...profile, avatarData });
         goBack();
-      } catch (e) {
-        console.error("Error saving avatar", e);
+      } catch (e: any) {
+        // Silently failing here looked identical to success minus the
+        // navigation — the user had no idea their avatar was not saved.
+        Alert.alert('Avatar not saved', e?.message || 'Please check your connection and try again.', [{ text: 'OK' }]);
         setIsSaving(false);
       }
     } else {
@@ -75,7 +78,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
             <Text style={styles.sectionLabel}>STYLE</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionsScroll}>
               {TOP_TYPES.map(type => (
-                <TouchableOpacity key={type} style={[styles.optionBtn, avatarData.topType === type && styles.activeOptionBtn]} onPress={() => updateAvatar('topType', type)}>
+                <TouchableOpacity hitSlop={tap40} key={type} style={[styles.optionBtn, avatarData.topType === type && styles.activeOptionBtn]} onPress={() => updateAvatar('topType', type)}>
                   <Text style={[styles.optionText, avatarData.topType === type && styles.activeOptionText]}>Style {TOP_TYPES.indexOf(type) + 1}</Text>
                 </TouchableOpacity>
               ))}
@@ -83,7 +86,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
             <Text style={[styles.sectionLabel, { marginTop: 16 }]}>COLOR</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionsScroll}>
               {HAIR_COLORS.map(color => (
-                <TouchableOpacity key={color} style={[styles.optionBtn, avatarData.hairColor === color && styles.activeOptionBtn]} onPress={() => updateAvatar('hairColor', color)}>
+                <TouchableOpacity hitSlop={tap40} key={color} style={[styles.optionBtn, avatarData.hairColor === color && styles.activeOptionBtn]} onPress={() => updateAvatar('hairColor', color)}>
                   <Text style={[styles.optionText, avatarData.hairColor === color && styles.activeOptionText]}>{color}</Text>
                 </TouchableOpacity>
               ))}
@@ -96,7 +99,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
             <Text style={styles.sectionLabel}>SKIN TONE</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionsScroll}>
               {SKIN_COLORS.map(color => (
-                <TouchableOpacity key={color} style={[styles.optionBtn, avatarData.skinColor === color && styles.activeOptionBtn]} onPress={() => updateAvatar('skinColor', color)}>
+                <TouchableOpacity hitSlop={tap40} key={color} style={[styles.optionBtn, avatarData.skinColor === color && styles.activeOptionBtn]} onPress={() => updateAvatar('skinColor', color)}>
                   <Text style={[styles.optionText, avatarData.skinColor === color && styles.activeOptionText]}>{color}</Text>
                 </TouchableOpacity>
               ))}
@@ -104,7 +107,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
             <Text style={[styles.sectionLabel, { marginTop: 16 }]}>ACCESSORIES</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionsScroll}>
               {ACCESSORIES.map(acc => (
-                <TouchableOpacity key={acc} style={[styles.optionBtn, avatarData.accessoriesType === acc && styles.activeOptionBtn]} onPress={() => updateAvatar('accessoriesType', acc)}>
+                <TouchableOpacity hitSlop={tap40} key={acc} style={[styles.optionBtn, avatarData.accessoriesType === acc && styles.activeOptionBtn]} onPress={() => updateAvatar('accessoriesType', acc)}>
                   <Text style={[styles.optionText, avatarData.accessoriesType === acc && styles.activeOptionText]}>{acc}</Text>
                 </TouchableOpacity>
               ))}
@@ -117,7 +120,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
             <Text style={styles.sectionLabel}>OUTFIT</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionsScroll}>
               {CLOTHE_TYPES.map(type => (
-                <TouchableOpacity key={type} style={[styles.optionBtn, avatarData.clotheType === type && styles.activeOptionBtn]} onPress={() => updateAvatar('clotheType', type)}>
+                <TouchableOpacity hitSlop={tap40} key={type} style={[styles.optionBtn, avatarData.clotheType === type && styles.activeOptionBtn]} onPress={() => updateAvatar('clotheType', type)}>
                   <Text style={[styles.optionText, avatarData.clotheType === type && styles.activeOptionText]}>{type.replace(/([A-Z])/g, ' $1')}</Text>
                 </TouchableOpacity>
               ))}
@@ -130,7 +133,14 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
             <Text style={styles.sectionLabel}>COLOR</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.optionsScroll}>
               {BG_COLORS.map(color => (
-                <TouchableOpacity key={color} style={[styles.colorOption, avatarData.bgColor === color && styles.activeColorOption, { backgroundColor: color }]} onPress={() => updateAvatar('bgColor', color)} />
+                <TouchableOpacity
+                  key={color}
+                  style={[styles.colorOption, avatarData.bgColor === color && styles.activeColorOption, { backgroundColor: color }]}
+                  onPress={() => updateAvatar('bgColor', color)}
+                  accessibilityRole="radio"
+                  accessibilityLabel={`Background colour ${color}`}
+                  accessibilityState={{ selected: avatarData.bgColor === color, checked: avatarData.bgColor === color }}
+                />
               ))}
             </ScrollView>
           </View>
@@ -142,7 +152,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
     <ScreenShell tone="light">
       <View style={styles.container}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={goBack} style={styles.backBtn}>
+          <TouchableOpacity onPress={goBack} style={styles.backBtn} accessibilityRole="button" accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={24} color="#5A155A" />
           </TouchableOpacity>
           <Text style={styles.brand}>Gengal</Text>
@@ -156,7 +166,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
 
         <View style={styles.avatarWrapper}>
           <GengalAvatar data={avatarData} size={160} />
-          <TouchableOpacity style={styles.randomizeBtn} onPress={randomizeAvatar} activeOpacity={0.8}>
+          <TouchableOpacity style={styles.randomizeBtn} onPress={randomizeAvatar} activeOpacity={0.8} accessibilityRole="button" accessibilityLabel="Randomize avatar">
             <MaterialIcons name="shuffle" size={18} color={skeuo.plum} />
             <Text style={styles.randomizeText}>Randomize</Text>
           </TouchableOpacity>
@@ -166,7 +176,15 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
           <View>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.tabsScroll}>
               {TABS.map(tab => (
-                <TouchableOpacity key={tab} style={[styles.tabBtn, activeTab === tab && styles.activeTabBtn]} onPress={() => setActiveTab(tab)}>
+                <TouchableOpacity
+                  key={tab}
+                  style={[styles.tabBtn, activeTab === tab && styles.activeTabBtn]}
+                  hitSlop={tap38}
+                  onPress={() => setActiveTab(tab)}
+                  accessibilityRole="tab"
+                  accessibilityLabel={tab}
+                  accessibilityState={{ selected: activeTab === tab }}
+                >
                   <Text style={[styles.tabText, activeTab === tab && styles.activeTabText]}>{tab}</Text>
                 </TouchableOpacity>
               ))}
@@ -176,7 +194,14 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
         </View>
 
         <View style={styles.footer}>
-          <TouchableOpacity onPress={handleContinue} activeOpacity={0.8}>
+          <TouchableOpacity
+            onPress={handleContinue}
+            activeOpacity={0.8}
+            disabled={isSaving}
+            accessibilityRole="button"
+            accessibilityLabel="Save avatar"
+            accessibilityState={{ disabled: isSaving }}
+          >
             <View style={styles.continueButtonWrapper}>
               <LinearGradient
                 colors={[...skeuoGradients.gold]}

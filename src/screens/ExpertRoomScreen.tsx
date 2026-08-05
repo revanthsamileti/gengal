@@ -4,12 +4,11 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
+  Pressable,
   View,
   Modal,
   ActivityIndicator,
-  Animated,
   KeyboardAvoidingView,
   Share,
   Clipboard,
@@ -18,13 +17,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import GengalAvatar from '../components/GengalAvatar';
-import { skeuo } from '../theme/skeuomorphic';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import {
   ExpertRoom,
   RoomEvent,
-  SpeakerSlot,
   TopGifter,
   GIFTS,
   subscribeToRoom,
@@ -46,47 +43,27 @@ import {
   closeExpertRoom,
   HandRequest,
   subscribeToHandRequests,
+  tickRoomBilling,
 } from '../services/expertRoomService';
-import { useGengalVoice } from '../hooks/useGengalVoice';
+import { useRoomVoice, VoiceRole } from '../hooks/useRoomVoice';
+import { useRoomPresence } from '../hooks/useRoomPresence';
+import ConnectionBanner from '../components/rooms/ConnectionBanner';
+import {
+  RoomHeader, RoomDock, RoomRail, RoomSheet, RoomChat, RoomGifts,
+  FeedEntry, GiftTarget,
+} from '../components/rooms/RoomChrome';
+import { SpeakerSeat } from '../components/rooms/SpeakerSeat';
+import { roomPalette, RoomTone } from '../theme/roomTheme';
+
+/** Live audio stages read best dark: avatars and the speaking halo carry the
+ *  eye. The rest of the app is light, which is why the shell is tone-aware. */
+const TONE: RoomTone = 'dark';
+const C = roomPalette(TONE);
 
 interface Props {
   navigate: (screen: string, params?: any) => void;
   goBack?: () => void;
   route?: { params?: { roomId?: string } };
-}
-
-// Animated pulsing ring for the speaking host
-function PulseRing({ size, color }: { size: number; color: string }) {
-  const scale = useRef(new Animated.Value(1)).current;
-  const opacity = useRef(new Animated.Value(0.7)).current;
-  useEffect(() => {
-    Animated.loop(
-      Animated.parallel([
-        Animated.sequence([
-          Animated.timing(scale, { toValue: 1.18, duration: 900, useNativeDriver: true }),
-          Animated.timing(scale, { toValue: 1, duration: 900, useNativeDriver: true }),
-        ]),
-        Animated.sequence([
-          Animated.timing(opacity, { toValue: 0.15, duration: 900, useNativeDriver: true }),
-          Animated.timing(opacity, { toValue: 0.7, duration: 900, useNativeDriver: true }),
-        ]),
-      ])
-    ).start();
-  }, []);
-  return (
-    <Animated.View
-      style={{
-        position: 'absolute',
-        width: size + 16,
-        height: size + 16,
-        borderRadius: (size + 16) / 2,
-        borderWidth: 3,
-        borderColor: color,
-        opacity,
-        transform: [{ scale }],
-      }}
-    />
-  );
 }
 
 export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
@@ -108,10 +85,12 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [chatText, setChatText] = useState('');
-  const [giftModal, setGiftModal] = useState(false);
   const [infoModal, setInfoModal] = useState<{ title: string; msg: string } | null>(null);
   const [hasJoined, setHasJoined] = useState(false);
   const [giftRecipient, setGiftRecipient] = useState<{ uid: string; name: string } | null>(null);
+  const [spentInRoom, setSpentInRoom] = useState(0);
+  const [sheet, setSheet] = useState<null | 'chat' | 'gift'>(null);
+  const [seenChat, setSeenChat] = useState(0);
 
   const feedRef = useRef<ScrollView>(null);
 
@@ -126,12 +105,54 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
   const isOnStage = room?.speakers.some((s) => s.uid === myUid && s.uid !== room?.hostUid) ?? false;
   const boySpeaker = room?.speakers?.find((s) => s.gender === 'boy');
   const girlSpeaker = room?.speakers?.find((s) => s.gender === 'girl');
-  const speakerSlotsFilled = [boySpeaker, girlSpeaker].filter(Boolean).length;
-  const audienceCount = Math.max((room?.activeMemberCount || 0) - (room?.speakers?.length || 0), 0);
   const roleLabel = isHost ? 'Host' : isSpeaker ? 'Speaker' : 'Audience';
-  const roleTone = isHost ? '#D1B23B' : isSpeaker ? '#39BE69' : '#9BB4FF';
   const boyQueue = handRequests.filter((r) => r.gender === 'boy');
   const girlQueue = handRequests.filter((r) => r.gender === 'girl');
+
+  // Chat and system notices share one feed, newest last.
+  const chatEvents = events.filter((e) => ['chat', 'gift', 'stage_up', 'join'].includes(e.type));
+  const feedEntries: FeedEntry[] = [...chatEvents].reverse().map((e, i) => (
+    e.type === 'chat'
+      ? {
+          id: e.id ?? `c${i}`,
+          kind: 'chat' as const,
+          name: e.senderName,
+          text: e.text ?? '',
+          mine: e.senderUid === myUid,
+        }
+      : {
+          id: e.id ?? `s${i}`,
+          kind: 'system' as const,
+          text:
+            e.type === 'gift' ? `${e.senderName} sent ${e.giftName} to ${e.recipientName ?? 'the host'}`
+            : e.type === 'stage_up' ? `${e.senderName} came up on stage`
+            : `${e.senderName} joined`,
+        }
+  ));
+  const unreadChat = Math.max(0, chatEvents.filter((e) => e.type === 'chat').length - seenChat);
+
+  const giftTargets: GiftTarget[] = room
+    ? [
+        { uid: room.hostUid, nickname: room.hostNickname, avatarData: room.hostAvatarData },
+        ...room.speakers
+          .filter((sp) => sp.uid !== room.hostUid && sp.uid !== myUid)
+          .map((sp) => ({ uid: sp.uid, nickname: sp.nickname, avatarData: sp.avatarData })),
+      ].filter((t) => t.uid !== myUid)
+    : [];
+
+  // One line telling the user what this room is doing and what they can do.
+  const dockHeadline = isHost
+    ? 'You are hosting'
+    : isOnStage ? 'You are on stage'
+    : hasRaisedHand ? 'Hand raised'
+    : 'Listening';
+  const dockHint = isHost
+    ? (boyQueue.length + girlQueue.length > 0
+        ? `${boyQueue.length + girlQueue.length} waiting to come up`
+        : 'Tap a seat to mute or remove a speaker')
+    : isOnStage ? 'Tap your seat to step down'
+    : hasRaisedHand ? 'The host will bring you up when a seat frees'
+    : 'Raise a hand to ask for the mic';
 
   // Review modal visible for everyone when reviewingUid is set
   const reviewVisible = !!room?.reviewingUid;
@@ -155,63 +176,93 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
     return () => { unsubRoom(); unsubEvents(); unsubGifters(); unsubRequests(); };
   }, [roomId]);
 
-  // Mark as joined once on first load
-  const { connectSeat, disconnectSeat, changeRole, toggleMic, micMuted } = useGengalVoice('agora');
-  const [agoraConnected, setAgoraConnected] = useState(false);
+  // Speakers, the host, and whoever is under review may talk; everyone listens.
+  const isUnderReview = room?.reviewingUid === myUid;
+  const voiceRole: VoiceRole = (isHost || isSpeaker || isUnderReview) ? 'broadcaster' : 'audience';
+  const { toggleMic, micMuted } = useRoomVoice(roomId, voiceRole, !!room);
+
+  // Occupancy that expires. `room.activeMemberCount` is a stored counter and
+  // drifts upward whenever a client dies without running its leave path, so the
+  // header reads the live heartbeat roster instead.
+  const { liveCount, connection } = useRoomPresence({
+    collectionName: 'expert_rooms',
+    roomId,
+    uid: myUid,
+    nickname: myName,
+    avatarData: myAvatarData,
+    isHost,
+    enabled: !!room,
+  });
 
   // 1. Join room event
   useEffect(() => {
     if (!roomId || !room || hasJoined) return;
     setHasJoined(true);
-    joinRoom(roomId, myUid, myName, myAvatarData).catch(() => {});
+    // A failed join leaves the user looking at a room they are not actually in
+    // — no presence, no stage, no chat delivery. Say so rather than swallow it.
+    joinRoom(roomId, myUid, myName, myAvatarData).catch((e: any) => {
+      console.warn('[ExpertRoom] Join failed:', e?.message ?? e);
+      showInfo('Could not join', 'We could not put you in this room. Please check your connection and try again.');
+      goBack?.();
+    });
     return () => {
       if (roomId) leaveRoom(roomId, myUid, myName).catch(() => {});
     };
   }, [roomId, !!room]);
 
-  // 2. Connect to Agora channel
+  // 2. Per-minute billing. The host is being paid, so they are never charged;
+  // the server enforces that too. Ticks every 15s and on unmount so the last
+  // partial interval is collected.
   useEffect(() => {
-    if (!roomId || !room || agoraConnected) return;
+    if (!roomId || !room || !hasJoined) return;
+    if (isHost || !(room.ratePerMin > 0)) return;
 
-    let active = true;
-    const initVoice = async () => {
+    let stopped = false;
+    let consecutiveFailures = 0;
+    const tick = async () => {
       try {
-        console.log("[ExpertRoom] Requesting Agora RTC token...");
-        const response = await fetch(`${process.env.EXPO_PUBLIC_BACKEND_URL}/api/v1/agora/generate-token`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ roomId, uid: myUid }),
-        });
-        if (!response.ok) throw new Error("Failed to generate token");
-
-        const credentials = await response.json();
-        if (!active) return;
-
-        const role = (isHost || isSpeaker) ? 'broadcaster' : 'audience';
-        await connectSeat(roomId, credentials.token, myUid, role);
-        setAgoraConnected(true);
-        console.log(`[ExpertRoom] Agora connected successfully as ${role}`);
-      } catch (err) {
-        console.warn("[ExpertRoom] Agora voice channel connection failed:", err);
+        const result = await tickRoomBilling(roomId);
+        if (stopped) return;
+        consecutiveFailures = 0;
+        setSpentInRoom((prev) => prev + (result.billedAmount || 0));
+        if (result.hasInsufficientFunds) {
+          stopped = true;
+          showInfo('Out of coins', `This room costs ${room.ratePerMin} coins a minute. Top up to keep listening.`);
+          // Unmounting runs the join effect's cleanup, which leaves the room and
+          // flushes the final billing tick.
+          goBack?.();
+        }
+      } catch (e: any) {
+        console.warn('[ExpertRoom] Billing tick failed:', e?.message ?? e);
+        if (stopped) return;
+        consecutiveFailures += 1;
+        // The server keeps accumulating unbilled seconds while we can't reach
+        // it, so staying silent means the next successful tick lands as one
+        // large unexplained deduction. Leave instead, and say why.
+        if (consecutiveFailures >= 3) {
+          stopped = true;
+          showInfo(
+            'Connection lost',
+            'We could not keep your room billing up to date, so we have taken you out of the room. Please check your connection and rejoin.'
+          );
+          goBack?.();
+        }
       }
     };
 
-    initVoice();
-
+    tick();
+    const id = setInterval(tick, 15000);
     return () => {
-      active = false;
-      disconnectSeat();
+      stopped = true;
+      clearInterval(id);
+      // Final tick collects the remaining seconds.
+      tickRoomBilling(roomId).catch(() => {});
     };
-  }, [roomId, !!room]);
+  }, [roomId, hasJoined, isHost, room?.ratePerMin]);
 
-  // 3. Handle stage role transitions
   useEffect(() => {
-    if (!agoraConnected) return;
-    const isUnderReview = room?.reviewingUid === myUid;
-    const targetRole = (isHost || isSpeaker || isUnderReview) ? 'broadcaster' : 'audience';
-    console.log(`[ExpertRoom] Dynamic role transition to ${targetRole}`);
-    changeRole(targetRole).catch(e => console.warn("Failed to switch Agora client role", e));
-  }, [isHost, isSpeaker, room?.reviewingUid, agoraConnected]);
+    if (sheet === 'chat') setSeenChat(chatEvents.filter((e) => e.type === 'chat').length);
+  }, [sheet, chatEvents.length]);
 
   const showInfo = (title: string, msg: string) => setInfoModal({ title, msg });
 
@@ -234,7 +285,8 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
 
   const handleAcceptOnStage = useCallback(async (uid: string, nickname: string, avatarData: any, gender: 'boy' | 'girl') => {
     if (!roomId || !room) return;
-    await acceptOnStage(roomId, uid, nickname, avatarData, gender).catch(() => {});
+    await acceptOnStage(roomId, uid, nickname, avatarData, gender)
+      .catch((e: any) => showInfo('Could not add to stage', e?.message || 'Please try again.'));
   }, [roomId, room]);
 
   const handleDirectSeatJoin = useCallback(async (gender: 'boy' | 'girl') => {
@@ -242,7 +294,6 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
     setActionLoading(true);
     try {
       await acceptOnStage(roomId, myUid, myName, myAvatarData, gender);
-      console.log(`[ExpertRoom] Direct stage join successful for gender: ${gender}`);
     } catch (e: any) {
       showInfo('Error', e.message || 'Failed to join stage directly.');
     } finally {
@@ -267,24 +318,31 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
 
   const handleRemoveFromStage = useCallback(async (uid: string) => {
     if (!roomId || !room) return;
-    await removeFromStage(roomId, uid, room.speakers).catch(() => {});
+    await removeFromStage(roomId, uid)
+      .catch((e: any) => showInfo('Could not remove from stage', e?.message || 'Please try again.'));
   }, [roomId, room]);
 
   const handleToggleSpeakerMute = useCallback(async (uid: string) => {
     if (!roomId || !room || !isHost) return;
-    await toggleMute(roomId, uid, room.speakers).catch(() => {});
+    await toggleMute(roomId, uid)
+      .catch((e: any) => showInfo('Could not change mute', e?.message || 'Please try again.'));
   }, [roomId, room, isHost]);
 
   const handleSendChat = useCallback(async () => {
     if (!roomId || !chatText.trim()) return;
     const msg = chatText.trim();
     setChatText('');
-    await sendChatMessage(roomId, myUid, myName, myAvatarData, msg).catch(() => {});
+    // Put the text back if it never left — clearing the box already told the
+    // user it sent, so a silent failure loses what they wrote.
+    await sendChatMessage(roomId, myUid, myName, myAvatarData, msg).catch((e: any) => {
+      setChatText((current) => (current ? current : msg));
+      showInfo('Message not sent', e?.message || 'Please check your connection and try again.');
+    });
   }, [roomId, chatText, myUid, myName, myAvatarData]);
 
   const handleSendGift = useCallback(async (giftId: string) => {
     if (!roomId || !room || !giftRecipient) return;
-    setGiftModal(false);
+    setSheet(null);
     setActionLoading(true);
     try {
       const gift = await sendGiftInRoom(
@@ -314,7 +372,8 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
 
   const handleConnectMatch = useCallback(async (toUid: string, toName: string) => {
     if (!roomId) return;
-    await pushMatchConnect(roomId, myUid, myName, toUid, toName).catch(() => {});
+    await pushMatchConnect(roomId, myUid, myName, toUid, toName)
+      .catch((e: any) => showInfo('Could not connect', e?.message || 'Please try again.'));
   }, [roomId, myUid, myName]);
 
   const handleMatchGuests = useCallback(async () => {
@@ -325,7 +384,7 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
       boySpeaker.nickname,
       girlSpeaker.uid,
       girlSpeaker.nickname,
-    ).catch(() => {});
+    ).catch((e: any) => showInfo('Could not match guests', e?.message || 'Please try again.'));
   }, [roomId, boySpeaker, girlSpeaker]);
 
   const handleAcceptMatch = useCallback(async () => {
@@ -340,7 +399,8 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
 
   const handleEndRoom = async () => {
     if (!roomId) return;
-    await closeExpertRoom(roomId).catch(() => {});
+    await closeExpertRoom(roomId)
+      .catch((e: any) => showInfo('Could not close room', e?.message || 'Please try again.'));
     goBack?.();
   };
 
@@ -375,285 +435,232 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
   return (
     <ScreenShell tone="dark">
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <LinearGradient colors={['#12040E', '#2A0128', '#12040E']} style={styles.phone}>
+        <LinearGradient colors={[C.bg, '#220722', C.bg]} style={styles.phone}>
 
-          {/* ───── ZONE 1: THE STAGE ───── */}
-          <View style={styles.stage}>
-            {/* Header row */}
-            <View style={styles.stageHeader}>
-              <TouchableOpacity onPress={goBack} style={styles.exitBtn}>
-                <MaterialIcons name="arrow-back-ios" size={18} color="#EADCA8" />
-              </TouchableOpacity>
-              <View style={styles.stageTopCenter}>
-                <View style={[styles.langTag, { borderColor: tierColor }]}>
-                  <Text style={[styles.langTagText, { color: tierColor }]}>{room.language}</Text>
-                </View>
-                <Text style={styles.stageTopicText} numberOfLines={1}>{room.topic}</Text>
-              </View>
-              <View style={styles.stageHeaderRight}>
-                <TouchableOpacity onPress={handleShareLink} style={styles.shareHeaderBtn} activeOpacity={0.78}>
-                  <MaterialIcons name="share" size={14} color="#EADCA8" />
-                </TouchableOpacity>
-                <View style={styles.livePill}>
-                  <View style={styles.liveDot} />
-                  <Text style={styles.liveText}>LIVE</Text>
-                </View>
-                <Text style={styles.memberCount}>{room.activeMemberCount}</Text>
-                <MaterialIcons name="people" size={13} color="#EADCA8" />
-              </View>
-            </View>
+          <RoomHeader
+            tone={TONE}
+            eyebrow={`${room.tier} · ${room.language}`}
+            title={room.topic}
+            onBack={isHost ? handleEndRoom : (goBack ?? (() => {}))}
+            watching={liveCount}
+            right={
+              <Pressable
+                onPress={handleShareLink}
+                accessibilityRole="button"
+                accessibilityLabel="Share an invite to this room"
+                style={({ pressed }) => [styles.headerAction, pressed && { opacity: 0.7 }]}
+              >
+                <MaterialIcons name="share" size={16} color={C.accent} />
+              </Pressable>
+            }
+          />
 
-            
-            <View style={styles.triangularStage}>
-              {/* Host (Expert) Seat - Top Center */}
-              <View style={styles.hostSeat}>
-                <View style={styles.hostAvatarWrap}>
-                  <PulseRing size={75} color="#D1B23B" />
-                  <View style={styles.hostRing}>
-                    <GengalAvatar data={room.hostAvatarData} size={75} />
-                  </View>
-                  <View style={styles.hostOnlineDot} />
-                </View>
-                <Text style={styles.hostName}>{room.hostNickname}</Text>
-                <View style={[styles.hostBadge, { backgroundColor: tierColor }]}>
-                  <MaterialIcons name="workspace-premium" size={10} color="#FFF" />
-                  <Text style={styles.hostBadgeText}>EXPERT · {room.tier}</Text>
-                </View>
-              </View>
+          <ConnectionBanner state={connection} tone={TONE} />
 
-              {/* Guest Seats - Bottom Row */}
-              <View style={styles.guestsRow}>
-                {/* Boy Seat (Left) */}
-                <View style={styles.guestSeat}>
-                  {boySpeaker ? (
-                    <View style={[styles.guestAvatarWrap, styles.goldenCircle]}>
-                      <GengalAvatar data={boySpeaker.avatarData} size={65} />
-                      <View style={styles.goldGenderBadge}>
-                        <MaterialIcons name="male" size={10} color="#12040E" />
-                      </View>
-                      {boySpeaker.isMuted && (
-                        <View style={styles.mutedBadge}>
-                          <MaterialIcons name="mic-off" size={10} color="#FFF" />
-                        </View>
-                      )}
-                      {isHost && (
-                        <View style={styles.seatModRail}>
-                          <TouchableOpacity style={styles.seatModBtn} onPress={() => handleToggleSpeakerMute(boySpeaker.uid)}>
-                            <MaterialIcons name={boySpeaker.isMuted ? 'mic' : 'mic-off'} size={11} color="#FFF" />
-                          </TouchableOpacity>
-                          <TouchableOpacity style={[styles.seatModBtn, styles.removeSeatBtn]} onPress={() => handleRemoveFromStage(boySpeaker.uid)}>
-                            <MaterialIcons name="close" size={12} color="#FFF" />
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </View>
-                  ) : (
-                    !isHost && !isSpeaker && userGender === 'boy' ? (
-                      <TouchableOpacity
-                        style={[styles.emptySeatCircle, styles.goldBorder]}
-                        activeOpacity={0.7}
-                        onPress={() => handleDirectSeatJoin('boy')}
-                      >
-                        <MaterialIcons name="male" size={32} color="#D1B23B" />
-                      </TouchableOpacity>
-                    ) : (
-                      <View style={[styles.emptySeatCircle, styles.goldBorder]}>
-                        <MaterialIcons name="male" size={32} color="#D1B23B" />
-                      </View>
-                    )
-                  )}
-                  <Text style={styles.guestName} numberOfLines={1}>
-                    {boySpeaker ? boySpeaker.nickname : 'Boy Seat'}
-                  </Text>
-                  {!boySpeaker && (
-                    !isHost && !isSpeaker && userGender === 'boy' ? (
-                      <Text style={styles.joinSeatLabel}>+ Join</Text>
-                    ) : (
-                      <Text style={styles.emptyLabel}>Empty</Text>
-                    )
-                  )}
-                </View>
-
-                {/* Girl Seat (Right) */}
-                <View style={styles.guestSeat}>
-                  {girlSpeaker ? (
-                    <View style={[styles.guestAvatarWrap, styles.goldenCircle]}>
-                      <GengalAvatar data={girlSpeaker.avatarData} size={65} />
-                      <View style={styles.goldGenderBadge}>
-                        <MaterialIcons name="female" size={10} color="#12040E" />
-                      </View>
-                      {girlSpeaker.isMuted && (
-                        <View style={styles.mutedBadge}>
-                          <MaterialIcons name="mic-off" size={10} color="#FFF" />
-                        </View>
-                      )}
-                      {isHost && (
-                        <View style={styles.seatModRail}>
-                          <TouchableOpacity style={styles.seatModBtn} onPress={() => handleToggleSpeakerMute(girlSpeaker.uid)}>
-                            <MaterialIcons name={girlSpeaker.isMuted ? 'mic' : 'mic-off'} size={11} color="#FFF" />
-                          </TouchableOpacity>
-                          <TouchableOpacity style={[styles.seatModBtn, styles.removeSeatBtn]} onPress={() => handleRemoveFromStage(girlSpeaker.uid)}>
-                            <MaterialIcons name="close" size={12} color="#FFF" />
-                          </TouchableOpacity>
-                        </View>
-                      )}
-                    </View>
-                  ) : (
-                    !isHost && !isSpeaker && userGender === 'girl' ? (
-                      <TouchableOpacity
-                        style={[styles.emptySeatCircle, styles.goldBorder]}
-                        activeOpacity={0.7}
-                        onPress={() => handleDirectSeatJoin('girl')}
-                      >
-                        <MaterialIcons name="female" size={32} color="#D1B23B" />
-                      </TouchableOpacity>
-                    ) : (
-                      <View style={[styles.emptySeatCircle, styles.goldBorder]}>
-                        <MaterialIcons name="female" size={32} color="#D1B23B" />
-                      </View>
-                    )
-                  )}
-                  <Text style={styles.guestName} numberOfLines={1}>
-                    {girlSpeaker ? girlSpeaker.nickname : 'Girl Seat'}
-                  </Text>
-                  {!girlSpeaker && (
-                    !isHost && !isSpeaker && userGender === 'girl' ? (
-                      <Text style={styles.joinSeatLabel}>+ Join</Text>
-                    ) : (
-                      <Text style={styles.emptyLabel}>Empty</Text>
-                    )
-                  )}
-                </View>
-              </View>
-            </View>
-
-            </View>
-
-          {/* ───── ZONE 2: THE FEED (Absolute Overlay) ───── */}
-          <ScrollView
-            ref={feedRef}
-            style={styles.feed}
-            contentContainerStyle={styles.feedContent}
-            showsVerticalScrollIndicator={false}
-            onContentSizeChange={() => feedRef.current?.scrollToEnd({ animated: true })}
-          >
-            {[...events].reverse().map((ev) => {
-              if (ev.type === 'chat') {
-                return (
-                  <View key={ev.id} style={styles.chatRow}>
-                    <View style={styles.chatAvatar}>
-                      <GengalAvatar data={ev.senderAvatarData} size={28} />
-                    </View>
-                    <View style={styles.chatBubble}>
-                      <Text style={styles.chatSender}>{ev.senderName}</Text>
-                      <Text style={styles.chatText}>{ev.text}</Text>
-                    </View>
-                  </View>
-                );
-              }
-              if (ev.type === 'gift') {
-                if (!isHost && !isSpeaker) return null;
-                const giftObj = GIFTS.find(g => g.name === ev.giftName);
-                const toName = ev.recipientName || 'Host';
-                return (
-                  <View key={ev.id} style={styles.systemMsgRow}>
-                    <Text style={styles.systemMsgGift}>
-                      🎁 {ev.senderName} sent a {ev.giftName} {giftObj?.emoji ?? ''} to {toName}
-                    </Text>
-                  </View>
-                );
-              }
-              if (ev.type === 'join') {
-                if (!isHost && !isSpeaker) return null;
-                return (
-                  <View key={ev.id} style={styles.systemMsgRow}>
-                    <Text style={styles.systemMsgJoin}>
-                      👋 {ev.senderName} joined the room
-                    </Text>
-                  </View>
-                );
-              }
-              if (ev.type === 'stage_up') {
-                return (
-                  <View key={ev.id} style={styles.systemMsgRow}>
-                    <Text style={styles.systemMsgStage}>
-                      🎙 {ev.senderName} is now on stage!
-                    </Text>
-                  </View>
-                );
-              }
-              if (ev.type === 'raise_hand') {
-                return (
-                  <View key={ev.id} style={styles.systemMsgRow}>
-                    <Text style={styles.systemMsgHand}>
-                      ✋ {ev.senderName} raised hand ({ev.text})
-                    </Text>
-                  </View>
-                );
-              }
-              if (ev.type === 'review') {
-                return (
-                  <View key={ev.id} style={styles.systemMsgRow}>
-                    <Text style={styles.systemMsgReview}>
-                      🔍 Reviewing {ev.senderName}'s profile
-                    </Text>
-                  </View>
-                );
-              }
-              if (ev.type === 'match') {
-                return (
-                  <View key={ev.id} style={styles.systemMsgRow}>
-                    <Text style={styles.systemMsgMatchText}>
-                      💞 Match made in the room!
-                    </Text>
-                  </View>
-                );
-              }
-              return null;
-            })}
-          </ScrollView>
-
-          {/* ───── ZONE 3: ACTION BAR ───── */}
-          <View style={styles.actionBar}>
-            <View style={styles.chatInputWrap}>
-              <TextInput
-                style={styles.chatInput}
-                placeholder="Say something..."
-                placeholderTextColor="#A19891"
-                value={chatText}
-                onChangeText={setChatText}
-                onSubmitEditing={handleSendChat}
-                returnKeyType="send"
-                maxLength={200}
+          {/* ── Stage ── */}
+          <View style={styles.stageArea}>
+            <View style={styles.hostRow}>
+              <SpeakerSeat
+                tone={TONE}
+                slot="host"
+                size={82}
+                occupant={{
+                  uid: room.hostUid,
+                  nickname: room.hostNickname,
+                  avatarData: room.hostAvatarData,
+                  isMuted: room.speakers.find((sp) => sp.uid === room.hostUid)?.isMuted,
+                }}
+                isYou={isHost}
+                isHost
+                isLive={!room.speakers.find((sp) => sp.uid === room.hostUid)?.isMuted}
+                onPressOccupant={
+                  isHost ? undefined : () => {
+                    setGiftRecipient({ uid: room.hostUid, name: room.hostNickname });
+                    setSheet('gift');
+                  }
+                }
               />
             </View>
-            
-            <TouchableOpacity
-              style={[styles.actionIconRound, micMuted && styles.actionIconMuted]}
-              onPress={toggleMic}
-            >
-              <MaterialIcons name={micMuted ? "mic-off" : "mic"} size={22} color={micMuted ? '#C9504B' : '#EADCA8'} />
-            </TouchableOpacity>
-            
-            <TouchableOpacity
-              style={styles.actionIconRound}
-              onPress={() => {
-                if (room) {
-                  setGiftRecipient({ uid: room.hostUid, name: room.hostNickname });
-                  setGiftModal(true);
-                }
-              }}
-            >
-              <MaterialIcons name="card-giftcard" size={20} color="#D1B23B" />
-            </TouchableOpacity>
 
-            <TouchableOpacity 
-              style={[styles.actionIconRound, styles.exitAction]} 
-              onPress={isHost ? handleEndRoom : goBack}
-            >
-              <MaterialIcons name="meeting-room" size={20} color="#C9504B" />
-            </TouchableOpacity>
+            <View style={styles.guestRow}>
+              {(['boy', 'girl'] as const).map((gender) => {
+                const seated = gender === 'boy' ? boySpeaker : girlSpeaker;
+                const iRaised = gender === 'boy' ? raisedBoy : raisedGirl;
+                const queue = gender === 'boy' ? boyQueue : girlQueue;
+                return (
+                  <View key={gender} style={styles.guestCol}>
+                    <SpeakerSeat
+                      tone={TONE}
+                      slot={gender}
+                      occupant={seated ?? null}
+                      isYou={seated?.uid === myUid}
+                      isHost={false}
+                      isLive={!!seated && !seated.isMuted}
+                      onTake={seated || actionLoading ? undefined : () => handleDirectSeatJoin(gender)}
+                      onPressOccupant={
+                        seated
+                          ? () => {
+                              if (seated.uid === myUid) {
+                                handleRemoveFromStage(seated.uid);
+                              } else if (isHost) {
+                                handleToggleSpeakerMute(seated.uid);
+                              } else {
+                                setGiftRecipient({ uid: seated.uid, name: seated.nickname });
+                                setSheet('gift');
+                              }
+                            }
+                          : undefined
+                      }
+                    />
+
+                    {/* Waiting list for this seat, with the control that matters
+                        to whoever is looking: bring up, or raise your hand. */}
+                    {(queue.length > 0 || (!seated && !isHost)) && (
+                      <View style={styles.queue}>
+                        {queue.length > 0 && (
+                          <Text style={styles.queueLabel} numberOfLines={1}>
+                            {queue.length} waiting
+                          </Text>
+                        )}
+                        {isHost && queue.length > 0 && (
+                          <Pressable
+                            onPress={() => {
+                              const next = queue[0];
+                              if (next) handleAcceptOnStage(next.uid, next.nickname, next.avatarData, gender);
+                            }}
+                            accessibilityRole="button"
+                            accessibilityLabel={`Bring ${queue[0]?.nickname ?? 'the next person'} up to this seat`}
+                            style={({ pressed }) => [styles.queueBtn, pressed && { opacity: 0.7 }]}
+                          >
+                            <Text style={styles.queueBtnText}>Bring up</Text>
+                          </Pressable>
+                        )}
+                        {!isHost && !seated && (
+                          <Pressable
+                            onPress={() => handleRaiseHand(gender)}
+                            disabled={actionLoading}
+                            accessibilityRole="button"
+                            accessibilityLabel={iRaised ? 'Lower your hand' : 'Raise your hand for this seat'}
+                            style={({ pressed }) => [
+                              styles.queueBtn,
+                              iRaised && styles.queueBtnActive,
+                              pressed && { opacity: 0.7 },
+                            ]}
+                          >
+                            <Text style={styles.queueBtnText}>{iRaised ? 'Waiting' : 'Raise hand'}</Text>
+                          </Pressable>
+                        )}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+
+            {topGifters.length > 0 && (
+              <View style={styles.gifters}>
+                <Text style={styles.giftersLabel}>Top gifters</Text>
+                <View style={styles.giftersRow}>
+                  {topGifters.slice(0, 3).map((g, i) => (
+                    <View key={g.uid} style={styles.gifterChip}>
+                      <Text style={styles.gifterRank}>{i + 1}</Text>
+                      <GengalAvatar data={g.avatarData} size={20} />
+                      <Text style={styles.gifterName} numberOfLines={1}>{g.nickname}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
           </View>
+
+          {/* ── Action dock ── */}
+          <RoomDock
+            tone={TONE}
+            eyebrow={roleLabel}
+            headline={dockHeadline}
+            hint={dockHint}
+            meter={!isHost && room.ratePerMin > 0 ? { spent: spentInRoom, ratePerMin: room.ratePerMin } : null}
+            action={
+              isOnStage ? (
+                <Pressable
+                  onPress={() => handleRemoveFromStage(myUid)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Leave the stage"
+                  style={({ pressed }) => [styles.dockCta, pressed && { opacity: 0.75 }]}
+                >
+                  <MaterialIcons name="logout" size={18} color={C.accent} />
+                  <Text style={styles.dockCtaText}>Step down</Text>
+                </Pressable>
+              ) : !isHost ? (
+                <Pressable
+                  onPress={() => handleRaiseHand(userGender)}
+                  disabled={actionLoading}
+                  accessibilityRole="button"
+                  accessibilityLabel={hasRaisedHand ? 'Lower your hand' : 'Raise your hand to join the stage'}
+                  style={({ pressed }) => [
+                    styles.dockCta,
+                    hasRaisedHand && styles.dockCtaActive,
+                    pressed && { opacity: 0.75 },
+                  ]}
+                >
+                  <MaterialIcons
+                    name={hasRaisedHand ? 'back-hand' : 'front-hand'}
+                    size={18}
+                    color={hasRaisedHand ? C.onAccent : C.accent}
+                  />
+                  <Text style={[styles.dockCtaText, hasRaisedHand && { color: C.onAccent }]}>
+                    {hasRaisedHand ? 'Waiting' : 'Raise hand'}
+                  </Text>
+                </Pressable>
+              ) : null
+            }
+          />
+
+          {/* ── Utility rail ── */}
+          <RoomRail
+            tone={TONE}
+            items={[
+              {
+                key: 'chat',
+                icon: 'chat-bubble-outline',
+                label: 'Chat',
+                badge: unreadChat,
+                onPress: () => setSheet('chat'),
+              },
+              {
+                key: 'gift',
+                icon: 'card-giftcard',
+                label: 'Gift',
+                onPress: () => {
+                  if (!giftRecipient) setGiftRecipient({ uid: room.hostUid, name: room.hostNickname });
+                  setSheet('gift');
+                },
+              },
+              {
+                key: 'mic',
+                icon: micMuted ? 'mic-off' : 'mic',
+                label: micMuted ? 'Unmute' : 'Mute',
+                active: micMuted,
+                disabled: voiceRole !== 'broadcaster',
+                onPress: toggleMic,
+              },
+              {
+                key: 'review',
+                icon: 'badge',
+                label: 'My profile',
+                onPress: handleReviewMe,
+              },
+              // Host-only. The handler existed but was wired to nothing, so the
+              // one thing a matchmaking host is here to do had no button.
+              ...(isHost ? [{
+                key: 'match',
+                icon: 'favorite' as const,
+                label: 'Match them',
+                disabled: !boySpeaker || !girlSpeaker,
+                onPress: handleMatchGuests,
+              }] : []),
+            ]}
+          />
 
           {/* ── Shared Profile Review Modal (all room members see this) ── */}
           <Modal visible={reviewVisible} transparent animationType="slide" onRequestClose={() => roomId && isHost && clearProfileReview(roomId)}>
@@ -675,7 +682,8 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
                 {isHost ? (
                   <View style={styles.reviewHostActions}>
                     <TouchableOpacity
-                      style={styles.connectBtn}
+                      style={[styles.connectBtn, actionLoading && { opacity: 0.5 }]}
+                      disabled={actionLoading}
                       onPress={() => {
                         if (room.reviewingUid && room.reviewingNickname) {
                           handleConnectMatch(room.reviewingUid, room.reviewingNickname);
@@ -734,7 +742,7 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
                   </Text>{' '}
                   could connect!
                 </Text>
-                <TouchableOpacity style={styles.acceptMatchBtn} onPress={handleAcceptMatch}>
+                <TouchableOpacity style={[styles.acceptMatchBtn, actionLoading && { opacity: 0.5 }]} disabled={actionLoading} onPress={handleAcceptMatch}>
                   <MaterialIcons name="chat" size={18} color="#4B0054" />
                   <Text style={styles.acceptMatchText}>START CHAT</Text>
                 </TouchableOpacity>
@@ -745,70 +753,36 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
             </View>
           </Modal>
 
-          {/* ── Gift Bottom Sheet ── */}
-          <Modal visible={giftModal} transparent animationType="slide" onRequestClose={() => setGiftModal(false)}>
-            <TouchableOpacity style={styles.modalOverlay} activeOpacity={1} onPress={() => setGiftModal(false)}>
-              <View style={styles.giftSheet}>
-                <View style={styles.sheetHandle} />
-                <Text style={styles.giftSheetTitle}>Send a Gift</Text>
+          {/* ── Chat and gift sheets ── */}
+          <Modal visible={sheet === 'chat'} transparent animationType="slide" onRequestClose={() => setSheet(null)}>
+            <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+              <RoomSheet tone={TONE} title="Room chat" onClose={() => setSheet(null)} bottomInset={0}>
+                <RoomChat
+                  tone={TONE}
+                  entries={feedEntries}
+                  value={chatText}
+                  onChange={setChatText}
+                  onSend={handleSendChat}
+                  scrollRef={feedRef}
+                />
+              </RoomSheet>
+            </KeyboardAvoidingView>
+          </Modal>
 
-                {/* Recipient Selector */}
-                <View style={styles.recipientSelectorRow}>
-                  <TouchableOpacity
-                    style={[styles.recipientChip, giftRecipient?.uid === room.hostUid && styles.recipientChipActive]}
-                    onPress={() => setGiftRecipient({ uid: room.hostUid, name: room.hostNickname })}
-                  >
-                    <GengalAvatar data={room.hostAvatarData} size={22} />
-                    <Text style={[styles.recipientText, giftRecipient?.uid === room.hostUid && styles.recipientTextActive]}>
-                      Host ({room.hostNickname})
-                    </Text>
-                  </TouchableOpacity>
-
-                  {boySpeaker && boySpeaker.uid !== myUid && (
-                    <TouchableOpacity
-                      style={[styles.recipientChip, giftRecipient?.uid === boySpeaker.uid && styles.recipientChipActive]}
-                      onPress={() => setGiftRecipient({ uid: boySpeaker.uid, name: boySpeaker.nickname })}
-                    >
-                      <GengalAvatar data={boySpeaker.avatarData} size={22} />
-                      <Text style={[styles.recipientText, giftRecipient?.uid === boySpeaker.uid && styles.recipientTextActive]}>
-                        {boySpeaker.nickname} (♂)
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {girlSpeaker && girlSpeaker.uid !== myUid && (
-                    <TouchableOpacity
-                      style={[styles.recipientChip, giftRecipient?.uid === girlSpeaker.uid && styles.recipientChipActive]}
-                      onPress={() => setGiftRecipient({ uid: girlSpeaker.uid, name: girlSpeaker.nickname })}
-                    >
-                      <GengalAvatar data={girlSpeaker.avatarData} size={22} />
-                      <Text style={[styles.recipientText, giftRecipient?.uid === girlSpeaker.uid && styles.recipientTextActive]}>
-                        {girlSpeaker.nickname} (♀)
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-
-                <Text style={styles.giftSheetSub}>Coins are deducted instantly</Text>
-                <View style={styles.giftGrid}>
-                  {GIFTS.map((g) => (
-                    <TouchableOpacity
-                      key={g.id}
-                      style={styles.giftItem}
-                      activeOpacity={0.85}
-                      onPress={() => handleSendGift(g.id)}
-                    >
-                      <Text style={styles.giftEmoji}>{g.emoji}</Text>
-                      <Text style={styles.giftItemName}>{g.name}</Text>
-                      <View style={styles.giftPriceRow}>
-                        <MaterialIcons name="monetization-on" size={11} color="#F4A23A" />
-                        <Text style={styles.giftItemPrice}>{g.cost}</Text>
-                      </View>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
-            </TouchableOpacity>
+          <Modal visible={sheet === 'gift'} transparent animationType="slide" onRequestClose={() => setSheet(null)}>
+            <RoomSheet tone={TONE} title="Send a gift" onClose={() => setSheet(null)} bottomInset={0}>
+              <RoomGifts
+                tone={TONE}
+                targets={giftTargets}
+                selectedUid={giftRecipient?.uid ?? null}
+                onSelectTarget={(uid) => {
+                  const t = giftTargets.find((g) => g.uid === uid);
+                  if (t) setGiftRecipient({ uid: t.uid, name: t.nickname });
+                }}
+                gifts={GIFTS}
+                onSend={(g) => handleSendGift(g.id)}
+              />
+            </RoomSheet>
           </Modal>
 
           {/* ── Info Modal ── */}
@@ -836,26 +810,44 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
 }
 
 const styles = StyleSheet.create({
-  iconBtnRound: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(255,253,248,0.12)',
-    justifyContent: 'center',
-    alignItems: 'center',
+  headerAction: {
+    width: 34, height: 34, borderRadius: 17,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.line,
   },
-  headerLeft: {
-    flex: 1,
-    alignItems: 'flex-start',
+  stageArea: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 18, paddingHorizontal: 16 },
+  hostRow: { alignItems: 'center' },
+  guestRow: { flexDirection: 'row', justifyContent: 'center', gap: 34 },
+  guestCol: { alignItems: 'center', gap: 8 },
+  queue: { alignItems: 'center', gap: 5 },
+  queueLabel: { color: C.inkFaint, fontSize: 10, fontWeight: '700' },
+  queueBtn: {
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+    borderWidth: 1, borderColor: C.line, backgroundColor: C.card,
+    minHeight: 30, justifyContent: 'center',
   },
-  actionIconRound: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(255,253,248,0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
+  queueBtnActive: { borderColor: C.accent, backgroundColor: 'rgba(201,168,76,0.16)' },
+  queueBtnText: { color: C.ink, fontSize: 10, fontWeight: '800' },
+  gifters: { alignItems: 'center', gap: 6 },
+  giftersLabel: {
+    color: C.inkFaint, fontSize: 9, fontWeight: '800',
+    letterSpacing: 1.1, textTransform: 'uppercase',
   },
+  giftersRow: { flexDirection: 'row', gap: 8 },
+  gifterChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999,
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.line, maxWidth: 116,
+  },
+  gifterRank: { color: C.accent, fontSize: 10, fontWeight: '900' },
+  gifterName: { color: C.inkSoft, fontSize: 10, fontWeight: '700', flexShrink: 1 },
+  dockCta: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7,
+    minHeight: 46, paddingHorizontal: 16, borderRadius: 23,
+    borderWidth: 1, borderColor: C.accent, backgroundColor: C.card,
+  },
+  dockCtaActive: { backgroundColor: C.accent, borderColor: C.accent },
+  dockCtaText: { color: C.accent, fontSize: 13, fontWeight: '900' },
 
   phone: {
     flex: 1,
@@ -885,587 +877,18 @@ const styles = StyleSheet.create({
   backBtnText: { color: '#2A0128', fontWeight: '900', fontSize: 13, letterSpacing: 2 },
 
   // ── ZONE 1: STAGE ──────────────────────────────────────────────────────
-  stage: {
-    paddingTop: Platform.OS === 'ios' ? 52 : 32,
-    paddingBottom: 12,
-    paddingHorizontal: 16,
-  },
-  stageHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 16,
-  },
-  exitBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.08)',
-  },
-  stageTopCenter: {
-    flex: 1,
-    alignItems: 'center',
-    gap: 2,
-  },
-  langTag: {
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-    borderRadius: 10,
-    borderWidth: 1,
-  },
-  langTagText: {
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0.5,
-  },
-  stageTopicText: {
-    color: '#EADCA8',
-    fontSize: 12,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  stageHeaderRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    justifyContent: 'flex-end',
-  },
-  shareHeaderBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.08)',
-  },
-  livePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: 'rgba(57,190,105,0.15)',
-    paddingHorizontal: 7,
-    paddingVertical: 3,
-    borderRadius: 9,
-    borderWidth: 1,
-    borderColor: 'rgba(57,190,105,0.3)',
-  },
-  liveDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#39BE69' },
-  liveText: { color: '#39BE69', fontSize: 9, fontWeight: '900' },
-  memberCount: { color: '#EADCA8', fontSize: 11, fontWeight: '800' },
-  roomConsole: {
-    flexDirection: 'row',
-    alignItems: 'stretch',
-    gap: 8,
-    marginBottom: 14,
-  },
-  roleCard: {
-    flex: 1.35,
-    minHeight: 54,
-    borderRadius: 16,
-    paddingHorizontal: 10,
-    paddingVertical: 9,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-    backgroundColor: 'rgba(255,253,248,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(234,220,168,0.16)',
-  },
-  roleIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  roleCopy: {
-    flex: 1,
-  },
-  roleLabel: {
-    color: 'rgba(234,220,168,0.58)',
-    fontSize: 8,
-    fontWeight: '900',
-  },
-  roleValue: {
-    color: '#FFFDF8',
-    fontSize: 14,
-    fontWeight: '900',
-  },
-  roomMetric: {
-    flex: 0.75,
-    minHeight: 54,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.05)',
-    borderWidth: 1,
-    borderColor: 'rgba(234,220,168,0.12)',
-  },
-  roomMetricValue: {
-    color: '#EADCA8',
-    fontSize: 14,
-    fontWeight: '900',
-    fontVariant: ['tabular-nums'],
-  },
-  roomMetricLabel: {
-    color: 'rgba(234,220,168,0.52)',
-    fontSize: 8,
-    fontWeight: '800',
-    textTransform: 'uppercase',
-  },
 
-  hostCenter: { alignItems: 'center', marginBottom: 10 },
-  hostAvatarWrap: { alignItems: 'center', justifyContent: 'center', marginBottom: 8 },
-  hostRing: {
-    width: 83,
-    height: 83,
-    borderRadius: 41.5,
-    padding: 4,
-    backgroundColor: '#D1B23B',
-    boxShadow: Platform.OS === 'web' ? '0 0 24px rgba(209,178,59,0.5)' : undefined,
-  },
-  hostOnlineDot: {
-    position: 'absolute',
-    bottom: 8,
-    right: 8,
-    width: 16,
-    height: 16,
-    borderRadius: 8,
-    backgroundColor: '#39BE69',
-    borderWidth: 2.5,
-    borderColor: '#12040E',
-  },
-  hostName: {
-    color: '#FFFDF8',
-    fontFamily: 'serif',
-    fontSize: 18,
-    fontWeight: '900',
-    marginBottom: 4,
-  },
-  hostBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  hostBadgeText: { color: '#FFF', fontSize: 9, fontWeight: '900', letterSpacing: 0.5 },
 
   // Triangular stage and seats
-  triangularStage: {
-    alignItems: 'center',
-    width: '100%',
-    marginVertical: 10,
-  },
-  hostSeat: {
-    alignItems: 'center',
-  },
-  guestsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: '100%',
-    paddingHorizontal: 12,
-    marginTop: 18,
-  },
-  guestSeat: {
-    alignItems: 'center',
-    width: 90,
-    position: 'relative',
-  },
-  guestAvatarWrap: {
-    position: 'relative',
-    width: 73,
-    height: 73,
-    borderRadius: 36.5,
-    padding: 3,
-    borderWidth: 1,
-    borderColor: 'rgba(255,253,248,0.25)',
-    backgroundColor: 'rgba(255,253,248,0.06)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  emptySeatCircle: {
-    width: 65,
-    height: 65,
-    borderRadius: 32.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.03)',
-    borderStyle: 'dashed',
-    borderWidth: 2,
-    marginBottom: 4,
-  },
-  goldBorder: { borderColor: 'rgba(209,178,59,0.7)' },
-  seatModRail: {
-    position: 'absolute',
-    top: -8,
-    right: -8,
-    gap: 5,
-  },
-  seatModBtn: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#4B0054',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1.5,
-    borderColor: '#12040E',
-  },
-  removeSeatBtn: {
-    backgroundColor: '#C9504B',
-  },
-  guestName: {
-    color: '#EADCA8',
-    fontSize: 11,
-    fontWeight: '800',
-    marginTop: 4,
-    width: 80,
-    textAlign: 'center',
-  },
-  emptyLabel: {
-    color: 'rgba(255,253,248,0.25)',
-    fontSize: 8,
-    fontWeight: '700',
-    textTransform: 'uppercase',
-  },
-  joinSeatLabel: {
-    color: '#D1B23B',
-    fontSize: 8,
-    fontWeight: '900',
-    textTransform: 'uppercase',
-  },
 
   // Separate Queues Panel
-  hostQueueContainer: {
-    backgroundColor: 'rgba(255,253,248,0.02)',
-    padding: 10,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(209,178,59,0.1)',
-    marginVertical: 8,
-    width: '100%',
-    gap: 10,
-  },
-  queueSummaryRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  queuePanelTitle: {
-    color: '#FFFDF8',
-    fontSize: 13,
-    fontWeight: '900',
-  },
-  queuePanelSub: {
-    color: 'rgba(234,220,168,0.58)',
-    fontSize: 10,
-    fontWeight: '700',
-    marginTop: 2,
-  },
-  queueCountPill: {
-    minWidth: 32,
-    height: 32,
-    borderRadius: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(209,178,59,0.16)',
-    borderWidth: 1,
-    borderColor: 'rgba(209,178,59,0.34)',
-  },
-  queueCountText: {
-    color: '#EADCA8',
-    fontSize: 13,
-    fontWeight: '900',
-    fontVariant: ['tabular-nums'],
-  },
-  emptyQueueCard: {
-    minHeight: 44,
-    borderRadius: 14,
-    paddingHorizontal: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    backgroundColor: 'rgba(255,253,248,0.04)',
-    borderWidth: 1,
-    borderColor: 'rgba(234,220,168,0.10)',
-  },
-  emptyQueueText: {
-    flex: 1,
-    color: 'rgba(234,220,168,0.62)',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  audienceGuideCard: {
-    minHeight: 58,
-    borderRadius: 18,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    backgroundColor: 'rgba(155,180,255,0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(155,180,255,0.20)',
-    marginVertical: 8,
-  },
-  audienceGuideIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#9BB4FF',
-  },
-  audienceGuideCopy: {
-    flex: 1,
-  },
-  audienceGuideTitle: {
-    color: '#FFFDF8',
-    fontSize: 12,
-    fontWeight: '900',
-  },
-  audienceGuideSub: {
-    color: 'rgba(234,220,168,0.62)',
-    fontSize: 10,
-    fontWeight: '700',
-    lineHeight: 14,
-  },
-  boyText: { color: '#4A90E2' },
-  girlText: { color: '#D0021B' },
-  boyBg: { backgroundColor: 'rgba(74,144,226,0.12)', borderColor: 'rgba(74,144,226,0.3)' },
-  girlBg: { backgroundColor: 'rgba(208,2,27,0.12)', borderColor: 'rgba(208,2,27,0.3)' },
-  queueHeaderRow: { flexDirection: 'row', justifyContent: 'center', marginTop: 4 },
 
-  actionIconBoyActive: { backgroundColor: '#4A90E2', borderColor: '#4A90E2' },
-  actionIconGirlActive: { backgroundColor: '#D0021B', borderColor: '#D0021B' },
-  goldenCircle: {
-    borderColor: '#D1B23B',
-    borderWidth: 2.5,
-    boxShadow: Platform.OS === 'web' ? '0 0 12px rgba(209,178,59,0.4)' : undefined,
-  },
-  goldGenderBadge: {
-    position: 'absolute',
-    bottom: -2,
-    left: -2,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#D1B23B',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#12040E',
-  },
-  mutedBadge: {
-    position: 'absolute',
-    bottom: -2,
-    right: -2,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#C9504B',
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#12040E',
-  },
-  speakerName: { color: '#EADCA8', fontSize: 10, fontWeight: '700', marginTop: 4, maxWidth: 60 },
-  removeBtn: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#C9504B',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
 
-  queueRow: {
-    alignItems: 'center',
-    gap: 8,
-    paddingVertical: 6,
-  },
-  queueLabel: { color: '#EADCA8', fontSize: 10, fontWeight: '900' },
-  acceptHandBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: '#39BE69',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-  },
-  acceptHandText: { color: '#FFF', fontSize: 10, fontWeight: '900' },
-  reviewBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-    backgroundColor: 'rgba(255,253,248,0.12)',
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: 'rgba(234,220,168,0.3)',
-  },
-  reviewBtnText: { color: '#EADCA8', fontSize: 10, fontWeight: '800' },
 
-  leaderboard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 4,
-    marginTop: 6,
-    backgroundColor: 'rgba(255,253,248,0.06)',
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  leaderTitle: { color: '#D1B23B', fontSize: 9, fontWeight: '900' },
-  leaderItem: { flexDirection: 'row', alignItems: 'center', gap: 3 },
-  leaderRank: { color: '#D1B23B', fontSize: 9, fontWeight: '900' },
-  leaderName: { color: '#EADCA8', fontSize: 9, fontWeight: '700', maxWidth: 50 },
-  leaderCoins: { color: '#F4A23A', fontSize: 9, fontWeight: '900' },
 
   // ── ZONE 2: FEED ───────────────────────────────────────────────────────
-  feed: {
-    flex: 1,
-    marginHorizontal: 12,
-    marginVertical: 4,
-    backgroundColor: 'transparent',
-  },
-  feedContent: {
-    paddingHorizontal: 4,
-    paddingVertical: 8,
-    gap: 6,
-    flexGrow: 1,
-    justifyContent: 'flex-end',
-  },
-  chatRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    gap: 8,
-    marginVertical: 2,
-  },
-  chatAvatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    overflow: 'hidden',
-  },
-  chatBubble: {
-    maxWidth: '85%',
-    backgroundColor: 'rgba(0, 0, 0, 0.45)',
-    borderRadius: 16,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderWidth: 0,
-  },
-  chatSender: { color: '#D1B23B', fontSize: 11, fontWeight: '900', marginBottom: 1 },
-  chatText: { color: '#F4EDE3', fontSize: 13, fontWeight: '500', lineHeight: 18 },
-  systemMsgRow: {
-    alignSelf: 'flex-start',
-    backgroundColor: 'rgba(0, 0, 0, 0.35)',
-    borderRadius: 12,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    marginVertical: 2,
-  },
-  systemMsgJoin: {
-    color: '#A19891',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  systemMsgGift: {
-    color: '#D1B23B',
-    fontSize: 11,
-    fontWeight: '900',
-  },
-  systemMsgStage: {
-    color: '#39BE69',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  systemMsgHand: {
-    color: '#4A90E2',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  systemMsgReview: {
-    color: '#B99916',
-    fontSize: 11,
-    fontWeight: '800',
-  },
-  systemMsgMatchText: {
-    color: '#F4A23A',
-    fontSize: 11,
-    fontWeight: '900',
-  },
 
   // ── ZONE 3: ACTION BAR ─────────────────────────────────────────────────
-  actionBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    gap: 8,
-    backgroundColor: '#12040E',
-    borderTopWidth: 1,
-    borderTopColor: 'rgba(209,178,59,0.12)',
-  },
-  chatInputWrap: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(255,253,248,0.08)',
-    borderRadius: 22,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(209,178,59,0.18)',
-  },
-  chatInput: {
-    flex: 1,
-    color: '#FFFDF8',
-    fontSize: 14,
-    fontWeight: '500',
-    paddingVertical: 0,
-  },
-  sendBtn: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: '#D1B23B',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginLeft: 6,
-  },
-  actionIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.06)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,253,248,0.1)',
-    gap: 2,
-  },
-  actionIconActive: {
-    backgroundColor: '#D1B23B',
-    borderColor: '#D1B23B',
-  },
-  actionIconMuted: {
-    backgroundColor: 'rgba(201,80,75,0.15)',
-    borderColor: 'rgba(201,80,75,0.3)',
-  },
-  actionIconLabel: { color: '#2A0128', fontSize: 7, fontWeight: '900' },
-  exitAction: { backgroundColor: 'rgba(201,80,75,0.15)', borderColor: 'rgba(201,80,75,0.3)' },
 
   // ── Review Modal ──────────────────────────────────────────────────────
   reviewOverlay: {
@@ -1602,52 +1025,6 @@ const styles = StyleSheet.create({
   declineMatchText: { color: '#8A7C70', fontSize: 13, fontWeight: '600' },
 
   // ── Gift Sheet ────────────────────────────────────────────────────────
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(12,2,10,0.6)',
-    justifyContent: 'flex-end',
-  },
-  giftSheet: {
-    backgroundColor: '#FFFDF8',
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 24,
-    paddingBottom: 48,
-  },
-  giftSheetTitle: {
-    color: '#4B0054',
-    fontFamily: 'serif',
-    fontSize: 22,
-    fontWeight: '900',
-    textAlign: 'center',
-    marginBottom: 4,
-  },
-  giftSheetSub: {
-    color: '#8A7C70',
-    fontSize: 12,
-    fontWeight: '600',
-    textAlign: 'center',
-    marginBottom: 20,
-  },
-  giftGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-    justifyContent: 'center',
-  },
-  giftItem: {
-    width: 90,
-    paddingVertical: 14,
-    borderRadius: 20,
-    alignItems: 'center',
-    backgroundColor: '#F8F5EF',
-    borderWidth: 1,
-    borderColor: '#EEE4D8',
-  },
-  giftEmoji: { fontSize: 30, marginBottom: 6 },
-  giftItemName: { color: '#4B0054', fontSize: 11, fontWeight: '800', textAlign: 'center', marginBottom: 4 },
-  giftPriceRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  giftItemPrice: { color: '#806806', fontSize: 12, fontWeight: '900' },
 
   // ── Info Modal ────────────────────────────────────────────────────────
   infoOverlay: {
@@ -1699,71 +1076,6 @@ const styles = StyleSheet.create({
   },
 
   // ── FRND Matchmaking & Gifting Styles ──
-  hostMatchThemBtn: {
-    alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 10,
-    borderRadius: 20,
-    overflow: 'hidden',
-  },
-  hostMatchThemInner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    gap: 6,
-  },
-  hostMatchThemText: {
-    color: '#12040E',
-    fontWeight: '900',
-    fontSize: 12,
-    letterSpacing: 0.5,
-  },
-  matchPendingBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 5,
-    marginTop: 8,
-    marginBottom: 8,
-  },
-  matchPendingText: {
-    color: '#EADCA8',
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  recipientSelectorRow: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    gap: 8,
-    marginTop: 10,
-    marginBottom: 16,
-    flexWrap: 'wrap',
-    width: '100%',
-  },
-  recipientChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(234,220,168,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(234,220,168,0.25)',
-    borderRadius: 14,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-    gap: 5,
-  },
-  recipientChipActive: {
-    backgroundColor: '#D1B23B',
-    borderColor: '#D1B23B',
-  },
-  recipientText: {
-    color: '#EADCA8',
-    fontSize: 10,
-    fontWeight: '700',
-  },
-  recipientTextActive: {
-    color: '#12040E',
-  },
   candidateReviewActions: {
     alignItems: 'center',
     width: '100%',

@@ -2,15 +2,20 @@ import { Platform } from 'react-native';
 
 type DebugLevel = 'debug' | 'info' | 'warn' | 'error';
 
+/**
+ * No `phone` here on purpose. Diagnosing a sign-in failure needs to identify a
+ * session, not a subscriber, and the number was being transmitted to an
+ * unauthenticated endpoint that appended it to a plaintext file. `sessionId`
+ * already ties a run of events together.
+ */
 type DebugContext = {
   userId?: string | null;
-  phone?: string | null;
   screen?: string | null;
 };
 
 type DebugDetails = Record<string, unknown>;
 
-const DEBUG_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL || 'http://127.0.0.1:5000';
+const DEBUG_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 const context: DebugContext = {};
 
@@ -38,6 +43,7 @@ export const logDebugEvent = (
   details: DebugDetails = {},
   level: DebugLevel = 'info',
 ) => {
+  if (!DEBUG_BACKEND_URL) return;
   const payload = {
     level,
     event,
@@ -51,10 +57,9 @@ export const logDebugEvent = (
     },
   };
 
-  fetch(`${DEBUG_BACKEND_URL}/api/v1/debug/log`, {
+  fetch(`${DEBUG_BACKEND_URL.replace(/\/$/, '')}/api/v1/debug/log`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }).catch(() => {});
 };
-

@@ -187,6 +187,30 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Open and settled coin top-ups. Written only by the Admin SDK, and closed
+    // to clients in both directions: a readable order would leak the frozen
+    // coin yield, and a writable one would let a client mark itself paid.
+    match /coin_orders/{orderId} {
+      allow read, write: if false;
+    }
+
+    // Payout requests awaiting manual review. A user may file their own and
+    // read it back, but never approve it: status is fixed to "pending" on
+    // create and the client cannot update or delete afterwards.
+    match /withdrawalRequests/{requestId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create: if signedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.keys().hasOnly(
+                         ['uid', 'hearts', 'amountInr', 'status', 'createdAt'])
+                    && request.resource.data.hearts is number
+                    && request.resource.data.amountInr is number
+                    && request.resource.data.hearts > 0
+                    && request.resource.data.amountInr > 0;
+      allow update, delete: if false;
+    }
+
     match /chill_rooms/{roomId} {
       allow read: if signedIn();
       allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
@@ -209,6 +233,16 @@ service cloud.firestore {
         );
         allow write: if signedIn()
           && roomField('chill_rooms', roomId, 'hostUid') == request.auth.uid;
+      }
+
+      // Heartbeat presence. A client may only assert its own presence, and the
+      // host may evict. Nothing billable is stored here — Chill rooms are free
+      // to sit in — so unlike expert_rooms there are no protected fields.
+      match /members/{memberUid} {
+        allow read: if signedIn();
+        allow create, update: if isOwner(memberUid);
+        allow delete: if isOwner(memberUid)
+          || roomField('chill_rooms', roomId, 'hostUid') == request.auth.uid;
       }
     }
 
@@ -269,6 +303,16 @@ service cloud.firestore {
         allow read: if signedIn();
         allow create: if signedIn() && request.resource.data.senderUid == request.auth.uid;
         allow update, delete: if false;
+      }
+
+      // Heartbeat presence, covering players and spectators alike. Seats and
+      // stakes live on the room's `players` array and are not affected by this
+      // — a player who briefly drops offline keeps their seat.
+      match /members/{memberUid} {
+        allow read: if signedIn();
+        allow create, update: if isOwner(memberUid);
+        allow delete: if isOwner(memberUid)
+          || roomField('ludo_rooms', roomId, 'hostUid') == request.auth.uid;
       }
     }
 

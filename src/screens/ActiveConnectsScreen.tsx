@@ -1,16 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   Platform, View, Text, StyleSheet, ScrollView,
-  TouchableOpacity, Image, TextInput, Animated,
+  TouchableOpacity, Image, TextInput, Animated, Modal,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import ScreenShell from '../components/ScreenShell';
+import { useActionLock } from '../hooks/useActionLock';
 import TopBar from '../components/TopBar';
 import GengalAvatar from '../components/GengalAvatar';
 import BottomNav from '../components/BottomNav';
-import { subscribeToRecentUsers, UserProfile as FirebaseUser } from '../services/userService';
-import { auth } from '../config/firebase';
+import { tap36, tap38 } from '../theme/touch';
+import { subscribeToAllUsers, isUserAvailableNow, UserProfile as FirebaseUser } from '../services/userService';
+import { SAMPLE_PROFILES } from '../data/sampleProfiles';
+import { subscribeToGlobalSettings } from '../services/adminService';
 import { useUser } from '../context/UserContext';
 
 type Props = {
@@ -18,12 +20,49 @@ type Props = {
   goBack?: () => void;
 };
 
-function UserCard({ profile, index, navigate }: { profile: any; index: number; navigate: Props['navigate'] }) {
+/** lastActive/createdAt arrive as a Firestore Timestamp, a Date or a number. */
+const toMs = (value: any): number => {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  if (typeof value.toMillis === 'function') return value.toMillis();
+  if (value instanceof Date) return value.getTime();
+  return 0;
+};
+
+const STATUS_KEYS = ['ALL', 'ACTIVE', 'INACTIVE'];
+const STATUS_LABELS: Record<string, string> = {
+  ALL: 'All Status',
+  ACTIVE: 'Active',
+  INACTIVE: 'Inactive',
+};
+
+const labelFor = (kind: 'language' | 'status' | 'state', value: string) => {
+  if (kind === 'status') return STATUS_LABELS[value] ?? value;
+  if (value !== 'ALL') return value;
+  return kind === 'language' ? 'All Languages' : 'All States';
+};
+
+function UserCard({
+  profile,
+  index,
+  navigate,
+  rates,
+}: {
+  profile: any;
+  index: number;
+  navigate: Props['navigate'];
+  rates: { call: number; video: number };
+}) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(16)).current;
-  const tier = profile.avatarUrl ? 'VIP' : 'Advance';
+  const tier = profile.tier === 'VIP' ? 'VIP' : 'Standard';
   const tierColor = tier === 'VIP' ? '#9A1E8A' : '#B99916';
   const isActive = profile.isActiveMode === true;
+  const { locked: callLocked, run: runCall } = useActionLock();
+  const startCall = (mode: 'call' | 'video') =>
+    runCall(() => {
+      navigate('Call', { profileName: profile.name, mode, matchData: profile, isCaller: true });
+    });
 
   useEffect(() => {
     Animated.parallel([
@@ -63,28 +102,53 @@ function UserCard({ profile, index, navigate }: { profile: any; index: number; n
             <Text style={styles.metaText}>{profile.lang}</Text>
             <View style={styles.dot} />
             <MaterialIcons name="circle" size={8} color={isActive ? '#10B981' : '#B0A49A'} />
-            <Text style={[styles.metaText, { color: isActive ? '#10B981' : '#8A7C70' }]}>
-              {isActive ? 'Active now' : 'Inactive'}
+            <Text
+              numberOfLines={1}
+              style={[styles.metaText, { color: isActive ? '#10B981' : '#8A7C70', flexShrink: 1 }]}
+            >
+              {profile.isSampleProfile ? 'Sample profile' : isActive ? 'Available now' : 'Inactive'}
             </Text>
           </View>
         </View>
 
-        {/* Actions */}
+        {/* Actions — each carries its per-minute price so the cost is visible
+            before the call starts, not after the first tick is billed. */}
         <View style={styles.actions}>
-          <TouchableOpacity
-            style={[styles.actionBtn, !isActive && styles.actionBtnDisabled]}
-            disabled={!isActive}
-            onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: profile.name, mode: 'call', matchData: profile, isCaller: true  })}
-          >
-            <MaterialIcons name="phone" size={16} color="#FFF" />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.videoBtn, !isActive && styles.actionBtnDisabled]}
-            disabled={!isActive}
-            onPress={() => navigate('Call', { roomId: Math.random().toString(36).substring(7),  profileName: profile.name, mode: 'video', matchData: profile, isCaller: true  })}
-          >
-            <MaterialIcons name="videocam" size={16} color="#FFF" />
-          </TouchableOpacity>
+          <View style={styles.actionCol}>
+            <TouchableOpacity
+              style={[styles.actionBtn, (!isActive || callLocked) && styles.actionBtnDisabled]}
+              hitSlop={tap38}
+              disabled={!isActive || callLocked}
+              accessibilityRole="button"
+              accessibilityLabel={`Call ${profile.name}, ${rates.call} coins per minute`}
+              accessibilityState={{ disabled: !isActive || callLocked }}
+              onPress={() => startCall('call')}
+            >
+              <MaterialIcons name="phone" size={16} color="#FFF" />
+            </TouchableOpacity>
+            <View style={styles.priceRow}>
+              <MaterialIcons name="star" size={9} color="#D9A404" />
+              <Text style={styles.priceText}>{rates.call}/m</Text>
+            </View>
+          </View>
+
+          <View style={styles.actionCol}>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.videoBtn, (!isActive || callLocked) && styles.actionBtnDisabled]}
+              hitSlop={tap38}
+              disabled={!isActive || callLocked}
+              accessibilityRole="button"
+              accessibilityLabel={`Video call ${profile.name}, ${rates.video} coins per minute`}
+              accessibilityState={{ disabled: !isActive || callLocked }}
+              onPress={() => startCall('video')}
+            >
+              <MaterialIcons name="videocam" size={16} color="#FFF" />
+            </TouchableOpacity>
+            <View style={styles.priceRow}>
+              <MaterialIcons name="star" size={9} color="#D9A404" />
+              <Text style={styles.priceText}>{rates.video}/m</Text>
+            </View>
+          </View>
         </View>
       </TouchableOpacity>
     </Animated.View>
@@ -94,58 +158,139 @@ function UserCard({ profile, index, navigate }: { profile: any; index: number; n
 export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [language, setLanguage] = useState('ALL');
+  const [status, setStatus] = useState('ALL');
+  const [stateFilter, setStateFilter] = useState('ALL');
+  const [recentFirst, setRecentFirst] = useState(false);
+  const [picker, setPicker] = useState<null | 'language' | 'status' | 'state'>(null);
+  // Subscribed once here rather than inside each card: a listener per button
+  // would open a dozen for a screen of six profiles. Defaults match CallPriceTag.
+  const [rates, setRates] = useState({ call: 15, video: 30 });
 
   const { profile: myProfile } = useUser();
 
   useEffect(() => {
-    const unsub = subscribeToRecentUsers((users) => setFirebaseUsers(users), myProfile?.uid);
+    const unsub = subscribeToGlobalSettings((s) => {
+      if (!s) return;
+      setRates({
+        call: s.voiceCallRatePerMin ?? 15,
+        video: s.videoCallRatePerMin ?? 30,
+      });
+    });
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    const unsub = subscribeToAllUsers((users) => setFirebaseUsers(users), myProfile?.uid);
     return unsub;
   }, [myProfile?.uid]);
 
-  const displayProfiles = firebaseUsers.map(u => ({
+  const realProfiles = firebaseUsers.map(u => ({
     uid: u.uid,
     name: u.nickname || u.username || 'User',
-    age: typeof u.age === 'number' ? u.age : parseInt(u.age || '20', 10),
+    age: typeof u.age === 'number' ? u.age : (u.age ? parseInt(u.age, 10) : undefined),
     uri: u.avatarUrl || '',
     avatarUrl: u.avatarUrl,
     avatarData: u.avatarData,
-    lang: u.language || 'EN',
-    isActiveMode: u.isActiveMode === true,
+    lang: (u.language || 'EN').toUpperCase(),
+    state: u.state || u.city || '',
+    isActiveMode: isUserAvailableNow(u),
+    isSampleProfile: false,
     lastActive: u.lastActive,
+    joinedAt: toMs((u as any).createdAt) || toMs(u.lastActive),
   }));
 
-  const filtered = displayProfiles.filter(p =>
-    p.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Seeded demo people, so the directory is not blank before real signups.
+  // isActiveMode is forced false: the card disables calling for anyone inactive,
+  // which is exactly the behaviour these need.
+  const sampleProfiles = SAMPLE_PROFILES.map(p => ({
+    uid: p.uid,
+    name: p.name,
+    age: p.age,
+    uri: p.image,
+    avatarUrl: p.image,
+    avatarData: undefined,
+    lang: p.language.toUpperCase(),
+    state: p.city,
+    isActiveMode: false,
+    isSampleProfile: true,
+    lastActive: 0,
+    joinedAt: 0,
+  }));
+
+  const displayProfiles = [...realProfiles, ...sampleProfiles];
+
+  // Option lists come from the data actually on screen, so a filter can never
+  // offer a value that matches nothing.
+  const languageOptions = ['ALL', ...Array.from(
+    new Set(displayProfiles.map(p => p.lang).filter(Boolean))
+  ).sort()];
+  const stateOptions = ['ALL', ...Array.from(
+    new Set(displayProfiles.map(p => p.state).filter(Boolean))
+  ).sort()];
+
+  const query = searchQuery.trim().toLowerCase();
+
+  const filtered = displayProfiles.filter(p => {
+    if (query && !p.name.toLowerCase().includes(query)) return false;
+    if (language !== 'ALL' && p.lang !== language) return false;
+    if (stateFilter !== 'ALL' && p.state !== stateFilter) return false;
+    if (status === 'ACTIVE' && !p.isActiveMode) return false;
+    if (status === 'INACTIVE' && p.isActiveMode) return false;
+    return true;
+  });
+
+  // Active people first, then inactive, so callable profiles are not buried.
+  // "Recently Joined" overrides that and sorts purely by join time.
+  const ordered = [...filtered].sort((a, b) => {
+    if (recentFirst) return b.joinedAt - a.joinedAt;
+    const byActive = Number(b.isActiveMode) - Number(a.isActiveMode);
+    return byActive !== 0 ? byActive : toMs(b.lastActive) - toMs(a.lastActive);
+  });
+
+  const activeCount = displayProfiles.filter(p => p.isActiveMode).length;
+  const activeFilterCount =
+    (language !== 'ALL' ? 1 : 0) +
+    (status !== 'ALL' ? 1 : 0) +
+    (stateFilter !== 'ALL' ? 1 : 0) +
+    (recentFirst ? 1 : 0);
+
+  const clearFilters = () => {
+    setLanguage('ALL');
+    setStatus('ALL');
+    setStateFilter('ALL');
+    setRecentFirst(false);
+  };
+
+  const pickerConfig =
+    picker === 'language'
+      ? { title: 'Language', options: languageOptions, selected: language, onSelect: setLanguage }
+      : picker === 'state'
+      ? { title: 'State', options: stateOptions, selected: stateFilter, onSelect: setStateFilter }
+      : picker === 'status'
+      ? { title: 'Status', options: STATUS_KEYS, selected: status, onSelect: setStatus }
+      : null;
 
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
         <TopBar navigate={navigate} />
 
-        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
           {/* Header */}
           <View style={styles.pageHeader}>
             <View>
-              <Text style={styles.pageTitle}>More Profiles</Text>
-              <Text style={styles.pageCount}>{displayProfiles.length} recently connected</Text>
+              <Text style={styles.pageTitle}>More Connects</Text>
+              <Text style={styles.pageCount}>
+                {displayProfiles.length} {displayProfiles.length === 1 ? 'profile' : 'profiles'} · {activeCount} active
+              </Text>
             </View>
           </View>
           
-          <TouchableOpacity 
-            style={{ backgroundColor: 'red', padding: 20, marginBottom: 20, borderRadius: 10, zIndex: 9999 }}
-            onPress={() => {
-              navigate('Call', {
-                roomId: 'test_room',
-                mode: 'video',
-                isCaller: true,
-                matchData: { nickname: 'Test Target', avatarUrl: 'https://i.pravatar.cc/150?u=test', uid: 'test_target_uid' }
-              });
-            }}
-          >
-            <Text style={{ color: 'white', textAlign: 'center', fontWeight: 'bold' }}>TEST CALL RINGING UI</Text>
-          </TouchableOpacity>
-
           {/* Search */}
           <View style={styles.searchBox}>
             <MaterialIcons name="search" size={20} color="#A79386" />
@@ -157,11 +302,92 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
               onChangeText={setSearchQuery}
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={() => setSearchQuery('')}>
+              <TouchableOpacity onPress={() => setSearchQuery('')}
+                accessibilityRole="button"
+                accessibilityLabel="Close">
                 <MaterialIcons name="close" size={18} color="#A79386" />
               </TouchableOpacity>
             )}
           </View>
+
+          {/* Filters — same set the Connect tab offers */}
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.filterScroller}
+            contentContainerStyle={styles.filterRow}
+            keyboardShouldPersistTaps="handled"
+          >
+            {([
+              { kind: 'language' as const, value: language, icon: 'translate' },
+              { kind: 'status' as const, value: status, icon: 'groups' },
+              { kind: 'state' as const, value: stateFilter, icon: 'location-on' },
+            ]).map(({ kind, value, icon }) => {
+              const isSet = value !== 'ALL';
+              return (
+                <TouchableOpacity
+                  key={kind}
+                  style={[styles.filterChip, isSet && styles.filterChipActive]}
+                  hitSlop={tap36}
+                  activeOpacity={0.85}
+                  onPress={() => setPicker(kind)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${labelFor(kind, value)}, change filter`}
+                >
+                  <MaterialIcons name={icon as any} size={14} color={isSet ? '#5F205C' : '#8A6C28'} />
+                  <Text style={[styles.filterChipText, isSet && styles.filterChipTextActive]}>
+                    {labelFor(kind, value)}
+                  </Text>
+                  {isSet ? (
+                    <TouchableOpacity
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        if (kind === 'language') setLanguage('ALL');
+                        else if (kind === 'status') setStatus('ALL');
+                        else setStateFilter('ALL');
+                      }}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      accessibilityRole="button"
+                      accessibilityLabel={`Clear ${kind} filter`}
+                    >
+                      <MaterialIcons name="close" size={15} color="#5F205C" />
+                    </TouchableOpacity>
+                  ) : (
+                    <MaterialIcons name="expand-more" size={15} color="#8A6C28" />
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+
+            <TouchableOpacity
+              style={[styles.filterChip, recentFirst && styles.filterChipActive]}
+              hitSlop={tap36}
+              activeOpacity={0.85}
+              onPress={() => setRecentFirst(v => !v)}
+              accessibilityRole="button"
+              accessibilityLabel="Sort by recently joined"
+              accessibilityState={{ selected: recentFirst }}
+            >
+              <MaterialIcons name="schedule" size={14} color={recentFirst ? '#5F205C' : '#8A6C28'} />
+              <Text style={[styles.filterChipText, recentFirst && styles.filterChipTextActive]}>
+                Recently Joined
+              </Text>
+            </TouchableOpacity>
+
+            {activeFilterCount > 0 && (
+              <TouchableOpacity
+                style={styles.clearChip}
+                hitSlop={tap36}
+                activeOpacity={0.85}
+                onPress={clearFilters}
+                accessibilityRole="button"
+                accessibilityLabel="Clear all filters"
+              >
+                <MaterialIcons name="close" size={14} color="#B3261E" />
+                <Text style={styles.clearChipText}>Clear</Text>
+              </TouchableOpacity>
+            )}
+          </ScrollView>
 
           {/* Legend */}
           <View style={styles.legend}>
@@ -177,24 +403,69 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
 
           {/* List */}
           <View style={styles.list}>
-            {filtered.length === 0 ? (
+            {ordered.length === 0 ? (
               <View style={styles.empty}>
                 <MaterialIcons name="people-outline" size={48} color="#D1B23B" />
                 <Text style={styles.emptyTitle}>
-                  {searchQuery ? 'No results found' : 'No recent users yet'}
+                  {searchQuery || activeFilterCount > 0 ? 'No results found' : 'No profiles yet'}
                 </Text>
                 <Text style={styles.emptySub}>
-                  {searchQuery ? 'Try a different name' : 'Only logged-in recent users appear here'}
+                  {searchQuery
+                    ? `Nobody matches “${searchQuery.trim()}”`
+                    : activeFilterCount > 0
+                    ? 'Try clearing a filter'
+                    : 'Profiles appear here as people join'}
                 </Text>
               </View>
             ) : (
-              filtered.map((profile, i) => (
-                <UserCard key={profile.uid || profile.name + i} profile={profile} index={i} navigate={navigate} />
+              ordered.map((profile, i) => (
+                <UserCard key={profile.uid || profile.name + i} profile={profile} index={i} navigate={navigate} rates={rates} />
               ))
             )}
           </View>
         </ScrollView>
-        
+
+        <Modal
+          visible={picker !== null}
+          transparent
+          animationType="fade"
+          statusBarTranslucent
+          onRequestClose={() => setPicker(null)}
+        >
+          <TouchableOpacity
+            style={styles.pickerBackdrop}
+            activeOpacity={1}
+            onPress={() => setPicker(null)}
+          >
+            <View style={styles.pickerCard}>
+              <Text style={styles.pickerTitle}>{pickerConfig?.title}</Text>
+              <ScrollView style={{ maxHeight: 320 }}>
+                {pickerConfig?.options.map(opt => {
+                  const isSel = pickerConfig.selected === opt;
+                  return (
+                    <TouchableOpacity
+                      key={opt}
+                      style={[styles.pickerRow, isSel && styles.pickerRowActive]}
+                      activeOpacity={0.85}
+                      onPress={() => {
+                        pickerConfig.onSelect(opt);
+                        setPicker(null);
+                      }}
+                      accessibilityRole="radio"
+                      accessibilityState={{ selected: isSel, checked: isSel }}
+                    >
+                      <Text style={[styles.pickerRowText, isSel && styles.pickerRowTextActive]}>
+                        {picker ? labelFor(picker, opt) : opt}
+                      </Text>
+                      {isSel && <MaterialIcons name="check" size={18} color="#5F205C" />}
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          </TouchableOpacity>
+        </Modal>
+
         <BottomNav active="Personal" navigate={navigate} />
       </View>
     </ScreenShell>
@@ -216,6 +487,74 @@ const styles = StyleSheet.create({
     boxShadow: Platform.OS === 'web' ? '0 1px 4px rgba(68,44,21,0.06)' : undefined,
   },
   searchInput: { flex: 1, fontSize: 14, color: '#4B0054', fontWeight: '600' },
+
+  filterScroller: { marginHorizontal: -20, marginBottom: 14 },
+  filterRow: { paddingHorizontal: 20, gap: 8, alignItems: 'center' },
+  filterChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#EBD9AE',
+    backgroundColor: '#FFFDF8',
+  },
+  filterChipActive: {
+    backgroundColor: '#FBEDF7',
+    borderColor: '#D9A8CE',
+  },
+  filterChipText: { fontSize: 12, fontWeight: '800', color: '#8A6C28' },
+  filterChipTextActive: { color: '#5F205C' },
+  clearChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    minHeight: 36,
+    paddingHorizontal: 12,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: '#F0C9C4',
+    backgroundColor: '#FFF5F4',
+  },
+  clearChipText: { fontSize: 12, fontWeight: '800', color: '#B3261E' },
+
+  pickerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(30, 10, 26, 0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 32,
+  },
+  pickerCard: {
+    width: '100%',
+    maxWidth: 340,
+    borderRadius: 20,
+    backgroundColor: '#FFFDF8',
+    paddingVertical: 16,
+    paddingHorizontal: 8,
+    borderWidth: 1,
+    borderColor: '#F1E2D2',
+  },
+  pickerTitle: {
+    fontSize: 15,
+    fontWeight: '900',
+    color: '#5F205C',
+    paddingHorizontal: 14,
+    paddingBottom: 10,
+  },
+  pickerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    minHeight: 46,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+  },
+  pickerRowActive: { backgroundColor: '#FBEDF7' },
+  pickerRowText: { fontSize: 14, fontWeight: '700', color: '#6B5A4A' },
+  pickerRowTextActive: { color: '#5F205C', fontWeight: '900' },
 
   legend: { flexDirection: 'row', gap: 16, marginBottom: 14 },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -244,7 +583,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#B0A49A',
   },
 
-  cardInfo: { flex: 1 },
+  // minWidth 0 lets this column actually shrink; without it the meta line keeps
+  // its intrinsic width and runs underneath the price labels.
+  cardInfo: { flex: 1, minWidth: 0 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 5 },
   cardName: { fontSize: 15, fontWeight: '900', color: '#4B0054' },
   tierPill: {
@@ -252,11 +593,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 7, borderWidth: 1,
   },
   tierText: { fontSize: 8, fontWeight: '900', textTransform: 'uppercase' },
-  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  metaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 1 },
   metaText: { fontSize: 11, color: '#8A7C70', fontWeight: '700' },
   dot: { width: 3, height: 3, borderRadius: 2, backgroundColor: '#CCC' },
 
-  actions: { flexDirection: 'row', gap: 8 },
+  actions: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
+  actionCol: { alignItems: 'center', gap: 3 },
+  priceRow: { flexDirection: 'row', alignItems: 'center', gap: 1 },
+  priceText: { fontSize: 9, fontWeight: '800', color: '#8A7C70' },
   actionBtn: {
     width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
     backgroundColor: '#7A256D', borderWidth: 1, borderColor: '#7A256D',

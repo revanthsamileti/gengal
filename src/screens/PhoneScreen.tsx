@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { tap36 } from '../theme/touch';
 import {
   StyleSheet,
   Text,
@@ -8,6 +9,7 @@ import {
   ScrollView,
   Pressable,
   Modal,
+  TextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -23,17 +25,23 @@ type PhoneScreenProps = {
 };
 
 const NUMPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'backspace'];
+/**
+ * `min`/`max` are the national significant number length, excluding the dial
+ * code. A flat 10-digit rule used to be hardcoded, which made it impossible for
+ * anyone outside India/US/Canada to finish signing up — a UAE number is 9
+ * digits and could never reach the threshold.
+ */
 const COUNTRY_CODES = [
-  { country: 'India', code: '+91', iso: 'IN' },
-  { country: 'United States', code: '+1', iso: 'US' },
-  { country: 'United Kingdom', code: '+44', iso: 'GB' },
-  { country: 'Australia', code: '+61', iso: 'AU' },
-  { country: 'France', code: '+33', iso: 'FR' },
-  { country: 'Germany', code: '+49', iso: 'DE' },
-  { country: 'United Arab Emirates', code: '+971', iso: 'AE' },
-  { country: 'Saudi Arabia', code: '+966', iso: 'SA' },
-  { country: 'Singapore', code: '+65', iso: 'SG' },
-  { country: 'Canada', code: '+1', iso: 'CA' },
+  { country: 'India', code: '+91', iso: 'IN', min: 10, max: 10 },
+  { country: 'United States', code: '+1', iso: 'US', min: 10, max: 10 },
+  { country: 'United Kingdom', code: '+44', iso: 'GB', min: 9, max: 10 },
+  { country: 'Australia', code: '+61', iso: 'AU', min: 9, max: 9 },
+  { country: 'France', code: '+33', iso: 'FR', min: 9, max: 9 },
+  { country: 'Germany', code: '+49', iso: 'DE', min: 10, max: 11 },
+  { country: 'United Arab Emirates', code: '+971', iso: 'AE', min: 9, max: 9 },
+  { country: 'Saudi Arabia', code: '+966', iso: 'SA', min: 9, max: 9 },
+  { country: 'Singapore', code: '+65', iso: 'SG', min: 8, max: 8 },
+  { country: 'Canada', code: '+1', iso: 'CA', min: 10, max: 10 },
 ];
 
 export let globalAuthMode: 'signup' | 'login' = 'signup';
@@ -67,19 +75,20 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
     globalAuthMode = authMode;
   }, [authMode]);
 
+  const selectedCountry = COUNTRY_CODES.find((item) => item.iso === countryIso) || COUNTRY_CODES.find((item) => item.code === countryCode) || COUNTRY_CODES[0];
+  const isPhoneComplete = phone.length >= selectedCountry.min && phone.length <= selectedCountry.max;
+
   const handlePress = (val: string) => {
     if (val === '') return;
     if (val === 'backspace') {
       setPhone((p) => p.slice(0, -1));
     } else {
-      if (phone.length < 10) setPhone((p) => p + val);
+      if (phone.length < selectedCountry.max) setPhone((p) => p + val);
     }
   };
 
-  const selectedCountry = COUNTRY_CODES.find((item) => item.iso === countryIso) || COUNTRY_CODES.find((item) => item.code === countryCode) || COUNTRY_CODES[0];
-
   const handleContinue = async () => {
-    if (phone.length === 10) {
+    if (isPhoneComplete) {
       setIsLoading(true);
       setErrorMsg('');
       try {
@@ -117,7 +126,7 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         handlePress('backspace');
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (phone.length === 10) {
+        if (isPhoneComplete) {
           handleContinue();
         }
       }
@@ -125,12 +134,9 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [phone, isLoading, authMode, countryCode]);
-
-  const formatPhone = (p: string) => {
-    if (!p) return '0000000000';
-    return p;
-  };
+    // countryIso matters here too: selectedCountry resolves by iso first, and
+    // it is what decides the accepted digit length.
+  }, [phone, isLoading, authMode, countryCode, countryIso]);
 
   return (
     <ScreenShell tone="light">
@@ -170,13 +176,35 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
               <MaterialIcons name="keyboard-arrow-down" size={18} color="#5A155A" />
               <View style={styles.divider} />
             </TouchableOpacity>
-            <Text 
+            {/* A real TextInput, not a Text: this is the first field in the
+                signup funnel, and as a Text it could not be autofilled, pasted
+                into, or corrected mid-way. The numpad below still drives the
+                same state, so both input methods stay in sync. */}
+            <TextInput
               style={[styles.inputText, !phone && styles.placeholderText, { flex: 1 }, Platform.OS === 'web' && { outlineStyle: 'none' } as any]}
+              value={phone}
+              onChangeText={(text) => {
+                // Autofill and paste often arrive with the country code, spaces
+                // or punctuation attached.
+                let digits = text.replace(/\D/g, '');
+                const bare = countryCode.replace(/\D/g, '');
+                if (bare && digits.startsWith(bare) && digits.length > selectedCountry.max) {
+                  digits = digits.slice(bare.length);
+                }
+                setPhone(digits.slice(0, selectedCountry.max));
+              }}
+              placeholder="0000000000"
+              placeholderTextColor="#B9A7B9"
+              keyboardType="phone-pad"
+              textContentType="telephoneNumber"
+              autoComplete="tel"
+              inputMode="tel"
+              maxLength={selectedCountry.max}
+              returnKeyType="done"
+              onSubmitEditing={() => { if (isPhoneComplete && !isLoading) handleContinue(); }}
+              accessibilityLabel="Phone number"
               numberOfLines={1}
-              adjustsFontSizeToFit
-            >
-              {phone ? formatPhone(phone) : '0000000000'}
-            </Text>
+            />
           </View>
         </View>
 
@@ -189,8 +217,10 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
               <Pressable
                 key={i}
                 onPress={() => handlePress(key)}
+                accessibilityRole="button"
+                accessibilityLabel={key === 'backspace' ? 'Delete last digit' : key}
                 style={({ pressed }) => [
-                  styles.numpadKey, 
+                  styles.numpadKey,
                   styles.numpadKeyElevated,
                   pressed && { transform: [{ translateY: 2 }], boxShadow: 'none' }
                 ]}
@@ -207,13 +237,13 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         
         <View style={styles.footer}>
           <Pressable
-            disabled={phone.length < 10 || isLoading}
+            disabled={!isPhoneComplete || isLoading}
             onPress={handleContinue}
           >
             {({ pressed }) => (
               <View style={[
                 styles.continueButtonWrapper,
-                (phone.length < 10) && styles.disabledWrapper,
+                !isPhoneComplete && styles.disabledWrapper,
                 pressed && { elevation: 0, shadowOpacity: 0, boxShadow: 'none' }
               ]}>
                 <LinearGradient
@@ -249,7 +279,9 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
             <View style={styles.countrySheet}>
               <View style={styles.countrySheetHeader}>
                 <Text style={styles.countrySheetTitle}>Select Country Code</Text>
-                <TouchableOpacity style={styles.countryCloseButton} onPress={() => setIsCountryOpen(false)}>
+                <TouchableOpacity hitSlop={tap36} style={styles.countryCloseButton} onPress={() => setIsCountryOpen(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close">
                   <MaterialIcons name="close" size={20} color="#5A155A" />
                 </TouchableOpacity>
               </View>
@@ -263,6 +295,9 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
                     onPress={() => {
                       setCountryCode(item.code);
                       setCountryIso(item.iso);
+                      // Trim anything the previous country allowed but this one
+                      // does not, so the field can never sit over the limit.
+                      setPhone((p) => p.slice(0, item.max));
                       setIsCountryOpen(false);
                     }}
                   >
@@ -294,15 +329,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 20,
-  },
-  backBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#FAF5EE',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
   },
   brand: {
     color: skeuo.plum,
@@ -470,17 +496,6 @@ const styles = StyleSheet.create({
     color: '#422006',
     fontSize: 15,
     fontWeight: '700',
-  },
-  toggleAuthModeBtn: {
-    marginTop: 12,
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  toggleAuthModeText: {
-    color: '#5A155A',
-    fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: -0.2,
   },
   modalOverlay: {
     flex: 1,

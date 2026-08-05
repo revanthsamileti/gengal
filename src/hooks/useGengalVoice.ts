@@ -2,8 +2,16 @@ import { useState, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { getAgoraEngine } from './NativeEngines';
 import { logDebugEvent } from '../services/debugLogger';
+import { getAgoraAppId } from '../services/rtcConfigService';
 
-export type FreeProvider = 'agora' | 'dyte' | 'daily' | 'zegocloud' | 'videosdk' | 'stream';
+/**
+ * `zegocloud` is intended but not implemented — `connectSeat` throws for it, so
+ * it is deliberately absent from `WATERFALL` in CallScreen. The dyte, daily,
+ * videosdk and stream members were removed: nothing ever dispatched on them and
+ * their client refs below were never assigned, so the type was advertising
+ * support that did not exist anywhere in the codebase.
+ */
+export type FreeProvider = 'agora' | 'zegocloud';
 
 interface GengalVoiceInterface {
   connectSeat: (roomId: string, tokenOrUrl: string, userId?: string, role?: 'broadcaster' | 'audience') => Promise<any>;
@@ -30,28 +38,20 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
   // Safe ref for Agora engine so it doesn't crash the web bundler
   const agoraEngineRef = useRef<any>(null);
   
-  // Safe ref for Daily.co Call Object
-  const dailyClientRef = useRef<any>(null);
 
-  // Safe refs for Stream.io Call Objects
-  const streamClientRef = useRef<any>(null);
-  const streamCallRef = useRef<any>(null);
-
-  // Safe ref for Red5 Pro native engine
-  const red5PublisherRef = useRef<any>(null);
-
-  // Safe ref for Dyte native engine
-  const dyteClientRef = useRef<any>(null);
-
-  const isZegoInitialized = useRef(false);
+  // Engine setup is async now that the App ID comes from the backend, so
+  // connectSeat awaits this instead of racing it.
+  const agoraReadyRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     // We only initialize Agora if we are not on web (react-native-agora is native only)
     if (provider === 'agora' && Platform.OS !== 'web') {
+      agoraReadyRef.current = (async () => {
       try {
+        const appId = await getAgoraAppId();
         const { createAgoraRtcEngine } = getAgoraEngine();
         agoraEngineRef.current = createAgoraRtcEngine();
-        agoraEngineRef.current.initialize({ appId: 'd463dbabe1ee41ef8c4fa19c09464708' });
+        agoraEngineRef.current.initialize({ appId });
         agoraEngineRef.current.enableAudio();
         agoraEngineRef.current.enableVideo();
         agoraEngineRef.current.startPreview();
@@ -79,18 +79,26 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
         console.log(`[Agora Node] Engine initialized and speakerphone enabled.`);
         logDebugEvent('agora.engine.initialized', {});
       } catch (e) {
+        agoraEngineRef.current = null;
         console.log(`[Agora Node] Failed to initialize native engine.`);
         logDebugEvent('agora.engine.initializeFailed', { error: e }, 'error');
       }
+      })();
     }
-    
+
     return () => {
-      // Automatic native tracking cleanup
-      if (provider === 'agora' && agoraEngineRef.current) {
-        try {
-          agoraEngineRef.current.release();
-        } catch(e) {}
-      }
+      // Automatic native tracking cleanup. Wait for a pending initialize so the
+      // engine is not released while it is still being created.
+      const ready = agoraReadyRef.current ?? Promise.resolve();
+      ready.finally(() => {
+        if (agoraEngineRef.current) {
+          try {
+            agoraEngineRef.current.release();
+          } catch (e) {}
+          agoraEngineRef.current = null;
+        }
+      });
+      agoraReadyRef.current = null;
     };
   }, [provider]);
 
@@ -119,6 +127,11 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
       } catch (err) {
         console.warn('[Agora Node] Permissions request failed:', err);
       }
+    }
+
+    // Wait for the async engine setup (App ID fetch + initialize) to settle.
+    if (agoraReadyRef.current) {
+      await agoraReadyRef.current;
     }
 
     console.log(`[Agora Node] Joining channel: ${roomId} as ${role || 'default'}`);

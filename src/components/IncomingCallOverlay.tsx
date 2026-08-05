@@ -1,21 +1,21 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Modal, TouchableOpacity, Animated, Easing, Dimensions, Platform, Image } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing, Dimensions, Platform, Image } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
-import { IncomingCall, acceptCallOffer, rejectCallOffer } from '../services/liveRoomService';
+import { IncomingCall } from '../services/liveRoomService';
 import GengalAvatar from './GengalAvatar';
 import { LinearGradient } from 'expo-linear-gradient';
 
 interface Props {
   call: IncomingCall | null;
+  /** The parent owns the accept/reject writes so the offer is only updated once. */
   onAccept: (call: IncomingCall) => void;
   onReject: () => void;
-  receiverUid: string;
 }
 
 const { width } = Dimensions.get('window');
 const SCREEN_WIDTH = Math.min(width, 430);
 
-export default function IncomingCallOverlay({ call, onAccept, onReject, receiverUid }: Props) {
+export default function IncomingCallOverlay({ call, onAccept, onReject }: Props) {
   const slideAnim = useRef(new Animated.Value(-200)).current;
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
@@ -52,23 +52,8 @@ export default function IncomingCallOverlay({ call, onAccept, onReject, receiver
 
   if (!call) return null;
 
-  const handleAccept = async () => {
-    try {
-      await acceptCallOffer(receiverUid);
-      onAccept(call);
-    } catch (e) {
-      console.warn('Failed to accept call:', e);
-    }
-  };
-
-  const handleReject = async () => {
-    try {
-      await rejectCallOffer(receiverUid);
-      onReject();
-    } catch (e) {
-      console.warn('Failed to reject call:', e);
-    }
-  };
+  const handleAccept = () => onAccept(call);
+  const handleReject = () => onReject();
 
   const isVideo = call.mode === 'video';
 
@@ -81,8 +66,17 @@ export default function IncomingCallOverlay({ call, onAccept, onReject, receiver
           end={{ x: 1, y: 1 }}
           style={styles.bannerBackground}
         >
-          <View style={styles.callerInfo}>
-            {call.callerAvatarUrl ? (
+          {/* Announced on arrival — otherwise a screen-reader user gets no
+              indication that a call is ringing at all. */}
+          <View
+            style={styles.callerInfo}
+            accessible
+            accessibilityLiveRegion="assertive"
+            accessibilityLabel={`Incoming ${isVideo ? 'video' : 'voice'} call from ${call.callerName}`}
+          >
+            {call.callerAvatarData ? (
+              <GengalAvatar data={call.callerAvatarData} size={48} />
+            ) : call.callerAvatarUrl ? (
               <Image source={{ uri: call.callerAvatarUrl }} style={{ width: 48, height: 48, borderRadius: 24 }} />
             ) : (
               <View style={[styles.fallbackAvatar, isVideo ? { backgroundColor: '#8B1E8A' } : { backgroundColor: '#32CD32' }]}>
@@ -96,19 +90,23 @@ export default function IncomingCallOverlay({ call, onAccept, onReject, receiver
           </View>
           
           <View style={styles.actionRow}>
-            <TouchableOpacity 
-              activeOpacity={0.8} 
+            <TouchableOpacity
+              activeOpacity={0.8}
               style={[styles.actionBtn, styles.rejectBtn]}
               onPress={handleReject}
+              accessibilityRole="button"
+              accessibilityLabel={`Decline ${isVideo ? 'video' : 'voice'} call from ${call.callerName}`}
             >
               <MaterialIcons name="call-end" size={24} color="#FFF" />
             </TouchableOpacity>
 
             <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-              <TouchableOpacity 
-                activeOpacity={0.8} 
+              <TouchableOpacity
+                activeOpacity={0.8}
                 style={[styles.actionBtn, styles.acceptBtn]}
                 onPress={handleAccept}
+                accessibilityRole="button"
+                accessibilityLabel={`Accept ${isVideo ? 'video' : 'voice'} call from ${call.callerName}`}
               >
                 <MaterialIcons name={isVideo ? "videocam" : "call"} size={24} color="#FFF" />
               </TouchableOpacity>

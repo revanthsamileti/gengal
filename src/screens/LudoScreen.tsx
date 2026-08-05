@@ -3,15 +3,19 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
+  Easing,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
-  Modal } from 'react-native';
+} from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
+import Svg, { Circle, Defs, Ellipse, LinearGradient as SvgGradient, Path, Stop } from 'react-native-svg';
+
 import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
 import ScreenShell from '../components/ScreenShell';
@@ -19,163 +23,149 @@ import TopBar from '../components/TopBar';
 import { useUser } from '../context/UserContext';
 import { auth } from '../config/firebase';
 import {
-  createLudoRoom,
-  joinLudoRoom,
-  LudoRoom,
-  subscribeToLudoRooms,
-  TOKEN_COLORS,
-  TokenColor,
+  createLudoRoom, joinLudoRoom, LudoRoom, subscribeToLudoRooms, TokenColor,
 } from '../services/ludoService';
 import { deductUserCoins } from '../services/coinService';
+import { GEMS, ludo, numeric } from '../theme/ludoTheme';
 import { skeuo } from '../theme/skeuomorphic';
+import { useLiveRooms } from '../hooks/useRoomPresence';
 
 interface Props {
   navigate: (screen: string, params?: any) => void;
   goBack?: () => void;
 }
 
-const COLOR_HEX: Record<TokenColor, string> = {
-  red: '#C9504B',
-  blue: '#0891B2',
-  green: '#5EBB62',
-  yellow: '#D4B142',
-};
+const TABLE_COST = 10;
 
-function RoomCard({ room, onJoin, loading }: { room: LudoRoom; onJoin: () => void; loading: boolean }) {
+/** Board order, clockwise from the top-left seat — same as the table itself. */
+const SEAT_ORDER: TokenColor[] = ['red', 'blue', 'green', 'yellow'];
+
+const MODES: {
+  id: 'per_game' | 'per_token';
+  name: string;
+  cost: string;
+  detail: string;
+  icon: string;
+}[] = [
+  {
+    id: 'per_game',
+    name: 'Ticket table',
+    cost: '50 coins a seat',
+    detail: 'Players pay once to sit down. You keep 10% of every ticket.',
+    icon: 'confirmation-number',
+  },
+  {
+    id: 'per_token',
+    name: 'Roll & back',
+    cost: '15 coins a roll',
+    detail: 'Free to sit. Players pay per roll and watchers back a colour.',
+    icon: 'casino',
+  },
+];
+
+/** The same pawn silhouette as the board, so both screens share a vocabulary. */
+function Pawn({ color, size = 22 }: { color: TokenColor; size?: number }) {
+  const c = GEMS[color];
+  return (
+    <Svg width={size} height={size * (44 / 40)} viewBox="0 0 40 44">
+      <Defs>
+        <SvgGradient id={`lp-${color}`} x1="0.2" y1="0" x2="0.85" y2="1">
+          <Stop offset="0" stopColor={c.light} />
+          <Stop offset="0.45" stopColor={c.core} />
+          <Stop offset="1" stopColor={c.dark} />
+        </SvgGradient>
+      </Defs>
+      <Ellipse cx="20" cy="39.5" rx="12" ry="3.2" fill="#000" opacity="0.18" />
+      <Path
+        d="M20 15 C25.5 15 29 21 30.5 28 C31.8 34 29 38.5 20 38.5 C11 38.5 8.2 34 9.5 28 C11 21 14.5 15 20 15 Z"
+        fill={`url(#lp-${color})`} stroke={c.dark} strokeWidth="1.6" strokeLinejoin="round"
+      />
+      <Circle cx="20" cy="11" r="8" fill={`url(#lp-${color})`} stroke={c.dark} strokeWidth="1.6" />
+      <Ellipse cx="16.6" cy="8.2" rx="3.1" ry="3.6" fill="#FFFFFF" opacity="0.55" transform="rotate(-20 16.6 8.2)" />
+    </Svg>
+  );
+}
+
+function TableCard({
+  room, onOpen, busy,
+}: { room: LudoRoom; onOpen: () => void; busy: boolean }) {
   const fade = useRef(new Animated.Value(0)).current;
-
   useEffect(() => {
-    Animated.timing(fade, { toValue: 1, duration: 280, useNativeDriver: true }).start();
+    Animated.timing(fade, {
+      toValue: 1, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: true,
+    }).start();
   }, [fade]);
 
-  const slotsFilled = room.players.length;
-  const canJoin = slotsFilled < 4 && room.phase === 'waiting';
+  const seated = room.players.length;
+  const open = seated < 4 && room.phase === 'waiting';
+  const host = room.players.find((p) => p.uid === room.hostUid) ?? room.players[0];
 
   return (
     <Animated.View style={{ opacity: fade }}>
-      <TouchableOpacity style={cardStyles.card} activeOpacity={0.84} onPress={onJoin}>
-        <LinearGradient colors={['#FFFFFF', '#FFF8EA', '#EDF8E8']} style={StyleSheet.absoluteFill} />
-
-        <View style={cardStyles.hostRow}>
-          <View style={cardStyles.avatarWrap}>
-            <GengalAvatar data={room.players[0]?.avatarData} size={44} />
+      <Pressable
+        onPress={onOpen}
+        disabled={busy}
+        accessibilityRole="button"
+        accessibilityLabel={
+          `${host?.nickname ?? 'Host'}'s table, ${seated} of 4 seated. ${open ? 'Join' : 'Watch'}.`
+        }
+        style={({ pressed }) => [cardStyles.card, pressed && cardStyles.pressed]}
+      >
+        <View style={cardStyles.head}>
+          <View style={cardStyles.avatar}>
+            <GengalAvatar data={host?.avatarData} size={40} />
           </View>
-          <View style={cardStyles.hostInfo}>
-            <Text style={cardStyles.hostName} numberOfLines={1}>{room.players[0]?.nickname ?? 'Host'}</Text>
-            <Text style={cardStyles.hostSub}>Hosting · {slotsFilled}/4 players</Text>
+          <View style={cardStyles.headMeta}>
+            <Text style={cardStyles.host} numberOfLines={1}>{host?.nickname ?? 'Host'}</Text>
+            <Text style={[cardStyles.headSub, numeric]}>
+              {room.gameMode === 'per_token' ? 'Roll & back' : 'Ticket table'} · {seated}/4
+            </Text>
           </View>
-          <View style={[cardStyles.phasePill, room.phase === 'playing' && cardStyles.phasePillLive]}>
-            {room.phase === 'playing' ? <View style={cardStyles.liveDot} /> : null}
-            <Text style={[cardStyles.phaseText, room.phase === 'playing' && cardStyles.phaseTextLive]}>
-              {room.phase === 'waiting' ? 'Lobby' : 'In Game'}
+          <View style={[cardStyles.status, room.phase === 'playing' && cardStyles.statusLive]}>
+            {room.phase === 'playing' && <View style={cardStyles.liveDot} />}
+            <Text style={[cardStyles.statusText, room.phase === 'playing' && cardStyles.statusTextLive]}>
+              {room.phase === 'playing' ? 'Playing' : 'Open'}
             </Text>
           </View>
         </View>
 
-        <View style={cardStyles.colorRow}>
-          {TOKEN_COLORS.map((color) => {
-            const player = room.players.find((p) => p.color === color);
+        {/* Seat strip mirrors the board's clockwise order. */}
+        <View style={cardStyles.seats}>
+          {SEAT_ORDER.map((color) => {
+            const p = room.players.find((pl) => pl.color === color);
             return (
-              <View key={color} style={[cardStyles.colorSlot, { borderColor: COLOR_HEX[color] + '55' }]}>
-                <View style={[cardStyles.colorDot, { backgroundColor: COLOR_HEX[color] }]} />
-                <Text style={cardStyles.colorSlotText} numberOfLines={1}>{player ? player.nickname : 'Open'}</Text>
+              <View key={color} style={[cardStyles.seat, !p && cardStyles.seatOpen]}>
+                <Pawn color={color} size={13} />
+                <Text style={cardStyles.seatName} numberOfLines={1}>
+                  {p ? p.nickname : 'Open'}
+                </Text>
               </View>
             );
           })}
         </View>
 
-        <View style={cardStyles.footer}>
-          <View style={cardStyles.specRow}>
+        <View style={cardStyles.foot}>
+          <View style={cardStyles.watchers}>
             <MaterialIcons name="visibility" size={13} color="#8B7A6A" />
-            <Text style={cardStyles.specText}>{room.spectatorCount} watching</Text>
+            <Text style={[cardStyles.watchersText, numeric]}>
+              {Math.max(0, (room.presentCount ?? room.players.length) - room.players.length)} watching
+            </Text>
           </View>
-          <TouchableOpacity style={[cardStyles.joinBtn, loading && cardStyles.joinBtnDisabled]} onPress={onJoin} disabled={loading}>
-            {loading ? (
+          <View style={[cardStyles.cta, busy && cardStyles.ctaBusy]}>
+            {busy ? (
               <ActivityIndicator size="small" color="#FFFDF8" />
             ) : (
               <>
-                <MaterialIcons name={canJoin ? 'login' : 'visibility'} size={14} color="#FFFDF8" />
-                <Text style={cardStyles.joinText}>{canJoin ? 'Join Table' : 'Watch'}</Text>
+                <MaterialIcons name={open ? 'login' : 'visibility'} size={14} color="#FFFDF8" />
+                <Text style={cardStyles.ctaText}>{open ? 'Take a seat' : 'Watch'}</Text>
               </>
             )}
-          </TouchableOpacity>
+          </View>
         </View>
-      </TouchableOpacity>
+      </Pressable>
     </Animated.View>
   );
 }
-
-const cardStyles = StyleSheet.create({
-  card: {
-    borderRadius: 22,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#D8E8CF',
-    padding: 14,
-    gap: 12,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  hostRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  avatarWrap: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: '#C4DDB7',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-  },
-  hostInfo: { flex: 1, gap: 2 },
-  hostName: { color: skeuo.plum, fontSize: 14, fontWeight: '900' },
-  hostSub: { color: '#8B7A6A', fontSize: 10, fontWeight: '700' },
-  phasePill: {
-    paddingHorizontal: 9,
-    paddingVertical: 5,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: '#D8E8CF',
-    backgroundColor: '#F4FAF0',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
-  },
-  phasePillLive: { borderColor: '#B9DAA6', backgroundColor: '#EAF7E3' },
-  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#4E8E32' },
-  phaseText: { color: '#7B8B72', fontSize: 9, fontWeight: '900', letterSpacing: 0.4 },
-  phaseTextLive: { color: '#3F7D2B' },
-  colorRow: { flexDirection: 'row', gap: 6 },
-  colorSlot: {
-    flex: 1,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 6,
-    borderRadius: 10,
-    borderWidth: 1,
-    backgroundColor: '#FFFDF8',
-  },
-  colorDot: { width: 7, height: 7, borderRadius: 4 },
-  colorSlotText: { color: '#7E7368', fontSize: 9, fontWeight: '800', flex: 1 },
-  footer: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  specRow: { flexDirection: 'row', alignItems: 'center', gap: 4 },
-  specText: { color: '#8B7A6A', fontSize: 10, fontWeight: '700' },
-  joinBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 16,
-    paddingVertical: 9,
-    borderRadius: 16,
-    backgroundColor: '#4E8E32',
-    borderWidth: 1,
-    borderColor: '#C4DDB7',
-  },
-  joinBtnDisabled: { opacity: 0.55 },
-  joinText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
-});
 
 export default function LudoScreen({ navigate }: Props) {
   const { profile } = useUser();
@@ -183,110 +173,108 @@ export default function LudoScreen({ navigate }: Props) {
   const myName = profile?.nickname || profile?.username || 'Guest';
   const myAvatarData = profile?.avatarData;
 
-  const [rooms, setRooms] = useState<LudoRoom[]>([]);
-  const [joiningId, setJoiningId] = useState<string | null>(null);
+  const [allRooms, setAllRooms] = useState<LudoRoom[]>([]);
+  // Tables whose host stopped heartbeating are abandoned, whatever `status` says.
+  const rooms = useLiveRooms(allRooms);
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
-  const [createModalVisible, setCreateModalVisible] = useState(false);
+  const [modeSheet, setModeSheet] = useState(false);
 
-  useEffect(() => {
-    const unsub = subscribeToLudoRooms(setRooms);
-    return unsub;
-  }, []);
+  useEffect(() => subscribeToLudoRooms(setAllRooms), []);
 
   const handleCreate = useCallback(async (mode: 'per_game' | 'per_token') => {
-    if (!profile || profile.coins === undefined || profile.coins < 10) {
-      Alert.alert('Insufficient Coins', 'You need at least 10 coins to create a room.');
+    if ((profile?.coins ?? 0) < TABLE_COST) {
+      Alert.alert('Not enough coins', `Opening a table costs ${TABLE_COST} coins. Top up in the store.`);
       return;
     }
+    setModeSheet(false);
     setCreating(true);
-    setCreateModalVisible(false);
     try {
-      await deductUserCoins(myUid, 10);
+      await deductUserCoins(myUid, TABLE_COST);
       const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
-    } catch (e) {
-      console.error(e);
-      Alert.alert('Error', 'Failed to create room.');
+    } catch (e: any) {
+      Alert.alert('Could not open a table', e?.message || 'Try again in a moment.');
     } finally {
       setCreating(false);
     }
-  }, [myUid, myName, myAvatarData, navigate, profile]);
+  }, [profile, myUid, myName, myAvatarData, navigate]);
 
-  const handleJoin = useCallback(async (room: LudoRoom) => {
-    if (!room.id || joiningId) return;
-    setJoiningId(room.id);
+  const handleOpen = useCallback(async (room: LudoRoom) => {
+    if (!room.id || openingId) return;
+    setOpeningId(room.id);
     try {
       const { joined } = await joinLudoRoom(room.id, myUid, myName, myAvatarData);
       if (joined) navigate('LudoBoard', { roomId: room.id });
+    } catch (e: any) {
+      Alert.alert('Could not open that table', e?.message || 'Try again in a moment.');
     } finally {
-      setJoiningId(null);
+      setOpeningId(null);
     }
-  }, [myUid, myName, myAvatarData, navigate, joiningId]);
+  }, [myUid, myName, myAvatarData, navigate, openingId]);
 
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
-        <TopBar navigate={navigate} subtitle="LUDO LIVE" />
+        <TopBar navigate={navigate} subtitle="LUDO" />
 
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-          <LinearGradient colors={['#FFFFFF', '#FFF7E2', '#EAF7E3']} style={styles.hero}>
-            <View style={styles.boardPreview}>
-              {TOKEN_COLORS.map((color) => (
-                <View key={color} style={[styles.previewQuadrant, { backgroundColor: COLOR_HEX[color] + '22', borderColor: COLOR_HEX[color] + '66' }]}>
-                  <View style={[styles.previewPawn, { backgroundColor: COLOR_HEX[color] }]} />
-                </View>
+          {/* The table itself is the hero — a lit board on the felt. */}
+          <View style={styles.hero}>
+            <LinearGradient
+              colors={['#FFFFFF', '#FFFFFF']}
+              style={StyleSheet.absoluteFill}
+            />
+            <View style={styles.heroGems}>
+              {SEAT_ORDER.map((c) => (
+                <Pawn key={c} color={c} size={30} />
               ))}
-              <View style={styles.previewCenter}>
-                <MaterialIcons name="casino" size={23} color="#8B6F09" />
-              </View>
             </View>
-            <Text style={styles.heroTitle}>Ludo Live</Text>
-            <Text style={styles.heroSub}>Create a relaxed premium table, roll dice, and play with friends.</Text>
-
-            <TouchableOpacity style={[styles.createBtn, creating && styles.createBtnLoading]} onPress={() => setCreateModalVisible(true)} disabled={creating} activeOpacity={0.84}>
+            <Text style={styles.heroTitle}>Four stones, one board</Text>
+            <Text style={styles.heroBody}>
+              Open a table, call your friends in, and play with voice on.
+            </Text>
+            <Pressable
+              onPress={() => setModeSheet(true)}
+              disabled={creating}
+              accessibilityRole="button"
+              accessibilityLabel={`Open a table, costs ${TABLE_COST} coins`}
+              style={({ pressed }) => [styles.heroBtn, pressed && styles.pressed, creating && styles.pressed]}
+            >
               {creating ? (
-                <ActivityIndicator color="#4A3600" size="small" />
+                <ActivityIndicator size="small" color="#FFFFFF" />
               ) : (
                 <>
-                  <MaterialIcons name="add-circle" size={19} color="#4A3600" />
-                  <Text style={styles.createBtnText}>Create Table (10 💎)</Text>
+                  <MaterialIcons name="add" size={18} color="#FFFFFF" />
+                  <Text style={[styles.heroBtnText, numeric]}>Open a table · {TABLE_COST}</Text>
                 </>
               )}
-            </TouchableOpacity>
-          </LinearGradient>
-
-          <View style={styles.howRow}>
-            {[
-              { icon: 'casino', label: 'Roll' },
-              { icon: 'touch-app', label: 'Tap token' },
-              { icon: 'emoji-events', label: 'Win coins' },
-            ].map((item) => (
-              <View key={item.label} style={styles.howItem}>
-                <MaterialIcons name={item.icon as any} size={20} color="#4E8E32" />
-                <Text style={styles.howLabel}>{item.label}</Text>
-              </View>
-            ))}
+            </Pressable>
           </View>
 
-          <Text style={styles.sectionTitle}>
-            {rooms.length > 0 ? `${rooms.length} Live Table${rooms.length > 1 ? 's' : ''}` : 'No tables open'}
+          <Text style={styles.section}>
+            {rooms.length > 0
+              ? `${rooms.length} table${rooms.length > 1 ? 's' : ''} live`
+              : 'No tables live'}
           </Text>
 
           {rooms.length === 0 ? (
             <View style={styles.empty}>
-              <View style={styles.emptyIcon}>
-                <MaterialIcons name="casino" size={42} color="#4E8E32" />
+              <View style={styles.emptyGems}>
+                {SEAT_ORDER.map((c) => <Pawn key={c} color={c} size={20} />)}
               </View>
-              <Text style={styles.emptyTitle}>Start the first table</Text>
-              <Text style={styles.emptyText}>Create a table and invite friends to join the match.</Text>
-              <TouchableOpacity style={[styles.emptyBtn, creating && styles.createBtnLoading]} onPress={() => setCreateModalVisible(true)} disabled={creating}>
-                {creating ? <ActivityIndicator size="small" color="#FFFDF8" /> : <Text style={styles.emptyBtnText}>Create Table</Text>}
-              </TouchableOpacity>
+              <Text style={styles.emptyTitle}>Nobody is playing yet</Text>
+              <Text style={styles.emptyBody}>Open the first table and invite your friends.</Text>
             </View>
           ) : (
             <View style={styles.list}>
               {rooms.map((room) => (
-                <RoomCard key={room.id} room={room} onJoin={() => handleJoin(room)} loading={joiningId === room.id} />
+                <TableCard
+                  key={room.id}
+                  room={room}
+                  onOpen={() => handleOpen(room)}
+                  busy={openingId === room.id}
+                />
               ))}
             </View>
           )}
@@ -294,36 +282,47 @@ export default function LudoScreen({ navigate }: Props) {
           <View style={{ height: 110 }} />
         </ScrollView>
 
-        {/* Create Room Modal */}
-        <Modal visible={createModalVisible} transparent animationType="slide" onRequestClose={() => setCreateModalVisible(false)}>
-          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
-            <View style={{ backgroundColor: '#FFFDF8', width: '85%', borderRadius: 20, padding: 24, alignItems: 'center' }}>
-              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#4A3600', marginBottom: 8 }}>Choose Game Mode</Text>
-              <Text style={{ fontSize: 13, color: '#7E7368', textAlign: 'center', marginBottom: 20 }}>
-                Creating a room costs 10 coins. You will earn a 10% commission from player tickets and bets!
-              </Text>
-              
-              <TouchableOpacity style={[styles.createBtn, { width: '100%', marginBottom: 12 }]} onPress={() => handleCreate('per_game')}>
-                <Text style={styles.createBtnText}>Per Game Mode</Text>
-              </TouchableOpacity>
-              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
-                Players buy a fixed ticket (50 coins) to join your table.
-              </Text>
-
-              <TouchableOpacity style={[styles.createBtn, { width: '100%', backgroundColor: '#4E8E32', borderColor: '#C4DDB7', marginBottom: 12 }]} onPress={() => handleCreate('per_token')}>
-                <Text style={[styles.createBtnText, { color: '#FFF' }]}>Per Token Mode</Text>
-              </TouchableOpacity>
-              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
-                Audience bets on colors, and every dice roll costs 15 coins.
+        {/* Mode picker */}
+        <Modal visible={modeSheet} transparent animationType="slide" onRequestClose={() => setModeSheet(false)}>
+          <View style={styles.sheetRoot}>
+            <Pressable
+              style={styles.scrim}
+              onPress={() => setModeSheet(false)}
+              accessibilityLabel="Close"
+            />
+            <View style={styles.sheet}>
+              <View style={styles.grip} />
+              <Text style={styles.sheetTitle}>How should this table pay?</Text>
+              <Text style={styles.sheetBody}>
+                Opening costs {TABLE_COST} coins. You earn 10% of what the table spends.
               </Text>
 
-              <TouchableOpacity onPress={() => setCreateModalVisible(false)} style={{ padding: 10 }}>
-                <Text style={{ color: '#8B7A6A', fontWeight: 'bold' }}>Cancel</Text>
-              </TouchableOpacity>
+              {MODES.map((m) => (
+                <Pressable
+                  key={m.id}
+                  onPress={() => handleCreate(m.id)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${m.name}. ${m.cost}. ${m.detail}`}
+                  style={({ pressed }) => [styles.mode, pressed && styles.pressed]}
+                >
+                  <View style={styles.modeIcon}>
+                    <MaterialIcons name={m.icon as any} size={20} color={ludo.ink} />
+                  </View>
+                  <View style={styles.modeMeta}>
+                    <View style={styles.modeHead}>
+                      <Text style={styles.modeName}>{m.name}</Text>
+                      <Text style={[styles.modeCost, numeric]}>{m.cost}</Text>
+                    </View>
+                    <Text style={styles.modeDetail}>{m.detail}</Text>
+                  </View>
+                  <MaterialIcons name="chevron-right" size={20} color="#B9A78F" />
+                </Pressable>
+              ))}
             </View>
           </View>
         </Modal>
 
+        {/* Ludo is reached through the Chill games hub, so that tab stays lit. */}
         <BottomNav active="Chill" navigate={navigate} />
       </View>
     </ScreenShell>
@@ -333,142 +332,159 @@ export default function LudoScreen({ navigate }: Props) {
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
   scroll: { paddingBottom: 24 },
+  pressed: { opacity: 0.75 },
+
   hero: {
     marginHorizontal: 14,
     marginTop: 14,
     borderRadius: 24,
-    padding: 22,
+    paddingVertical: 26,
+    paddingHorizontal: 22,
     alignItems: 'center',
-    gap: 9,
-    borderWidth: 1,
-    borderColor: '#D8E8CF',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    gap: 10,
+    overflow: 'hidden',
+    borderWidth: 3,
+    borderColor: ludo.frame,
+    boxShadow: Platform.OS === 'web' ? skeuo.deepShadow : undefined,
   },
-  boardPreview: {
-    width: 112,
-    height: 112,
-    borderRadius: 26,
-    backgroundColor: '#FFFDF8',
-    borderWidth: 1,
-    borderColor: '#E9D9BE',
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    padding: 7,
-    position: 'relative',
-    boxShadow: Platform.OS === 'web' ? 'inset 0 2px 6px rgba(83,58,29,0.12), 0 10px 18px rgba(83,58,29,0.14)' : undefined,
-  },
-  previewQuadrant: {
-    width: '50%',
-    height: '50%',
-    borderWidth: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  previewPawn: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    borderWidth: 2,
-    borderColor: '#FFFFFF',
-  },
-  previewCenter: {
-    position: 'absolute',
-    left: 39,
-    top: 39,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFF1BB',
-    borderWidth: 1,
-    borderColor: '#E8D79B',
-  },
+  heroGems: { flexDirection: 'row', gap: 14, marginBottom: 4, alignItems: 'flex-end' },
   heroTitle: {
-    color: skeuo.plum,
-    fontSize: 28,
-    fontWeight: '900',
     fontFamily: 'serif',
-  },
-  heroSub: {
-    color: '#7E7368',
-    fontSize: 13,
-    fontWeight: '700',
+    fontSize: 26,
+    fontWeight: '900',
+    color: ludo.ink,
     textAlign: 'center',
-    lineHeight: 18,
-    maxWidth: 280,
   },
-  createBtn: {
+  heroBody: {
+    color: ludo.inkSoft,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    lineHeight: 19,
+    maxWidth: 260,
+  },
+  heroBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
     marginTop: 8,
-    paddingHorizontal: 24,
-    paddingVertical: 13,
-    borderRadius: 26,
-    backgroundColor: '#F6D66D',
-    borderWidth: 1,
-    borderColor: '#D5B64D',
-    boxShadow: Platform.OS === 'web' ? skeuo.goldShadow : undefined,
+    height: 46,
+    paddingHorizontal: 22,
+    borderRadius: 23,
+    backgroundColor: ludo.ink,
   },
-  createBtnLoading: { opacity: 0.65 },
-  createBtnText: { color: '#4A3600', fontSize: 14, fontWeight: '900' },
-  howRow: {
-    flexDirection: 'row',
-    marginHorizontal: 14,
-    marginTop: 14,
-    backgroundColor: '#FFFDF8',
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: '#D8E8CF',
-    paddingVertical: 14,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  howItem: { flex: 1, alignItems: 'center', gap: 5 },
-  howLabel: { color: '#6F8E60', fontSize: 10, fontWeight: '900' },
-  sectionTitle: {
+  heroBtnText: { color: '#FFFFFF', fontSize: 14, fontWeight: '900' },
+
+  section: {
     color: '#8B7A6A',
     fontSize: 11,
     fontWeight: '900',
     letterSpacing: 0.8,
     textTransform: 'uppercase',
-    marginHorizontal: 14,
-    marginTop: 20,
+    marginHorizontal: 16,
+    marginTop: 22,
     marginBottom: 10,
   },
+  list: { paddingHorizontal: 14, gap: 10 },
+
   empty: {
     alignItems: 'center',
-    paddingVertical: 34,
-    paddingHorizontal: 18,
-    marginHorizontal: 14,
     gap: 8,
+    marginHorizontal: 14,
+    paddingVertical: 32,
+    paddingHorizontal: 20,
     borderRadius: 22,
-    backgroundColor: '#FFFDF8',
+    backgroundColor: skeuo.surfaceRaised,
     borderWidth: 1,
-    borderColor: '#D8E8CF',
+    borderColor: skeuo.border,
+  },
+  emptyGems: { flexDirection: 'row', gap: 8, marginBottom: 4 },
+  emptyTitle: { color: skeuo.plum, fontSize: 17, fontWeight: '900', fontFamily: 'serif' },
+  emptyBody: { color: '#8B7A6A', fontSize: 12, fontWeight: '700', textAlign: 'center' },
+
+  sheetRoot: { flex: 1, justifyContent: 'flex-end' },
+  scrim: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: 'rgba(28,28,28,0.5)' },
+  sheet: {
+    backgroundColor: skeuo.surfaceRaised,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 30,
+    gap: 10,
+  },
+  grip: { width: 38, height: 4, borderRadius: 2, backgroundColor: skeuo.border, alignSelf: 'center', marginBottom: 6 },
+  sheetTitle: { color: skeuo.plum, fontSize: 19, fontWeight: '900', fontFamily: 'serif' },
+  sheetBody: { color: '#8B7A6A', fontSize: 12, fontWeight: '700', lineHeight: 17, marginBottom: 4 },
+  mode: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 14,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    backgroundColor: skeuo.surface,
+  },
+  modeIcon: {
+    width: 40, height: 40, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: ludo.cardSunk,
+  },
+  modeMeta: { flex: 1, gap: 3 },
+  modeHead: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  modeName: { color: skeuo.plum, fontSize: 15, fontWeight: '900' },
+  modeCost: { color: ludo.inkSoft, fontSize: 11, fontWeight: '800' },
+  modeDetail: { color: '#8B7A6A', fontSize: 11, fontWeight: '600', lineHeight: 16 },
+});
+
+const cardStyles = StyleSheet.create({
+  card: {
+    borderRadius: 20,
+    padding: 14,
+    gap: 12,
+    backgroundColor: skeuo.surfaceRaised,
+    borderWidth: 1,
+    borderColor: skeuo.border,
     boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
   },
-  emptyIcon: {
-    width: 70,
-    height: 70,
-    borderRadius: 24,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#EAF7E3',
-    borderWidth: 1,
-    borderColor: '#C4DDB7',
+  pressed: { opacity: 0.82 },
+  head: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  avatar: {
+    width: 44, height: 44, borderRadius: 22,
+    overflow: 'hidden', alignItems: 'center', justifyContent: 'center',
+    backgroundColor: skeuo.surfaceInset,
+    borderWidth: 1.5, borderColor: ludo.hairline,
   },
-  emptyTitle: { color: skeuo.plum, fontSize: 18, fontWeight: '900', fontFamily: 'serif' },
-  emptyText: { color: '#8B7A6A', fontSize: 12, fontWeight: '700', textAlign: 'center' },
-  emptyBtn: {
-    marginTop: 8,
-    paddingHorizontal: 22,
-    paddingVertical: 11,
-    borderRadius: 20,
-    backgroundColor: '#4E8E32',
-    borderWidth: 1,
-    borderColor: '#C4DDB7',
+  headMeta: { flex: 1, gap: 2 },
+  host: { color: skeuo.plum, fontSize: 14, fontWeight: '900' },
+  headSub: { color: '#8B7A6A', fontSize: 11, fontWeight: '700' },
+  status: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 9, paddingVertical: 5, borderRadius: 11,
+    borderWidth: 1, borderColor: skeuo.border, backgroundColor: skeuo.surface,
   },
-  emptyBtnText: { color: '#FFFDF8', fontSize: 13, fontWeight: '900' },
-  list: { paddingHorizontal: 14, gap: 10 },
+  statusLive: { borderColor: 'rgba(56,168,28,0.42)', backgroundColor: 'rgba(56,168,28,0.10)' },
+  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: GEMS.green.core },
+  statusText: { color: '#8B7A6A', fontSize: 9, fontWeight: '900', letterSpacing: 0.4 },
+  statusTextLive: { color: GEMS.green.dark },
+  seats: { flexDirection: 'row', gap: 6 },
+  seat: {
+    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 7, paddingVertical: 7, borderRadius: 10,
+    backgroundColor: skeuo.surface, borderWidth: 1, borderColor: skeuo.border,
+  },
+  seatOpen: { borderStyle: 'dashed', borderColor: '#D8C7AC' },
+  seatName: { color: '#7E7368', fontSize: 9, fontWeight: '800', flex: 1 },
+  foot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  watchers: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+  watchersText: { color: '#8B7A6A', fontSize: 10, fontWeight: '700' },
+  cta: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 16, height: 36, borderRadius: 18,
+    justifyContent: 'center', minWidth: 112,
+    backgroundColor: skeuo.plum,
+  },
+  ctaBusy: { opacity: 0.7 },
+  ctaText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
 });
