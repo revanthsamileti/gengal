@@ -140,6 +140,14 @@ fix-firewall.bat
 __pycache__/
 *.pyc
 
+# Vendored third-party agent/skill packs. ~6.3k files and 1.24M lines that got
+# committed by accident and have nothing to do with the app; they are tooling
+# installed per-machine, not project source.
+.agents/
+
+# IDE settings, per-developer
+.idea/
+
 # Device-testing artefacts. Screenshots and logcat dumps pulled off the phones
 # during verification passes — useful in the moment, noise in history.
 .scratch_*.png
