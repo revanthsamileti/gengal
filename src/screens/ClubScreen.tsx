@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { tap40 } from '../theme/touch';
 import {
   Platform,
   ScrollView,
@@ -10,6 +11,7 @@ import {
   TextInput,
   ActivityIndicator,
   Animated,
+  Share,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -31,17 +33,17 @@ import {
 
 const HEARTS_REQUIRED = 33;
 
-const TIER_OPTIONS: RoomTier[] = ['Elite', 'VIP'];
+const TIER_OPTIONS: RoomTier[] = ['Advance', 'VIP'];
 
 const TIER_COLORS: Record<RoomTier, string> = {
   VIP: '#9A1E8A',
-  Elite: '#B99916',
+  Advance: '#B99916',
   Standard: '#4B6282',
 };
 
 const TIER_DESC: Record<RoomTier, string> = {
   Standard: 'Open to all',
-  Elite: 'Curated listeners',
+  Advance: 'Curated listeners',
   VIP: 'Premium only',
 };
 
@@ -50,7 +52,7 @@ type FilterType = RoomTier | 'all';
 const FILTERS: Array<{ label: string; value: FilterType }> = [
   { label: 'All Live', value: 'all' },
   { label: 'VIP', value: 'VIP' },
-  { label: 'Elite', value: 'Elite' },
+  { label: 'Advance', value: 'Advance' },
 ];
 
 export default function ClubScreen({ navigate, goBack }: {
@@ -60,7 +62,11 @@ export default function ClubScreen({ navigate, goBack }: {
   const { profile } = useUser();
   const myUid = auth.currentUser?.uid ?? '';
 
-  const [rooms, setRooms] = useState<ExpertRoom[]>([]);
+  const [allRooms, setAllRooms] = useState<ExpertRoom[]>([]);
+  // Rooms whose host stopped heartbeating are abandoned, whatever `status` says.
+  const rooms = useLiveRooms(allRooms);
+  // Separates "no live rooms" from "Firestore hasn't answered yet".
+  const [roomsLoaded, setRoomsLoaded] = useState(false);
   const [activeFilter, setActiveFilter] = useState<FilterType>('all');
   const [activeLang, setActiveLang] = useState<string | null>(null);
   const [createModal, setCreateModal] = useState(false);
@@ -72,13 +78,17 @@ export default function ClubScreen({ navigate, goBack }: {
   const [topic, setTopic] = useState(TOPICS[0]);
   const [customTopic, setCustomTopic] = useState('');
   const [selectedLang, setSelectedLang] = useState(LANGUAGES[0]);
-  const [selectedTier, setSelectedTier] = useState<RoomTier>('Elite');
+  const [selectedTier, setSelectedTier] = useState<RoomTier>('Advance');
   const [ratePerMin, setRatePerMin] = useState('60');
 
   useEffect(() => {
     const tierFilter = activeFilter === 'all' ? undefined : activeFilter;
     const langFilter = activeLang ?? undefined;
-    const unsub = subscribeToActiveRooms(setRooms, tierFilter, langFilter);
+    setRoomsLoaded(false);
+    const unsub = subscribeToActiveRooms((next) => {
+      setAllRooms(next);
+      setRoomsLoaded(true);
+    }, tierFilter, langFilter);
     return unsub;
   }, [activeFilter, activeLang]);
 
@@ -91,6 +101,18 @@ export default function ClubScreen({ navigate, goBack }: {
       return;
     }
     setCreateModal(true);
+  };
+
+  const handleShareInvite = async () => {
+    const finalTopic = customTopic.trim() || topic;
+    const nickname = profile?.nickname || profile?.username || 'Host';
+    try {
+      await Share.share({
+        message: `Hey! Join my live matchmaking room on Gengal Club.\nTopic: "${finalTopic}"\nExpert: ${nickname}\n\nSearch for my room in the Club tab!`,
+      });
+    } catch (e: any) {
+      console.warn('Error sharing invite:', e);
+    }
   };
 
   const handleCreateRoom = async () => {
@@ -197,7 +219,11 @@ export default function ClubScreen({ navigate, goBack }: {
           )}
 
           {/* Room list */}
-          {rooms.length === 0 ? (
+          {!roomsLoaded ? (
+            <View style={styles.emptyState}>
+              <ActivityIndicator color="#4B0054" />
+            </View>
+          ) : rooms.length === 0 ? (
             <View style={styles.emptyState}>
               <MaterialIcons name="record-voice-over" size={40} color="#D1B23B" />
               <Text style={styles.emptyTitle}>No live rooms</Text>
@@ -220,7 +246,6 @@ export default function ClubScreen({ navigate, goBack }: {
             </View>
           )}
 
-          <View style={{ height: 110 }} />
         </ScrollView>
 
         <BottomNav active="Club" navigate={navigate} />
@@ -308,6 +333,7 @@ export default function ClubScreen({ navigate, goBack }: {
                   <TouchableOpacity
                     key={r}
                     style={[styles.rateChip, ratePerMin === r && styles.rateChipActive]}
+                    hitSlop={tap40}
                     onPress={() => setRatePerMin(r)}
                   >
                     <Text style={[styles.rateChipText, ratePerMin === r && styles.rateChipTextActive]}>{r}</Text>
@@ -323,6 +349,11 @@ export default function ClubScreen({ navigate, goBack }: {
                   maxLength={4}
                 />
               </View>
+
+              <TouchableOpacity style={styles.shareInviteBtn} onPress={handleShareInvite}>
+                <MaterialIcons name="share" size={16} color="#4B0054" />
+                <Text style={styles.shareInviteBtnText}>SHARE INVITE LINK</Text>
+              </TouchableOpacity>
 
               <TouchableOpacity style={styles.goLiveBtn} activeOpacity={0.85} onPress={handleCreateRoom} disabled={creating}>
                 <LinearGradient colors={skeuoGradients.plumButton} style={styles.goLiveBtnInner}>
@@ -379,6 +410,12 @@ function RoomCard({ room, index, tierColor, navigate }: {
       <TouchableOpacity
         style={styles.roomCard}
         activeOpacity={0.88}
+        accessibilityRole="button"
+        accessibilityLabel={
+          `${room.hostNickname}'s room. ${room.topic}. ${room.tier}, ${room.language}, ` +
+          `${room.activeMemberCount} here. ` +
+          (room.ratePerMin > 0 ? `Costs ${room.ratePerMin} coins a minute.` : 'Free to join.')
+        }
         onPress={() => navigate('ExpertRoom', { roomId: room.id })}
       >
         <LinearGradient colors={['#1A0714', '#3B0044']} style={StyleSheet.absoluteFill} />
@@ -394,6 +431,8 @@ function RoomCard({ room, index, tierColor, navigate }: {
           <View style={styles.roomInfo}>
             <Text style={styles.roomHost} numberOfLines={1}>{room.hostNickname}</Text>
             <Text style={styles.roomTopic} numberOfLines={2}>{room.topic}</Text>
+            {/* Who is actually in there right now, from the host's roster preview. */}
+            <RosterStrip roster={room.roster} count={room.activeMemberCount} tone="dark" />
             <View style={styles.roomMeta}>
               <View style={[styles.tierPill, { borderColor: tc + '60', backgroundColor: tc + '22' }]}>
                 <Text style={[styles.tierText, { color: tc }]}>{room.tier}</Text>
@@ -403,7 +442,19 @@ function RoomCard({ room, index, tierColor, navigate }: {
               </View>
               <View style={styles.statPill}>
                 <MaterialIcons name="people" size={10} color="#EADCA8" />
-                <Text style={styles.statText}>{room.activeMemberCount}</Text>
+                <Text style={[styles.statText, tabular]}>{room.activeMemberCount}</Text>
+              </View>
+              <View style={[styles.ratePill, room.ratePerMin > 0 && styles.ratePillPaid]}>
+                <MaterialIcons
+                  name={room.ratePerMin > 0 ? 'monetization-on' : 'lock-open'}
+                  size={10}
+                  color={room.ratePerMin > 0 ? '#F7B500' : '#8FD98F'}
+                />
+                <Text
+                  style={[styles.rateText, tabular, room.ratePerMin > 0 && styles.rateTextPaid]}
+                >
+                  {room.ratePerMin > 0 ? `${room.ratePerMin}/min` : 'Free'}
+                </Text>
               </View>
             </View>
           </View>
@@ -419,9 +470,27 @@ function RoomCard({ room, index, tierColor, navigate }: {
   );
 }
 
+import type { TextStyle } from 'react-native';
+import { useLiveRooms } from '../hooks/useRoomPresence';
+import RosterStrip from '../components/rooms/RosterStrip';
+
+const tabular: TextStyle = { fontVariant: ['tabular-nums'] };
+
 const styles = StyleSheet.create({
+  ratePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8,
+    borderWidth: 1, borderColor: 'rgba(143, 217, 143, 0.4)',
+    backgroundColor: 'rgba(143, 217, 143, 0.14)',
+  },
+  ratePillPaid: {
+    borderColor: 'rgba(247, 181, 0, 0.45)',
+    backgroundColor: 'rgba(247, 181, 0, 0.16)',
+  },
+  rateText: { color: '#8FD98F', fontSize: 9, fontWeight: '900' },
+  rateTextPaid: { color: '#F7B500' },
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 24 },
+  scroll: { paddingBottom: 110 },
 
   // Hero
   hero: {
@@ -573,4 +642,10 @@ const styles = StyleSheet.create({
   goLiveBtn: { marginTop: 20, borderRadius: 20, overflow: 'hidden', boxShadow: Platform.OS === 'web' ? '0 10px 20px rgba(75,0,84,0.28)' : undefined },
   goLiveBtnInner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, paddingVertical: 15 },
   goLiveBtnText: { color: '#FFFDF8', fontSize: 14, fontWeight: '900', letterSpacing: 3 },
+  shareInviteBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    marginTop: 18, paddingVertical: 12, borderRadius: 14,
+    backgroundColor: '#F8F5EF', borderWidth: 1, borderColor: '#4B0054',
+  },
+  shareInviteBtnText: { color: '#4B0054', fontSize: 12, fontWeight: '900', letterSpacing: 1 },
 });

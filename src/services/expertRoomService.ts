@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { RosterPreviewEntry } from './presenceService';
 import {
   collection,
   doc,
@@ -16,17 +17,21 @@ import {
   limit,
   Timestamp,
   setDoc,
+  deleteDoc,
+  runTransaction,
+  QueryConstraint,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
 
 export type RoomStatus = 'live' | 'closed';
-export type RoomTier = 'VIP' | 'Elite' | 'Standard';
+export type RoomTier = 'VIP' | 'Advance' | 'Standard';
 
 export interface SpeakerSlot {
   uid: string;
   nickname: string;
   avatarData?: any;
   isMuted: boolean;
+  gender?: 'boy' | 'girl';
 }
 
 export interface ExpertRoom {
@@ -41,6 +46,8 @@ export interface ExpertRoom {
   status: RoomStatus;
   // hand-raise queue — uids who tapped "Raise Hand"
   handQueue: string[];
+  handQueueBoy?: string[];
+  handQueueGirl?: string[];
   // uids currently on stage (speakers), max ~4
   speakers: SpeakerSlot[];
   activeMemberCount: number;
@@ -51,6 +58,10 @@ export interface ExpertRoom {
   reviewingBio?: string | null;
   // pending private match connect {fromUid, toUid}
   pendingMatch?: { fromUid: string; toUid: string; fromName: string; toName: string } | null;
+  /** Host heartbeat. Absent on rooms created before presence existed. */
+  hostLastSeen?: Timestamp;
+  /** Up to four present members, denormalised by the host for lobby cards. */
+  roster?: RosterPreviewEntry[];
   createdAt?: Timestamp;
 }
 
@@ -62,6 +73,8 @@ export interface RoomEvent {
   senderAvatarData?: any;
   giftName?: string;
   giftCost?: number;
+  recipientUid?: string;
+  recipientName?: string;
   text?: string;
   timestamp?: Timestamp;
 }
@@ -72,6 +85,19 @@ export interface TopGifter {
   avatarData?: any;
   totalCoins: number;
 }
+
+export interface HandRequest {
+  uid: string;
+  nickname: string;
+  avatarData?: any;
+  gender: 'boy' | 'girl';
+}
+
+export const subscribeToHandRequests = (roomId: string, callback: (reqs: HandRequest[]) => void) => {
+  return onSnapshot(collection(db, 'expert_rooms', roomId, 'hand_requests'), (snap) => {
+    callback(snap.docs.map(d => ({ uid: d.id, ...d.data() } as HandRequest)));
+  });
+};
 
 export const GIFTS = [
   { id: 'rose',        name: 'Rose',       icon: 'favorite',            cost: 50,   emoji: '🌹' },
@@ -115,6 +141,8 @@ export const createExpertRoom = async (
     ratePerMin,
     status: 'live',
     handQueue: [],
+    handQueueBoy: [],
+    handQueueGirl: [],
     speakers: [hostSlot],
     activeMemberCount: 1,
     reviewingUid: null,
@@ -122,6 +150,10 @@ export const createExpertRoom = async (
     reviewingAvatarData: null,
     reviewingBio: null,
     pendingMatch: null,
+    // Seeded so a host that dies before its first heartbeat still ages out of
+    // the lobby. Rooms with no value at all are treated as live, for the sake
+    // of rooms created before presence existed.
+    hostLastSeen: Timestamp.now(),
     createdAt: serverTimestamp() as any,
   } as Omit<ExpertRoom, 'id'>);
   return roomRef.id;
@@ -132,17 +164,22 @@ export const subscribeToActiveRooms = (
   tierFilter?: RoomTier,
   languageFilter?: string,
 ) => {
-  const roomsRef = collection(db, 'expert_rooms');
-  let q = query(roomsRef, where('status', '==', 'live'), orderBy('activeMemberCount', 'desc'));
-  if (tierFilter) {
-    q = query(roomsRef, where('status', '==', 'live'), where('tier', '==', tierFilter), orderBy('activeMemberCount', 'desc'));
-  }
-  if (languageFilter) {
-    q = query(roomsRef, where('status', '==', 'live'), where('language', '==', languageFilter), orderBy('activeMemberCount', 'desc'));
-  }
-  return onSnapshot(q, (snap) => {
-    callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ExpertRoom)));
-  });
+  // Build the constraints up rather than rebuilding the query inside each
+  // branch — the previous version discarded the tier filter whenever a language
+  // filter was also supplied, so "VIP + Hindi" silently returned every Hindi
+  // room at any tier.
+  const constraints: QueryConstraint[] = [where('status', '==', 'live')];
+  if (tierFilter) constraints.push(where('tier', '==', tierFilter));
+  if (languageFilter) constraints.push(where('language', '==', languageFilter));
+  constraints.push(limit(50));
+
+  return onSnapshot(
+    query(collection(db, 'expert_rooms'), ...constraints),
+    (snap) => {
+      callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as ExpertRoom)));
+    },
+    (error) => console.warn('Error subscribing to expert rooms:', error),
+  );
 };
 
 export const subscribeToRoom = (roomId: string, callback: (room: ExpertRoom | null) => void) => {
@@ -193,27 +230,94 @@ export const sendChatMessage = async (
 
 // ── Member join/leave ──────────────────────────────────────────────────────
 
+/**
+ * Membership is a document per member, not just a counter. The counter alone
+ * could never be reconciled after a crash, and per-minute billing needs
+ * somewhere server-owned to record when each member was last charged.
+ */
 export const joinRoom = async (roomId: string, uid: string, nickname: string, avatarData: any) => {
+  await setDoc(
+    doc(db, 'expert_rooms', roomId, 'members', uid),
+    {
+      uid,
+      nickname,
+      avatarData: avatarData || null,
+      joinedAt: serverTimestamp(),
+      // lastBilledAt is written by the server on the first billing tick, so the
+      // clock starts when billing starts rather than when the doc is created.
+    },
+    { merge: true },
+  );
   await updateDoc(doc(db, 'expert_rooms', roomId), { activeMemberCount: increment(1) });
   await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
 };
 
 export const leaveRoom = async (roomId: string, uid: string, nickname: string) => {
+  try {
+    await deleteDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid));
+  } catch (e) {}
+  try {
+    await deleteDoc(doc(db, 'expert_rooms', roomId, 'members', uid));
+  } catch (e) {}
   await updateDoc(doc(db, 'expert_rooms', roomId), {
     activeMemberCount: increment(-1),
     handQueue: arrayRemove(uid),
+    handQueueBoy: arrayRemove(uid),
+    handQueueGirl: arrayRemove(uid),
   });
+};
+
+/**
+ * Advances billing for the caller's time in this room. The server derives the
+ * elapsed time and the rate, so the client cannot understate either.
+ */
+export const tickRoomBilling = async (roomId: string) => {
+  const { authedPost } = await import('./authService');
+  return authedPost<{
+    success: boolean;
+    billedAmount: number;
+    billedSeconds: number;
+    newBalance: number | null;
+    hasInsufficientFunds: boolean;
+  }>('/api/v1/rooms/billing', { roomId, collection: 'expert_rooms' });
 };
 
 // ── Raise Hand / Stage ─────────────────────────────────────────────────────
 
-export const raiseHand = async (roomId: string, uid: string, nickname: string) => {
-  await updateDoc(doc(db, 'expert_rooms', roomId), { handQueue: arrayUnion(uid) });
-  await logEvent(roomId, { type: 'raise_hand', senderUid: uid, senderName: nickname });
+export const raiseHand = async (
+  roomId: string,
+  uid: string,
+  nickname: string,
+  avatarData: any,
+  gender: 'boy' | 'girl',
+) => {
+  await setDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid), {
+    nickname,
+    avatarData: avatarData || null,
+    gender,
+    createdAt: serverTimestamp(),
+  });
+  const updateData: any = {
+    handQueue: arrayUnion(uid)
+  };
+  if (gender === 'girl') {
+    updateData.handQueueGirl = arrayUnion(uid);
+  } else {
+    updateData.handQueueBoy = arrayUnion(uid);
+  }
+  await updateDoc(doc(db, 'expert_rooms', roomId), updateData);
+  await logEvent(roomId, { type: 'raise_hand', senderUid: uid, senderName: nickname, text: gender });
 };
 
 export const lowerHand = async (roomId: string, uid: string) => {
-  await updateDoc(doc(db, 'expert_rooms', roomId), { handQueue: arrayRemove(uid) });
+  try {
+    await deleteDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid));
+  } catch (e) {}
+  await updateDoc(doc(db, 'expert_rooms', roomId), {
+    handQueue: arrayRemove(uid),
+    handQueueBoy: arrayRemove(uid),
+    handQueueGirl: arrayRemove(uid),
+  });
 };
 
 export const acceptOnStage = async (
@@ -221,24 +325,72 @@ export const acceptOnStage = async (
   uid: string,
   nickname: string,
   avatarData: any,
+  gender: 'boy' | 'girl',
 ) => {
-  const slot: SpeakerSlot = { uid, nickname, avatarData: avatarData || null, isMuted: true };
-  await updateDoc(doc(db, 'expert_rooms', roomId), {
-    handQueue: arrayRemove(uid),
-    speakers: arrayUnion(slot),
+  const roomRef = doc(db, 'expert_rooms', roomId);
+  const requestRef = doc(db, 'expert_rooms', roomId, 'hand_requests', uid);
+  const slot: SpeakerSlot = { uid, nickname, avatarData: avatarData || null, isMuted: true, gender };
+
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(roomRef);
+    if (!snap.exists()) throw new Error('Room no longer exists.');
+
+    const room = snap.data() as ExpertRoom;
+    if (room.status !== 'live') throw new Error('Room has ended.');
+
+    const speakers = room.speakers || [];
+    if (speakers.some((speaker) => speaker.uid === uid)) {
+      transaction.delete(requestRef);
+      transaction.update(roomRef, {
+        handQueue: arrayRemove(uid),
+        handQueueBoy: arrayRemove(uid),
+        handQueueGirl: arrayRemove(uid),
+      });
+      return;
+    }
+
+    const seatTaken = speakers.some((speaker) => speaker.gender === gender);
+    if (seatTaken) {
+      throw new Error(gender === 'girl' ? 'Girl speaker seat is already occupied.' : 'Boy speaker seat is already occupied.');
+    }
+
+    transaction.delete(requestRef);
+    transaction.update(roomRef, {
+      handQueue: arrayRemove(uid),
+      handQueueBoy: arrayRemove(uid),
+      handQueueGirl: arrayRemove(uid),
+      speakers: [...speakers, slot],
+    });
   });
+
   await logEvent(roomId, { type: 'stage_up', senderUid: uid, senderName: nickname });
 };
 
-export const removeFromStage = async (roomId: string, uid: string, currentSpeakers: SpeakerSlot[]) => {
-  const updated = currentSpeakers.filter((s) => s.uid !== uid);
-  await updateDoc(doc(db, 'expert_rooms', roomId), { speakers: updated });
+/**
+ * Stage changes read-modify-write a shared array, so they run in a transaction
+ * against the server's copy. Passing the caller's stale `speakers` snapshot
+ * meant two hosts acting at once silently clobbered each other — one speaker
+ * would pop back onto the stage, or a mute would be undone.
+ */
+const mutateSpeakers = async (
+  roomId: string,
+  mutate: (speakers: SpeakerSlot[]) => SpeakerSlot[],
+) => {
+  const roomRef = doc(db, 'expert_rooms', roomId);
+  await runTransaction(db, async (transaction) => {
+    const snap = await transaction.get(roomRef);
+    if (!snap.exists()) throw new Error('Room no longer exists.');
+    const speakers = ((snap.data() as ExpertRoom).speakers ?? []);
+    transaction.update(roomRef, { speakers: mutate(speakers) });
+  });
 };
 
-export const toggleMute = async (roomId: string, uid: string, currentSpeakers: SpeakerSlot[]) => {
-  const updated = currentSpeakers.map((s) => s.uid === uid ? { ...s, isMuted: !s.isMuted } : s);
-  await updateDoc(doc(db, 'expert_rooms', roomId), { speakers: updated });
-};
+export const removeFromStage = async (roomId: string, uid: string) =>
+  mutateSpeakers(roomId, (speakers) => speakers.filter((s) => s.uid !== uid));
+
+export const toggleMute = async (roomId: string, uid: string) =>
+  mutateSpeakers(roomId, (speakers) =>
+    speakers.map((s) => (s.uid === uid ? { ...s, isMuted: !s.isMuted } : s)));
 
 // ── Profile Review ─────────────────────────────────────────────────────────
 
@@ -293,12 +445,13 @@ export const sendGiftInRoom = async (
   senderId: string,
   senderName: string,
   senderAvatarData: any,
-  hostUid: string,
+  recipientUid: string,
+  recipientName: string,
   giftId: string,
 ) => {
   const gift = GIFTS.find((g) => g.id === giftId);
   if (!gift) throw new Error('Unknown gift');
-  await transferCoins(senderId, hostUid, gift.cost);
+  await transferCoins(senderId, recipientUid, gift.cost);
   await logEvent(roomId, {
     type: 'gift',
     senderUid: senderId,
@@ -306,6 +459,8 @@ export const sendGiftInRoom = async (
     senderAvatarData,
     giftName: gift.name,
     giftCost: gift.cost,
+    recipientUid,
+    recipientName,
   });
   // track top gifters in a subcollection
   const gifterRef = doc(db, 'expert_rooms', roomId, 'gifters', senderId);
@@ -327,20 +482,4 @@ export const subscribeToTopGifters = (roomId: string, callback: (gifters: TopGif
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map((d) => d.data() as TopGifter));
   });
-};
-
-// ── Direct Join (coin-gated) ───────────────────────────────────────────────
-
-export const directJoinRoom = async (
-  roomId: string,
-  uid: string,
-  nickname: string,
-  avatarData: any,
-  hostUid: string,
-  ratePerMin: number,
-) => {
-  await transferCoins(uid, hostUid, ratePerMin);
-  await updateDoc(doc(db, 'expert_rooms', roomId), { activeMemberCount: increment(1) });
-  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
-  return ratePerMin;
 };

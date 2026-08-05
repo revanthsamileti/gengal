@@ -5,9 +5,10 @@ import { subscribeToGlobalSettings, GlobalSettings } from '../services/adminServ
 
 type CallPriceTagProps = {
   mode: 'call' | 'video';
+  textColor?: string;
 };
 
-export default function CallPriceTag({ mode }: CallPriceTagProps) {
+export default function CallPriceTag({ mode, textColor }: CallPriceTagProps) {
   const [settings, setSettings] = useState<GlobalSettings | null>(null);
 
   useEffect(() => {
@@ -18,15 +19,18 @@ export default function CallPriceTag({ mode }: CallPriceTagProps) {
   }, []);
 
   const isVideo = mode === 'video';
-  // Fallbacks based on user request if settings aren't loaded yet
-  const defaultPrice = isVideo ? 50 : 15;
+  // Fallbacks based on admin defaults
+  const defaultPrice = isVideo ? 30 : 15;
   const currentPrice = settings ? (isVideo ? settings.videoCallRatePerMin : settings.voiceCallRatePerMin) : defaultPrice;
 
+  const defaultColor = isVideo ? '#FFFFFF' : '#7A580D';
+  const finalColor = textColor || defaultColor;
+
   return (
-    <View style={styles.tag}>
-      <Text style={styles.text}>{currentPrice}</Text>
-      <MaterialIcons name="star" size={10} color="#FFD700" />
-      <Text style={styles.text}>/m</Text>
+    <View style={[styles.tag, isVideo ? styles.tagVideo : styles.tagCall]}>
+      <Text style={[styles.text, { color: finalColor }]}>{currentPrice}</Text>
+      <MaterialIcons name="star" size={11} color="#FFD700" style={{ marginHorizontal: 1 }} />
+      <Text style={[styles.text, { color: finalColor }]}>/m</Text>
     </View>
   );
 }
@@ -35,19 +39,18 @@ const styles = StyleSheet.create({
   tag: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
-    marginLeft: 4,
-    backgroundColor: 'rgba(0,0,0,0.05)',
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    borderRadius: 8,
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  tagCall: {
+    backgroundColor: 'rgba(218, 165, 32, 0.18)',
+  },
+  tagVideo: {
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
   },
   text: {
-    fontSize: 9,
+    fontSize: 10.5,
     fontWeight: '800',
-    color: '#FFFFFF',
   },
-  textVideo: {
-    color: '#FFE8FF',
-  }
 });

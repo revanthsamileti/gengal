@@ -1,0 +1,1886 @@
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+import json
+import os
+import hashlib
+import hmac
+import math
+import time
+import sys
+import random
+import requests
+from datetime import datetime, timedelta, timezone
+import firebase_admin
+from firebase_admin import credentials, auth, firestore
+from agora_token_builder import RtcTokenBuilder
+
+app = Flask(__name__)
+
+def env_value(name):
+    value = os.environ.get(name)
+    return value.strip() if value else ""
+
+def require_env(name):
+    value = env_value(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+def hash_password(password, salt=None):
+    salt = salt or os.urandom(16).hex()
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210000)
+    return f"pbkdf2_sha256$210000${salt}${digest.hex()}"
+
+def verify_password(password, stored):
+    if not stored:
+        return False
+    parts = stored.split("$")
+    if len(parts) == 4 and parts[0] == "pbkdf2_sha256":
+        _, rounds, salt, expected = parts
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(rounds)).hex()
+        return hmac.compare_digest(digest, expected)
+    # Legacy plaintext comparison, kept only to migrate accounts created before
+    # hashing existed. Opt in explicitly; leave it off in production.
+    if os.environ.get("ALLOW_LEGACY_PLAINTEXT_LOGIN") == "true":
+        return hmac.compare_digest(password, stored)
+    return False
+
+def agora_numeric_uid(user_uid):
+    """Stable 31-bit uid for Agora.
+
+    Python randomises str hashing per process, so the previous hash() call
+    produced a different channel uid after every server restart or on a second
+    worker, which broke reconnects mid-call.
+    """
+    if str(user_uid).isdigit():
+        return int(user_uid)
+    digest = hashlib.sha256(str(user_uid).encode("utf-8")).hexdigest()
+    return int(digest[:8], 16) & 0x7FFFFFFF
+
+def bearer_uid():
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return None
+    token = header.split(" ", 1)[1].strip()
+    if not token:
+        return None
+    try:
+        # Allow a minute of clock skew. Verification happens against this
+        # machine's clock, so a server running slightly behind Google rejects
+        # freshly minted tokens as "used too early".
+        try:
+            decoded = auth.verify_id_token(token, clock_skew_seconds=60)
+        except TypeError:
+            # Older firebase-admin without the parameter.
+            decoded = auth.verify_id_token(token)
+        return decoded.get("uid")
+    except Exception as e:
+        print(f"[AUTH] Invalid bearer token: {e}", flush=True)
+        return None
+
+def require_bearer_uid():
+    uid = bearer_uid()
+    if not uid:
+        return None, (jsonify({"error": "Authentication required"}), 401)
+    return uid, None
+
+def admin_uids():
+    raw = env_value("ADMIN_UIDS")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+def require_admin_uid():
+    """Admin access is granted by an explicit ADMIN_UIDS allowlist on the server.
+
+    The client cannot self-assert this, which is what the previous
+    client-side-only admin panel effectively allowed.
+    """
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return None, error_response
+    if uid not in admin_uids():
+        return None, (jsonify({"error": "Administrator privileges required"}), 403)
+    return uid, None
+
+# Simple in-process rate limiter. Adequate for a single worker; move to Redis
+# before running more than one.
+_rate_buckets = {}
+
+def rate_limited(key, max_attempts, window_seconds):
+    now = time.time()
+    hits = [t for t in _rate_buckets.get(key, []) if now - t < window_seconds]
+    if len(hits) >= max_attempts:
+        _rate_buckets[key] = hits
+        return True
+    hits.append(now)
+    _rate_buckets[key] = hits
+    return False
+
+def parse_positive_number(value, field_name):
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{field_name} must be a number")
+    if amount <= 0:
+        raise ValueError(f"{field_name} must be positive")
+    return amount
+
+# Initialize Firebase Admin
+try:
+    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_admin.initialize_app(cred)
+    print("Firebase Admin initialized successfully.")
+except Exception as e:
+    print(f"Warning: Could not initialize Firebase Admin: {e}")
+
+# Fast2SMS Global config
+FAST2SMS_API_KEY = env_value("FAST2SMS_API_KEY")
+otp_store = {} # simple dictionary mapping { phone: { "otp": "123456", "expires": datetime } }
+
+# Securely extract your credentials from the environment variables
+AGORA_APP_ID = env_value("AGORA_APP_ID")
+AGORA_APP_CERTIFICATE = env_value("AGORA_APP_CERTIFICATE")
+# Secure server-side isolation of Zego credentials
+ZEGO_APP_ID = int(os.environ.get("ZEGO_APP_ID", "0") or "0")
+ZEGO_SERVER_SECRET = env_value("ZEGO_SERVER_SECRET")
+
+CORS(app)
+
+TEMP_DIR = "temp_media"
+os.makedirs(TEMP_DIR, exist_ok=True)
+DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "debug_events.log")
+
+# Selfie classification pipeline removed
+
+# Proxy endpoint for frontend console logs
+def debug_logging_enabled():
+    """Remote debug logging is a development tool and stays off by default.
+
+    It accepts unauthenticated writes (auth failures have to stay diagnosable,
+    which is the whole point) and appends them to a flat file that nothing
+    rotates. In production that is an unbounded disk write reachable by anyone
+    who can find the URL, so it has to be opted into explicitly.
+    """
+    return os.environ.get("ENABLE_REMOTE_DEBUG_LOG") == "true"
+
+
+@app.route('/api/v1/debug/log', methods=['POST', 'OPTIONS'])
+def debug_log():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    if not debug_logging_enabled():
+        return jsonify({"ok": False, "error": "Remote debug logging is disabled"}), 404
+
+    # Unauthenticated writes are accepted only before sign-in so that auth
+    # failures remain diagnosable, but they are rate limited per address.
+    if rate_limited(f"debuglog:{request.remote_addr}", 60, 60):
+        return jsonify({"ok": False, "error": "Too many log events"}), 429
+
+    payload = request.get_json(silent=True) or {}
+    event = {
+        "serverReceivedAt": datetime.utcnow().isoformat() + "Z",
+        "level": str(payload.get("level", "info"))[:20],
+        "event": str(payload.get("event", "unknown"))[:120],
+        "sessionId": payload.get("sessionId"),
+        "userId": payload.get("userId"),
+        # Deliberately not the phone number. The client sends one, but writing a
+        # subscriber's number into an unrotated plaintext file is not something
+        # a debug aid should be doing.
+        "screen": payload.get("screen"),
+        "platform": payload.get("platform"),
+        "details": payload.get("details", {}),
+    }
+
+    try:
+        with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+        print(f"[RemoteDebug] {event['level']} {event['event']} user={event.get('userId')} session={event.get('sessionId')}", flush=True)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        print(f"[RemoteDebug] failed to write debug log: {e}", flush=True)
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.route('/api/v1/debug/recent', methods=['GET'])
+def debug_recent():
+    # The debug log contains user ids and session ids, so it is admin-only.
+    _, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+
+    try:
+        limit = min(max(int(request.args.get("limit", 100)), 1), 500)
+    except (TypeError, ValueError):
+        return jsonify({"error": "limit must be an integer"}), 400
+
+    if not os.path.exists(DEBUG_LOG_FILE):
+        return jsonify({"events": []}), 200
+
+    with open(DEBUG_LOG_FILE, "r", encoding="utf-8") as log_file:
+        lines = log_file.readlines()[-limit:]
+
+    events = []
+    for line in lines:
+        try:
+            events.append(json.loads(line))
+        except Exception:
+            pass
+    return jsonify({"events": events}), 200
+
+@app.route('/api/v1/agora/generate-token', methods=['POST', 'OPTIONS'])
+def generate_agora_token():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    # A token grants publish access to a channel, so the caller must prove who
+    # they are and can only ever mint a token for their own uid.
+    authed_uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    try:
+        data = request.json or {}
+        room_id = data.get('roomId')
+        user_uid = authed_uid
+
+        if not room_id:
+            return jsonify({"error": "Missing mandatory roomId parameter"}), 400
+        if not AGORA_APP_ID or not AGORA_APP_CERTIFICATE:
+            return jsonify({"error": "Agora credentials are not configured"}), 503
+
+        # Configuration setups
+        # Role 1 is for RTC_ROLE_PUBLISHER (allows talking and listening)
+        role = 1 
+        expiration_time_in_seconds = 7200 # 2 Hours safe call limit
+        current_timestamp = int(time.time())
+        privilege_expired_ts = current_timestamp + expiration_time_in_seconds
+
+        # Deterministic integer representation for the Agora channel track.
+        numeric_uid = agora_numeric_uid(user_uid)
+
+        # Generate the cryptographic token
+        token = RtcTokenBuilder.buildTokenWithUid(
+            AGORA_APP_ID, 
+            AGORA_APP_CERTIFICATE, 
+            room_id, 
+            numeric_uid, 
+            role, 
+            privilege_expired_ts
+        )
+
+        return jsonify({
+            "token": token,
+            "uid": numeric_uid,
+            "expiresIn": expiration_time_in_seconds
+        }), 200
+
+    except Exception as e:
+        print(f"[Agora Token Generation Error]: {str(e)}")
+        return jsonify({"error": "Internal Token Server Exception"}), 500
+
+def make_zego_token(app_id, server_secret, user_id, expiry_seconds=7200):
+    """Generates an explicit, low-latency client access token for Zego Express rooms."""
+    create_time = int(time.time())
+    expire_time = create_time + expiry_seconds
+    
+    # Structure payload elements matching Zego's signature token requirements
+    payload = {
+        'app_id': app_id,
+        'user_id': str(user_id),
+        'provided_timestamp': create_time,
+        'expire_time': expire_time,
+        'nonce': int(time.time() * 1000)
+    }
+    
+    # Pack data structure using hmac-sha256 signing algorithms
+    json_payload = json.dumps(payload)
+    import hmac
+    import hashlib
+    signature = hmac.new(
+        server_secret.encode('utf-8'), 
+        json_payload.encode('utf-8'), 
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Final format serialization
+    token_bytes = json.dumps({
+        'ver': 1,
+        'body': json_payload,
+        'hash': signature
+    })
+    import base64
+    return base64.b64encode(token_bytes.encode('utf-8')).decode('utf-8')
+
+@app.route('/api/v1/zego/generate-token', methods=['POST', 'OPTIONS'])
+def generate_zego_token():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    authed_uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    try:
+        data = request.json or {}
+        room_id = data.get('roomId')
+        user_uid = authed_uid
+
+        if not room_id:
+            return jsonify({"error": "Missing mandatory roomId field"}), 400
+        if not ZEGO_APP_ID or not ZEGO_SERVER_SECRET:
+            return jsonify({"error": "Zego credentials are not configured"}), 503
+
+        # Calculate a valid dynamic token string locked strictly to this user session
+        generated_token = make_zego_token(ZEGO_APP_ID, ZEGO_SERVER_SECRET, user_uid)
+
+        return jsonify({
+            "token": generated_token,
+            "appId": ZEGO_APP_ID,
+            "userId": str(user_uid)
+        }), 200
+
+    except Exception as e:
+        print(f"[Zego Token Authority Fault]: {str(e)}")
+        return jsonify({"error": "Internal Token Server Exception"}), 500
+
+MAX_INTRO_BYTES = 5 * 1024 * 1024
+
+@app.route('/api/v1/host/upload-intro', methods=['POST', 'OPTIONS'])
+def upload_intro():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    if rate_limited(f"upload:{uid}", 5, 3600):
+        return jsonify({"error": "Upload limit reached, try again later"}), 429
+
+    try:
+        if 'audio' not in request.files:
+            return jsonify({"error": "No audio file provided"}), 400
+
+        audio_file = request.files['audio']
+        if audio_file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+
+        # Bound the write: the filename is server-generated, but the body is not.
+        audio_file.seek(0, os.SEEK_END)
+        size = audio_file.tell()
+        audio_file.seek(0)
+        if size > MAX_INTRO_BYTES:
+            return jsonify({"error": "Audio file is too large (max 5MB)"}), 413
+
+        uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
+        if not os.path.exists(uploads_dir):
+            os.makedirs(uploads_dir)
+
+        # Namespaced by uid so one user cannot overwrite another's intro.
+        filename = f"intro_{agora_numeric_uid(uid)}_{int(time.time())}.m4a"
+        file_path = os.path.join(uploads_dir, filename)
+
+        audio_file.save(file_path)
+
+        public_base_url = require_env("PUBLIC_BASE_URL").rstrip("/")
+        public_url = f"{public_base_url}/uploads/{filename}"
+
+        return jsonify({
+            "message": "Upload successful",
+            "url": public_url
+        }), 200
+
+    except Exception as e:
+        print(f"[Upload Server Fault]: {str(e)}")
+        return jsonify({"error": "Internal Upload Exception"}), 500
+
+# Optional: Add a simple static file route so the frontend can playback the audio
+from flask import send_from_directory
+
+@app.route('/uploads/<path:filename>')
+def serve_upload(filename):
+    return send_from_directory(os.path.join(os.path.dirname(__file__), 'uploads'), filename)
+
+# ==========================================
+# AUTHENTICATION ROUTES
+# ==========================================
+
+# In-process abuse tracking. NOTE: like otp_store above, this is per-worker and
+# lost on restart — both must move to Redis before scaling past one worker.
+abuse_store = {}
+
+@app.route('/api/v1/auth/send-otp', methods=['POST'])
+def send_otp():
+    data = request.json
+    phone = data.get('phone')
+    if not phone:
+        return jsonify({"error": "Phone number is required"}), 400
+        
+    # Clean phone
+    phone = phone.replace(" ", "")
+    
+    now = datetime.now()
+    
+    # Check if user is blocked
+    abuse_record = abuse_store.get(phone, {"blocked_until": None, "consecutive_failed_requests": 0, "last_requested_at": None})
+    if abuse_record["blocked_until"] and now < abuse_record["blocked_until"]:
+        delta = abuse_record["blocked_until"] - now
+        minutes_left = int(delta.total_seconds() / 60)
+        return jsonify({"error": f"Too many failed attempts. Try again in {minutes_left} minutes."}), 429
+        
+    # Enforce 90-second cooldown
+    if abuse_record["last_requested_at"]:
+        seconds_since_last = (now - abuse_record["last_requested_at"]).total_seconds()
+        if seconds_since_last < 90:
+            return jsonify({"error": f"Please wait {int(90 - seconds_since_last)} seconds before requesting another OTP."}), 429
+            
+    abuse_record["last_requested_at"] = now
+    abuse_store[phone] = abuse_record
+        
+    # Generate 6-digit OTP
+    otp = str(random.randint(100000, 999999))
+    
+    # Store OTP with a 5-minute expiration
+    otp_store[phone] = {
+        "otp": otp,
+        "expires": now + timedelta(minutes=5),
+        "incorrect_guesses": 0
+    }
+    
+    # Development: skip the SMS and print the code instead. Without this the
+    # ALLOW_DEV_OTP_BYPASS path was unreachable — verify accepted 000000, but no
+    # OTP could ever be issued without live Twilio credentials.
+    if os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true":
+        print(f"[AUTH][DEV] OTP for {phone} is {otp} (SMS skipped; 000000 also accepted)", flush=True)
+        return jsonify({"status": "success", "message": "OTP sent (dev mode)", "devMode": True})
+
+    TWILIO_ACCOUNT_SID = require_env("TWILIO_ACCOUNT_SID")
+    TWILIO_AUTH_TOKEN = require_env("TWILIO_AUTH_TOKEN")
+    TWILIO_PHONE_NUMBER = require_env("TWILIO_PHONE_NUMBER")
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    dest_phone = phone if phone.startswith('+') else f"+{phone}"
+        
+    payload = {
+        "To": dest_phone,
+        "From": TWILIO_PHONE_NUMBER,
+        "Body": f"Your GenGal Verification Code is: {otp}"
+    }
+    
+    print(f"[AUTH] Sending OTP to {dest_phone} via Twilio...")
+    import sys; sys.stdout.flush()
+    
+    try:
+        response = requests.post(url, data=payload, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+        print(f"[AUTH] Twilio Response status: {response.status_code}")
+        sys.stdout.flush()
+        return jsonify({"status": "success", "message": "OTP sent"})
+    except Exception as e:
+        print(f"[AUTH] Twilio Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/auth/verify-otp', methods=['POST'])
+def verify_otp():
+    data = request.json
+    phone = data.get('phone')
+    user_otp = data.get('otp')
+    
+    if not phone or not user_otp:
+        return jsonify({"error": "Phone and OTP are required"}), 400
+        
+    phone = phone.replace(" ", "")
+    now = datetime.now()
+    
+    # Check if user is blocked
+    abuse_record = abuse_store.get(phone, {"blocked_until": None, "consecutive_failed_requests": 0, "last_requested_at": None})
+    if abuse_record["blocked_until"] and now < abuse_record["blocked_until"]:
+        delta = abuse_record["blocked_until"] - now
+        minutes_left = int(delta.total_seconds() / 60)
+        return jsonify({"error": f"Too many failed attempts. Try again in {minutes_left} minutes."}), 429
+    
+    allow_otp_bypass = os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true"
+    if not (allow_otp_bypass and user_otp == '000000'):
+        record = otp_store.get(phone)
+        if not record:
+            return jsonify({"error": "No active OTP found. Please request a new one."}), 400
+            
+        if now > record['expires']:
+            del otp_store[phone]
+            return jsonify({"error": "OTP expired. Please request a new one."}), 400
+            
+        if record['otp'] != user_otp:
+            # Incorrect guess
+            record['incorrect_guesses'] += 1
+            otp_store[phone] = record
+            
+            # 3 incorrect guesses on a single request = 5 min block (or 1hr if 3rd consecutive failed request)
+            if record['incorrect_guesses'] >= 3:
+                del otp_store[phone]
+                abuse_record['consecutive_failed_requests'] += 1
+                
+                if abuse_record['consecutive_failed_requests'] >= 3:
+                    # 3 sequential failed requests -> 1 hr block
+                    abuse_record['blocked_until'] = now + timedelta(hours=1)
+                    abuse_store[phone] = abuse_record
+                    return jsonify({"error": "You have failed too many times. You are blocked for 1 hour."}), 429
+                else:
+                    # 1 failed request (3 guesses) -> 5 min block
+                    abuse_record['blocked_until'] = now + timedelta(minutes=5)
+                    abuse_store[phone] = abuse_record
+                    return jsonify({"error": "You entered the wrong code 3 times. Please try again in 5 minutes."}), 429
+                    
+            return jsonify({"error": f"Invalid OTP. {3 - record['incorrect_guesses']} attempts remaining."}), 400
+        
+    # OTP is correct! Clear stores.
+    if phone in otp_store:
+        del otp_store[phone]
+    if phone in abuse_store:
+        # Reset consecutive failed requests on success
+        abuse_store[phone]['consecutive_failed_requests'] = 0
+        abuse_store[phone]['blocked_until'] = None
+    
+    uid = f"fast2sms:{phone}"
+    print(f"[AUTH] OTP verified for {phone}. Minting custom token for uid: {uid}")
+    
+    try:
+        custom_token = auth.create_custom_token(uid)
+        return jsonify({
+            "status": "success",
+            "token": custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
+        })
+    except Exception as e:
+        print(f"[AUTH] Token minting error: {e}")
+        return jsonify({"error": "Failed to generate auth token"}), 500
+
+def read_stored_password(db_client, uid):
+    """Password hashes live in /user_credentials, which no client can read.
+
+    Falls back to the legacy field on the public /users document so accounts
+    created before the split can still log in and be migrated.
+    """
+    cred_snap = db_client.collection('user_credentials').document(uid).get()
+    if cred_snap.exists:
+        stored = (cred_snap.to_dict() or {}).get('passwordHash')
+        if stored:
+            return stored, False
+    user_snap = db_client.collection('users').document(uid).get()
+    if not user_snap.exists:
+        return None, False
+    user_data = user_snap.to_dict() or {}
+    return user_data.get('passwordHash') or user_data.get('password'), True
+
+def write_stored_password(db_client, uid, password):
+    db_client.collection('user_credentials').document(uid).set(
+        {"passwordHash": hash_password(password), "updatedAt": firestore.SERVER_TIMESTAMP}
+    )
+    # Strip any credential material still sitting on the world-readable profile.
+    try:
+        db_client.collection('users').document(uid).update({
+            "passwordHash": firestore.DELETE_FIELD,
+            "password": firestore.DELETE_FIELD,
+        })
+    except Exception:
+        pass
+
+@app.route('/api/v1/auth/login-password', methods=['POST', 'OPTIONS'])
+def login_password():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    data = request.json or {}
+    phone = data.get('phone')
+    password = data.get('password')
+
+    if not phone or not password:
+        return jsonify({"error": "Phone and password are required"}), 400
+
+    phone = phone.replace(" ", "")
+
+    # Throttle credential stuffing per phone number and per source address.
+    if rate_limited(f"login:{phone}", 10, 900) or rate_limited(f"loginip:{request.remote_addr}", 30, 900):
+        return jsonify({"error": "Too many login attempts. Please try again later."}), 429
+
+    uid = f"fast2sms:{phone}"
+    print(f"[AUTH] Verifying password for uid: {uid}")
+
+    try:
+        db_client = firestore.client()
+        stored_password, is_legacy = read_stored_password(db_client, uid)
+
+        if stored_password is None:
+            return jsonify({"error": "Invalid phone number or password"}), 401
+        if not verify_password(password, stored_password):
+            return jsonify({"error": "Invalid phone number or password"}), 401
+
+        # Migrate legacy or plaintext credentials on first successful login.
+        if is_legacy or not stored_password.startswith("pbkdf2_sha256$"):
+            write_stored_password(db_client, uid, password)
+
+        print(f"[AUTH] Password verified for uid: {uid}. Minting custom token.")
+        custom_token = auth.create_custom_token(uid)
+        return jsonify({
+            "status": "success",
+            "token": custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
+        }), 200
+    except Exception as e:
+        print(f"[AUTH] Error in login_password: {e}")
+        return jsonify({"error": "Internal server error"}), 500
+
+@app.route('/api/v1/auth/set-password', methods=['POST', 'OPTIONS'])
+def set_password():
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    password = data.get('password')
+    if not password or len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters"}), 400
+    try:
+        write_stored_password(firestore.client(), uid, password)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        print(f"[AUTH] Error setting password: {e}")
+        return jsonify({"error": "Failed to set password"}), 500
+
+@app.route('/api/v1/auth/delete-account', methods=['POST', 'OPTIONS'])
+def delete_account():
+    """Removes every trace of an account, server-side.
+
+    /user_credentials is closed to all client access, so without this the
+    password hash outlived the account.
+
+    The public profile is deleted here too, not left to the client. The client's
+    delete was the last write before `deleteUser()` invalidated its credential,
+    and if it failed the profile survived in the directory with no owner left to
+    remove it — the rules only permit the owner. Doing it through the Admin SDK
+    makes that unreachable.
+
+    Partial failures are reported rather than swallowed: the caller deletes the
+    auth record next, and it must not do that while data is still lying around.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    try:
+        db_client = firestore.client()
+        failed = []
+        for collection_name in ('user_credentials', 'user_private', 'incoming_calls', 'users'):
+            try:
+                db_client.collection(collection_name).document(uid).delete()
+            except Exception as e:
+                print(f"[AUTH] Failed to delete {collection_name}/{uid}: {e}")
+                failed.append(collection_name)
+        if failed:
+            return jsonify({
+                "error": "Some account data could not be deleted",
+                "code": "partial_delete",
+                "collections": failed,
+            }), 500
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        print(f"[AUTH] Delete account error: {e}")
+        return jsonify({"error": "Failed to delete account data"}), 500
+
+@app.route('/api/v1/auth/check-user', methods=['POST', 'OPTIONS'])
+def check_user():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    data = request.json or {}
+    phone = data.get('phone')
+
+    if not phone:
+        return jsonify({"error": "Phone is required"}), 400
+
+    phone = phone.replace(" ", "")
+
+    # This endpoint reveals whether a phone number is registered, so it is
+    # throttled to stop it being used to enumerate the user base.
+    if rate_limited(f"checkuser:{request.remote_addr}", 20, 900):
+        return jsonify({"error": "Too many requests. Please try again later."}), 429
+
+    try:
+        db_client = firestore.client()
+        # Phone numbers now live in /user_private, keyed by uid.
+        uid = f"fast2sms:{phone}"
+        if db_client.collection('user_private').document(uid).get().exists:
+            return jsonify({"exists": True}), 200
+        # Legacy accounts still carry phoneNumber on the profile document.
+        legacy = db_client.collection('users').where('phoneNumber', '==', phone).limit(1).stream()
+        return jsonify({"exists": any(True for _ in legacy)}), 200
+    except Exception as e:
+        print(f"[AUTH] Check user error: {e}")
+        return jsonify({"error": "Failed to check user"}), 500
+
+@app.route('/api/v1/auth/check-username', methods=['POST', 'OPTIONS'])
+def check_username():
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    data = request.json or {}
+    username = (data.get('username') or '').strip().lower()
+    exclude_uid = data.get('excludeUid')
+
+    if not username:
+        return jsonify({"error": "Username is required"}), 400
+
+    # Signup calls this before signInWithCustomToken has run, so the client has
+    # no Firebase Auth session yet and the users/{uid} security rule (read: if
+    # signedIn()) rejects a client-side uniqueness query outright. The Admin SDK
+    # bypasses that rule, matching how check-user already works pre-auth.
+    if rate_limited(f"checkusername:{request.remote_addr}", 20, 900):
+        return jsonify({"error": "Too many requests. Please try again later."}), 429
+
+    try:
+        db_client = firestore.client()
+        matches = db_client.collection('users').where('username', '==', username).limit(2).stream()
+        taken = any(doc.id != exclude_uid for doc in matches)
+        return jsonify({"available": not taken}), 200
+    except Exception as e:
+        print(f"[AUTH] Check username error: {e}")
+        return jsonify({"error": "Failed to check username"}), 500
+
+def serialize_doc(doc_dict):
+    if not doc_dict or not isinstance(doc_dict, dict):
+        return {}
+    out = {}
+    for k, v in doc_dict.items():
+        if hasattr(v, 'timestamp'):
+            try:
+                out[k] = int(v.timestamp() * 1000)
+            except Exception:
+                out[k] = str(v)
+        elif hasattr(v, 'isoformat'):
+            out[k] = v.isoformat()
+        else:
+            out[k] = v
+    return out
+
+# Upper bound on what a single billing tick may charge, so a stalled or
+# reconnecting client cannot trigger a large retroactive deduction.
+MAX_BILLABLE_TICK_SECONDS = 60
+
+def get_coin_balance(snapshot):
+    if not snapshot.exists:
+        raise ValueError("User does not exist")
+    data = snapshot.to_dict() or {}
+    return float(data.get("coins") or 0)
+
+@app.route('/api/v1/coins/deduct', methods=['POST', 'OPTIONS'])
+def deduct_coins():
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    user_id = data.get("userId")
+    if user_id != uid:
+        return jsonify({"error": "Cannot deduct coins for another user"}), 403
+    try:
+        amount = parse_positive_number(data.get("amount"), "amount")
+        db_client = firestore.client()
+        user_ref = db_client.collection('users').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = user_ref.get(transaction=transaction)
+            balance = get_coin_balance(snap)
+            if balance < amount:
+                raise ValueError("Insufficient Gengal balance")
+            new_balance = balance - amount
+            transaction.update(user_ref, {"coins": new_balance})
+            return new_balance
+
+        return jsonify({"ok": True, "newBalance": apply(transaction)}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Deduct error: {e}")
+        return jsonify({"error": "Failed to deduct coins"}), 500
+
+@app.route('/api/v1/coins/deduct-with-commission', methods=['POST', 'OPTIONS'])
+def deduct_with_commission():
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    user_id = data.get("userId")
+    host_uid = data.get("hostUid")
+    if user_id != uid:
+        return jsonify({"error": "Cannot deduct coins for another user"}), 403
+    if not host_uid:
+        return jsonify({"error": "Missing hostUid"}), 400
+    try:
+        amount = parse_positive_number(data.get("amount"), "amount")
+        commission = float(data.get("commissionAmount") or 0)
+        if commission < 0 or commission > amount:
+            raise ValueError("Invalid commission amount")
+
+        db_client = firestore.client()
+        user_ref = db_client.collection('users').document(uid)
+        host_ref = db_client.collection('users').document(host_uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            user_snap = user_ref.get(transaction=transaction)
+            user_balance = get_coin_balance(user_snap)
+            if user_balance < amount:
+                raise ValueError("Insufficient Gengal balance")
+            user_new = user_balance - amount
+            transaction.update(user_ref, {"coins": user_new})
+
+            host_new = None
+            if commission > 0 and host_uid != uid:
+                host_snap = host_ref.get(transaction=transaction)
+                host_balance = get_coin_balance(host_snap)
+                host_new = host_balance + commission
+                transaction.update(host_ref, {"coins": host_new})
+            return user_new, host_new
+
+        new_balance, host_new_balance = apply(transaction)
+        return jsonify({"ok": True, "newBalance": new_balance, "hostNewBalance": host_new_balance}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Deduct commission error: {e}")
+        return jsonify({"error": "Failed to deduct coins"}), 500
+
+@app.route('/api/v1/coins/transfer', methods=['POST', 'OPTIONS'])
+def transfer_coins_endpoint():
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    sender_id = data.get("senderId")
+    receiver_id = data.get("receiverId")
+    if sender_id != uid:
+        return jsonify({"error": "Cannot transfer coins from another user"}), 403
+    if not receiver_id or sender_id == receiver_id:
+        return jsonify({"error": "Invalid receiver"}), 400
+    try:
+        amount = parse_positive_number(data.get("amount"), "amount")
+        db_client = firestore.client()
+        sender_ref = db_client.collection('users').document(sender_id)
+        receiver_ref = db_client.collection('users').document(receiver_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            sender_snap = sender_ref.get(transaction=transaction)
+            receiver_snap = receiver_ref.get(transaction=transaction)
+            sender_balance = get_coin_balance(sender_snap)
+            receiver_balance = get_coin_balance(receiver_snap)
+            if sender_balance < amount:
+                raise ValueError("Insufficient Gengal balance")
+            sender_new = sender_balance - amount
+            receiver_new = receiver_balance + amount
+            transaction.update(sender_ref, {"coins": sender_new})
+            transaction.update(receiver_ref, {"coins": receiver_new})
+            return sender_new, receiver_new
+
+        sender_new, receiver_new = apply(transaction)
+        return jsonify({
+            "success": True,
+            "senderNewBalance": sender_new,
+            "receiverNewBalance": receiver_new,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Transfer error: {e}")
+        return jsonify({"error": "Failed to transfer coins"}), 500
+
+@app.route('/api/v1/coins/call-billing', methods=['POST', 'OPTIONS'])
+def call_billing_endpoint():
+    """Bills an in-progress call from the server's own clock.
+
+    The client used to supply both the amount and the rate, so a patched app
+    could bill itself nothing (or bill an arbitrary figure). Now the caller only
+    identifies the call: the server derives elapsed time from the timestamp it
+    last billed at, and the rate from /settings.
+
+    Either participant may drive a tick, and the effect is identical, so the
+    payer cannot avoid being billed by not calling this — the receiver's client
+    has every incentive to.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = data.get("roomId")
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+
+    try:
+        db_client = firestore.client()
+        call_ref = db_client.collection('calls').document(room_id)
+        call_snap = call_ref.get()
+        if not call_snap.exists:
+            return jsonify({"error": "Unknown call"}), 404
+
+        call_data = call_snap.to_dict() or {}
+        payer_id = call_data.get('callerUid')
+        receiver_id = call_data.get('receiverUid')
+
+        # Only the two participants may tick this call.
+        if uid not in (payer_id, receiver_id):
+            return jsonify({"error": "Not a participant in this call"}), 403
+        if not payer_id or not receiver_id or payer_id == receiver_id:
+            return jsonify({"success": True, "hasInsufficientFunds": False, "billedSeconds": 0}), 200
+        if call_data.get('status') == 'ended':
+            return jsonify({"success": True, "hasInsufficientFunds": False, "billedSeconds": 0}), 200
+
+        settings = pricing_settings()
+
+        is_video = call_data.get('mode') == 'video'
+        rate_per_min = float(
+            settings['videoCallRatePerMin'] if is_video else settings['voiceCallRatePerMin']
+        )
+        share_percentage = float(settings['creatorSharePercentage'])
+        share_percentage = min(max(share_percentage, 0), 100)
+
+        payer_ref = db_client.collection('users').document(payer_id)
+        receiver_ref = db_client.collection('users').document(receiver_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = call_ref.get(transaction=transaction)
+            current = snap.to_dict() or {}
+
+            # Elapsed time is measured between server-side timestamps, so a
+            # client clock cannot influence the amount.
+            now = datetime.now(timezone.utc)
+
+            # The first tick only starts the clock. Anchoring to createdAt
+            # instead would bill the payer for the time the call spent ringing.
+            last = current.get('lastBilledAt')
+            if last is None:
+                transaction.update(call_ref, {"lastBilledAt": now})
+                return 0.0, None, None, False, 0.0
+
+            last_dt = last if isinstance(last, datetime) else None
+            if last_dt is None:
+                transaction.update(call_ref, {"lastBilledAt": now})
+                return 0.0, None, None, False, 0.0
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+
+            elapsed_seconds = (now - last_dt).total_seconds()
+            if elapsed_seconds <= 0:
+                return 0.0, None, None, False, 0.0
+
+            # Cap a single tick so a long client stall (or a resumed session)
+            # cannot produce a surprise bulk charge.
+            elapsed_seconds = min(elapsed_seconds, MAX_BILLABLE_TICK_SECONDS)
+
+            amount = (rate_per_min / 60.0) * elapsed_seconds
+            payer_snap = payer_ref.get(transaction=transaction)
+            receiver_snap = receiver_ref.get(transaction=transaction)
+            payer_balance = get_coin_balance(payer_snap)
+            receiver_balance = get_coin_balance(receiver_snap)
+
+            actual_deduction = min(payer_balance, amount)
+            has_insufficient = payer_balance < amount
+            receiver_share = actual_deduction * (share_percentage / 100.0)
+
+            payer_new = payer_balance - actual_deduction
+            receiver_new = receiver_balance + receiver_share
+
+            transaction.update(payer_ref, {"coins": payer_new})
+            transaction.update(receiver_ref, {"coins": receiver_new})
+            transaction.update(call_ref, {
+                "lastBilledAt": now,
+                "durationSeconds": float(current.get('durationSeconds') or 0) + elapsed_seconds,
+                "coinsDeducted": float(current.get('coinsDeducted') or 0) + actual_deduction,
+            })
+            return actual_deduction, payer_new, receiver_new, has_insufficient, elapsed_seconds
+
+        billed, payer_new, receiver_new, has_insufficient, elapsed = apply(transaction)
+        return jsonify({
+            "success": True,
+            "hasInsufficientFunds": has_insufficient,
+            "billedAmount": billed,
+            "billedSeconds": elapsed,
+            "payerNewBalance": payer_new,
+            "receiverNewBalance": receiver_new,
+        }), 200
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Billing error: {e}")
+        return jsonify({"error": "Failed to process billing"}), 500
+
+ROOM_COLLECTIONS = {'expert_rooms', 'chill_rooms', 'ludo_rooms'}
+# Share of an audience member's spend that reaches the host; the rest is platform.
+ROOM_HOST_SHARE = 0.70
+
+@app.route('/api/v1/rooms/billing', methods=['POST', 'OPTIONS'])
+def room_billing_endpoint():
+    """Bills a member for time spent in a paid room.
+
+    Same contract as call billing: the client identifies the room, the server
+    measures elapsed time against its own clock and applies the rate stored on
+    the room. Hosts are never charged — they are being paid.
+
+    Rooms previously charged nothing at all: ratePerMin was set by the host,
+    displayed in the UI, and never collected by any code path.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = data.get("roomId")
+    collection_name = data.get("collection", "expert_rooms")
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    if collection_name not in ROOM_COLLECTIONS:
+        return jsonify({"error": "Unknown room collection"}), 400
+
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection(collection_name).document(room_id)
+        room_snap = room_ref.get()
+        if not room_snap.exists:
+            return jsonify({"error": "Unknown room"}), 404
+
+        room = room_snap.to_dict() or {}
+        host_uid = room.get('hostUid')
+        rate_per_min = float(room.get('ratePerMin') or 0)
+
+        # Free room, or the caller is the host being paid rather than charged.
+        if rate_per_min <= 0 or uid == host_uid:
+            return jsonify({"success": True, "billedAmount": 0, "billedSeconds": 0}), 200
+        if room.get('status') == 'closed':
+            return jsonify({"success": True, "billedAmount": 0, "billedSeconds": 0}), 200
+
+        member_ref = room_ref.collection('members').document(uid)
+        if not member_ref.get().exists:
+            return jsonify({"error": "Not a member of this room"}), 403
+
+        payer_ref = db_client.collection('users').document(uid)
+        host_ref = db_client.collection('users').document(host_uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            member_snap = member_ref.get(transaction=transaction)
+            member = member_snap.to_dict() or {}
+
+            now = datetime.now(timezone.utc)
+            last = member.get('lastBilledAt')
+            joined = member.get('joinedAt')
+
+            # First tick only starts the clock, so nobody is charged for the
+            # time between opening the room list and actually joining.
+            if not isinstance(last, datetime):
+                transaction.update(member_ref, {"lastBilledAt": now})
+                return 0.0, None, False, 0.0
+
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+
+            # A crash skips the leave path, so the member document survives with
+            # a stale clock. Rejoining refreshes joinedAt — if that is newer than
+            # the last billing point, the gap is time spent outside the room and
+            # must not be charged.
+            if isinstance(joined, datetime):
+                joined_at = joined if joined.tzinfo else joined.replace(tzinfo=timezone.utc)
+                if joined_at > last:
+                    transaction.update(member_ref, {"lastBilledAt": now})
+                    return 0.0, None, False, 0.0
+
+            elapsed = (now - last).total_seconds()
+            if elapsed <= 0:
+                return 0.0, None, False, 0.0
+            elapsed = min(elapsed, MAX_BILLABLE_TICK_SECONDS)
+
+            # Firestore requires every read in a transaction to happen before
+            # any write, so both balances are fetched up front. Reading the host
+            # after debiting the payer threw on exactly the path that matters —
+            # the first tick that bills a non-zero amount.
+            payer_balance = get_coin_balance(payer_ref.get(transaction=transaction))
+            host_balance = get_coin_balance(host_ref.get(transaction=transaction))
+
+            amount = (rate_per_min / 60.0) * elapsed
+            actual = min(payer_balance, amount)
+            has_insufficient = payer_balance < amount
+            host_cut = actual * ROOM_HOST_SHARE
+
+            transaction.update(payer_ref, {"coins": payer_balance - actual})
+            if host_cut > 0:
+                transaction.update(host_ref, {"coins": host_balance + host_cut})
+            transaction.update(member_ref, {
+                "lastBilledAt": now,
+                "secondsInRoom": float(member.get('secondsInRoom') or 0) + elapsed,
+                "coinsSpent": float(member.get('coinsSpent') or 0) + actual,
+            })
+            return actual, payer_balance - actual, has_insufficient, elapsed
+
+        billed, new_balance, has_insufficient, elapsed = apply(transaction)
+        return jsonify({
+            "success": True,
+            "billedAmount": billed,
+            "billedSeconds": elapsed,
+            "newBalance": new_balance,
+            "hasInsufficientFunds": has_insufficient,
+        }), 200
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[ROOMS] Billing error: {e}")
+        return jsonify({"error": "Failed to process room billing"}), 500
+
+@app.route('/api/v1/coins/call-rewards', methods=['POST', 'OPTIONS'])
+def call_rewards_endpoint():
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    user_id = data.get("userId")
+    if user_id != uid:
+        return jsonify({"error": "Cannot update rewards for another user"}), 403
+    try:
+        seconds_to_add = parse_positive_number(data.get("secondsToAdd"), "secondsToAdd")
+        threshold_minutes = float(data.get("thresholdMinutes") or 0)
+        is_receiver = bool(data.get("isReceiver"))
+        db_client = firestore.client()
+        user_ref = db_client.collection('users').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = user_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("User does not exist")
+            user_data = snap.to_dict() or {}
+            current_seconds = float(user_data.get("unrewardedCallSeconds") or 0) + seconds_to_add
+            hearts = int(user_data.get("hearts") or 0)
+            total_received = float(user_data.get("totalReceivedCallSeconds") or 0)
+            if is_receiver:
+                total_received += seconds_to_add
+            threshold_seconds = threshold_minutes * 60
+            if threshold_seconds > 0 and current_seconds >= threshold_seconds:
+                hearts_to_award = int(current_seconds // threshold_seconds)
+                hearts += hearts_to_award
+                current_seconds = current_seconds % threshold_seconds
+            update_data = {
+                "unrewardedCallSeconds": current_seconds,
+                "hearts": hearts,
+            }
+            if is_receiver:
+                update_data["totalReceivedCallSeconds"] = total_received
+            transaction.update(user_ref, update_data)
+
+        apply(transaction)
+        return jsonify({"ok": True}), 200
+    except (TypeError, ValueError) as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Rewards error: {e}")
+        return jsonify({"error": "Failed to update rewards"}), 500
+
+@app.route('/api/v1/users/profile/get', methods=['POST', 'OPTIONS'])
+def get_user_profile_admin():
+    if request.method == 'OPTIONS':
+        return '', 200
+    authed_uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    try:
+        data = request.json or {}
+        uid = data.get('uid')
+        if not uid:
+            return jsonify({"error": "Missing uid"}), 400
+        if uid != authed_uid:
+            return jsonify({"error": "Cannot read another user's private profile through this endpoint"}), 403
+        db_client = firestore.client()
+        doc_snap = db_client.collection('users').document(uid).get()
+        if doc_snap.exists:
+            return jsonify({"ok": True, "profile": serialize_doc(doc_snap.to_dict())}), 200
+        return jsonify({"ok": True, "profile": None}), 200
+    except Exception as e:
+        print(f"[USER-API] Get profile error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/users/profile/save', methods=['POST', 'OPTIONS'])
+def save_user_profile_admin():
+    if request.method == 'OPTIONS':
+        return '', 200
+    authed_uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    try:
+        data = request.json or {}
+        uid = data.get('uid')
+        profile_data = data.get('profileData', {})
+        if not uid:
+            return jsonify({"error": "Missing uid"}), 400
+        if uid != authed_uid:
+            return jsonify({"error": "Cannot save another user's profile"}), 403
+        for protected_key in ["coins", "hearts", "respectBadges", "password", "passwordHash"]:
+            profile_data.pop(protected_key, None)
+        db_client = firestore.client()
+        # Private contact details are redirected to the owner-only document
+        # rather than the profile, which every signed-in user can read.
+        private_data = {
+            key: profile_data.pop(key)
+            for key in ["phoneNumber", "expoPushToken"]
+            if key in profile_data
+        }
+        if private_data:
+            db_client.collection('user_private').document(uid).set(private_data, merge=True)
+        user_ref = db_client.collection('users').document(uid)
+        doc_snap = user_ref.get()
+        if doc_snap.exists:
+            user_ref.update(profile_data)
+        else:
+            profile_data.update({"uid": uid, "coins": 500, "hearts": 0, "respectBadges": 0, "isOnline": True, "isActiveMode": True, "isSessionActive": True})
+            user_ref.set(profile_data)
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        print(f"[USER-API] Save profile error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/v1/users/online', methods=['POST', 'OPTIONS'])
+def get_online_users_admin():
+    if request.method == 'OPTIONS':
+        return '', 200
+    _, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    try:
+        data = request.json or {}
+        current_uid = data.get('currentUid')
+        vip_only = data.get('vipOnly', False)
+        db_client = firestore.client()
+        query_snap = db_client.collection('users').where('isOnline', '==', True).limit(50).stream()
+        users_list = []
+        now_ms = int(time.time() * 1000)
+        freshness_ms = 5 * 60 * 1000  # 5 minutes threshold
+        for d in query_snap:
+            if current_uid and d.id == current_uid:
+                continue
+            raw_dict = d.to_dict() or {}
+            if raw_dict.get('isDeleted') == True or raw_dict.get('deletedAt'):
+                continue
+            if raw_dict.get('isActiveMode') == False or raw_dict.get('isOnline') == False or raw_dict.get('isSessionActive') == False:
+                continue
+            u_data = serialize_doc(raw_dict)
+            if not u_data.get('nickname') and not u_data.get('username'):
+                continue
+            last_act = u_data.get('lastActive', 0)
+            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms):
+                continue
+            if vip_only and not u_data.get('avatarUrl'):
+                continue
+            u_data['uid'] = d.id
+            u_data['tier'] = 'VIP' if u_data.get('avatarUrl') else 'Advance'
+            users_list.append(u_data)
+        return jsonify({"ok": True, "users": users_list}), 200
+    except Exception as e:
+        print(f"[USER-API] Online users error: {e}")
+        return jsonify({"ok": True, "users": []}), 200
+
+@app.route('/api/v1/users/recent', methods=['POST', 'OPTIONS'])
+def get_recent_users_admin():
+    if request.method == 'OPTIONS':
+        return '', 200
+    _, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    try:
+        data = request.json or {}
+        current_uid = data.get('currentUid')
+        db_client = firestore.client()
+        query_snap = db_client.collection('users').limit(50).stream()
+        users_list = []
+        now_ms = int(time.time() * 1000)
+        freshness_ms = 5 * 60 * 1000
+        for d in query_snap:
+            if current_uid and d.id == current_uid:
+                continue
+            raw_dict = d.to_dict() or {}
+            if raw_dict.get('isDeleted') == True or raw_dict.get('deletedAt'):
+                continue
+            if raw_dict.get('isActiveMode') == False or raw_dict.get('isOnline') == False or raw_dict.get('isSessionActive') == False:
+                continue
+            u_data = serialize_doc(raw_dict)
+            if not u_data.get('nickname') and not u_data.get('username'):
+                continue
+            last_act = u_data.get('lastActive', 0)
+            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms):
+                continue
+            u_data['uid'] = d.id
+            u_data['tier'] = 'VIP' if u_data.get('avatarUrl') else 'Advance'
+            users_list.append(u_data)
+        return jsonify({"ok": True, "users": users_list}), 200
+    except Exception as e:
+        print(f"[USER-API] Recent users error: {e}")
+        return jsonify({"ok": True, "users": []}), 200
+
+# ==========================================
+# CALL SIGNALLING
+# ==========================================
+
+@app.route('/api/v1/calls/notify', methods=['POST', 'OPTIONS'])
+def notify_incoming_call():
+    """Delivers the incoming-call push.
+
+    Runs server-side because the receiver's Expo token is private: the caller
+    must not be able to read other users' push tokens (which also made push
+    spam trivial).
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    receiver_uid = data.get('receiverUid')
+    mode = data.get('mode') if data.get('mode') in ('call', 'video') else 'call'
+    if not receiver_uid:
+        return jsonify({"error": "Missing receiverUid"}), 400
+    if receiver_uid == uid:
+        return jsonify({"ok": True, "delivered": False}), 200
+
+    if rate_limited(f"notify:{uid}", 30, 300):
+        return jsonify({"error": "Too many call notifications"}), 429
+
+    try:
+        db_client = firestore.client()
+
+        # Only notify if there is a live offer this caller actually created.
+        offer_snap = db_client.collection('incoming_calls').document(receiver_uid).get()
+        if not offer_snap.exists or (offer_snap.to_dict() or {}).get('callerUid') != uid:
+            return jsonify({"error": "No active call offer for this receiver"}), 403
+
+        private_snap = db_client.collection('user_private').document(receiver_uid).get()
+        token = (private_snap.to_dict() or {}).get('expoPushToken') if private_snap.exists else None
+        if not token:
+            return jsonify({"ok": True, "delivered": False}), 200
+
+        caller_snap = db_client.collection('users').document(uid).get()
+        caller_data = caller_snap.to_dict() or {}
+        caller_name = caller_data.get('nickname') or caller_data.get('username') or 'Someone'
+        offer = offer_snap.to_dict() or {}
+
+        response = requests.post(
+            'https://exp.host/--/api/v2/push/send',
+            json={
+                "to": token,
+                "title": f"Incoming {'Video' if mode == 'video' else 'Voice'} Call",
+                "body": f"{caller_name} is calling you...",
+                "sound": "default",
+                "priority": "high",
+                "channelId": "calls",
+                "data": {
+                    "roomId": offer.get('roomId'),
+                    "mode": mode,
+                    "callerUid": uid,
+                    "callerName": caller_name,
+                    "isIncomingPending": True,
+                },
+            },
+            timeout=10,
+        )
+        return jsonify({"ok": True, "delivered": response.status_code == 200}), 200
+    except Exception as e:
+        print(f"[CALLS] Notify error: {e}")
+        return jsonify({"error": "Failed to deliver notification"}), 500
+
+# ==========================================
+# CLIENT CONFIG
+# ==========================================
+
+@app.route('/api/v1/rtc/config', methods=['GET'])
+def rtc_config():
+    """Serves the Agora App ID so it is not hardcoded in the client.
+
+    A client-side constant can drift from the AGORA_APP_ID the server signs
+    tokens with, which rejects every token with no useful error.
+    """
+    _, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    if not AGORA_APP_ID:
+        return jsonify({"error": "Agora is not configured"}), 503
+    return jsonify({"agoraAppId": AGORA_APP_ID}), 200
+
+# ==========================================
+# ADMIN
+# ==========================================
+
+DEFAULT_SETTINGS = {
+    "voiceCallRatePerMin": 15,
+    "videoCallRatePerMin": 30,
+    "creatorSharePercentage": 70,
+    "femaleExpertHeartsThreshold": 50,
+    "maleExpertRespectThreshold": 30,
+    "callDurationForHeart": 3,
+    "heartToInrRate": 3,
+    "minRechargeAmount": 49,
+    "inrToCoinRechargeRate": 1.12,
+}
+
+SETTINGS_BOUNDS = {
+    "voiceCallRatePerMin": (0, 10000),
+    "videoCallRatePerMin": (0, 10000),
+    "creatorSharePercentage": (0, 100),
+    "femaleExpertHeartsThreshold": (0, 100000),
+    "maleExpertRespectThreshold": (0, 100000),
+    "callDurationForHeart": (0.1, 1440),
+    "heartToInrRate": (0, 10000),
+    "minRechargeAmount": (1, 100000),
+    "inrToCoinRechargeRate": (0.01, 1000),
+}
+
+@app.route('/api/v1/admin/is-admin', methods=['GET'])
+def is_admin_check():
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    return jsonify({"isAdmin": uid in admin_uids()}), 200
+
+@app.route('/api/v1/admin/settings', methods=['GET', 'POST', 'OPTIONS'])
+def admin_settings():
+    """Global pricing. Firestore rules deny all client writes to /settings, so
+    changes come through here where the admin allowlist is enforced."""
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    _, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+
+    db_client = firestore.client()
+    settings_ref = db_client.collection('settings').document('pricing')
+
+    if request.method == 'GET':
+        snap = settings_ref.get()
+        if not snap.exists:
+            settings_ref.set(DEFAULT_SETTINGS)
+            return jsonify({"ok": True, "settings": DEFAULT_SETTINGS}), 200
+        return jsonify({"ok": True, "settings": serialize_doc(snap.to_dict())}), 200
+
+    data = request.json or {}
+    updates = {}
+    for key, value in (data.get('settings') or {}).items():
+        if key not in SETTINGS_BOUNDS:
+            return jsonify({"error": f"Unknown setting: {key}"}), 400
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return jsonify({"error": f"{key} must be a number"}), 400
+        low, high = SETTINGS_BOUNDS[key]
+        if numeric < low or numeric > high:
+            return jsonify({"error": f"{key} must be between {low} and {high}"}), 400
+        updates[key] = numeric
+
+    if not updates:
+        return jsonify({"error": "No settings provided"}), 400
+
+    settings_ref.set(updates, merge=True)
+    return jsonify({"ok": True, "settings": updates}), 200
+
+# ==========================================
+# COIN PURCHASES
+# ==========================================
+
+PAYMENT_PROVIDER = env_value("PAYMENT_PROVIDER")
+
+RAZORPAY_API = "https://api.razorpay.com/v1"
+COIN_ORDERS = 'coin_orders'
+
+# A single top-up is capped so a typo (or a tampered client) cannot open an
+# order for an amount nobody intends to pay. The floor comes from the
+# admin-editable minRechargeAmount.
+MAX_RECHARGE_INR = 100000
+
+
+def payments_ready():
+    """True when a provider is configured and its secrets are present."""
+    # bool(), not the bare `and` chain — that returns the secret itself, which
+    # is one careless log line away from being written down somewhere.
+    return bool(
+        PAYMENT_PROVIDER == 'razorpay'
+        and env_value("RAZORPAY_KEY_ID")
+        and env_value("RAZORPAY_KEY_SECRET")
+    )
+
+
+def payments_unavailable_response():
+    if not PAYMENT_PROVIDER:
+        return jsonify({
+            "error": "Coin purchases are not available yet.",
+            "code": "payments_not_configured",
+        }), 501
+    if PAYMENT_PROVIDER != 'razorpay':
+        return jsonify({
+            "error": f"Payment verification for '{PAYMENT_PROVIDER}' is not implemented.",
+            "code": "payments_not_implemented",
+        }), 501
+    return jsonify({
+        "error": "Payments are misconfigured on the server.",
+        "code": "payments_not_configured",
+    }), 501
+
+
+def razorpay_auth():
+    return (require_env("RAZORPAY_KEY_ID"), require_env("RAZORPAY_KEY_SECRET"))
+
+
+def pricing_settings():
+    """Global pricing with the built-in defaults as a floor."""
+    snap = firestore.client().collection('settings').document('pricing').get()
+    settings = DEFAULT_SETTINGS.copy()
+    if snap.exists:
+        settings.update(snap.to_dict() or {})
+    return settings
+
+
+def coins_for_inr(amount_inr, settings):
+    """Coin yield for a rupee amount.
+
+    Floors, matching `coinsFor` on the client, so the quoted figure on the
+    store screen is the figure actually credited.
+    """
+    return int(math.floor(float(amount_inr) * float(settings['inrToCoinRechargeRate'])))
+
+
+@app.route('/api/v1/coins/order', methods=['POST', 'OPTIONS'])
+def create_coin_order():
+    """Opens a Razorpay order for a top-up.
+
+    The coin yield is computed here and frozen onto the order document. The
+    client never states how many coins it is buying, and a later change to
+    `inrToCoinRechargeRate` cannot re-price an order that is already open —
+    the buyer gets the rate they were quoted.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    if not payments_ready():
+        return payments_unavailable_response()
+
+    data = request.json or {}
+    settings = pricing_settings()
+
+    try:
+        amount_inr = parse_positive_number(data.get("amountInr"), "amountInr")
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+    minimum = float(settings['minRechargeAmount'])
+    if amount_inr < minimum:
+        return jsonify({"error": f"The minimum recharge amount is {minimum:g} rupees."}), 400
+    if amount_inr > MAX_RECHARGE_INR:
+        return jsonify({"error": f"The maximum recharge amount is {MAX_RECHARGE_INR} rupees."}), 400
+
+    coins = coins_for_inr(amount_inr, settings)
+    if coins <= 0:
+        return jsonify({"error": "That amount does not buy any coins."}), 400
+
+    amount_paise = int(round(amount_inr * 100))
+    package_id = str(data.get("packageId") or 'custom')[:40]
+
+    try:
+        response = requests.post(
+            f"{RAZORPAY_API}/orders",
+            auth=razorpay_auth(),
+            json={
+                "amount": amount_paise,
+                "currency": "INR",
+                "notes": {"uid": uid, "coins": str(coins), "packageId": package_id},
+            },
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        print(f"[COINS] Razorpay order request failed: {e}")
+        return jsonify({"error": "Could not reach the payment provider."}), 502
+
+    if response.status_code >= 300:
+        print(f"[COINS] Razorpay order rejected ({response.status_code}): {response.text}")
+        return jsonify({"error": "The payment provider rejected this order."}), 502
+
+    order_id = (response.json() or {}).get("id")
+    if not order_id:
+        return jsonify({"error": "The payment provider returned no order id."}), 502
+
+    firestore.client().collection(COIN_ORDERS).document(order_id).set({
+        "uid": uid,
+        "amountInr": amount_inr,
+        "amountPaise": amount_paise,
+        "coins": coins,
+        "packageId": package_id,
+        "status": "created",
+        "createdAt": firestore.SERVER_TIMESTAMP,
+    })
+
+    base_url = env_value("PUBLIC_BASE_URL").rstrip('/')
+    return jsonify({
+        "ok": True,
+        "orderId": order_id,
+        "amountInr": amount_inr,
+        "coins": coins,
+        "checkoutUrl": f"{base_url}/pay/razorpay/{order_id}",
+    }), 200
+
+
+@app.route('/api/v1/coins/purchase', methods=['POST', 'OPTIONS'])
+def purchase_coins():
+    """Credits coins for a payment that Razorpay confirms it captured.
+
+    Three independent checks stand between a request and a coin balance, and
+    all three are needed:
+
+      * the HMAC signature proves the ids came from Razorpay's checkout and
+        were not typed by hand;
+      * fetching the payment proves money actually moved — a signature only
+        covers the fields, not the capture;
+      * the order document, flipped to `paid` inside the same transaction that
+        credits the balance, means a replayed receipt credits nothing.
+
+    The client sends no amount and no coin count; both come from the order
+    opened earlier by `create_coin_order`.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    if not payments_ready():
+        return payments_unavailable_response()
+
+    data = request.json or {}
+    order_id = data.get("razorpay_order_id")
+    payment_id = data.get("razorpay_payment_id")
+    signature = data.get("razorpay_signature")
+    if not order_id or not payment_id or not signature:
+        return jsonify({"error": "Missing payment confirmation fields"}), 400
+
+    secret = require_env("RAZORPAY_KEY_SECRET")
+    expected = hmac.new(
+        secret.encode("utf-8"),
+        f"{order_id}|{payment_id}".encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(expected, str(signature)):
+        print(f"[COINS] Rejected purchase with a bad signature for order {order_id}")
+        return jsonify({"error": "This payment could not be verified."}), 400
+
+    try:
+        response = requests.get(
+            f"{RAZORPAY_API}/payments/{payment_id}",
+            auth=razorpay_auth(),
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        print(f"[COINS] Razorpay payment lookup failed: {e}")
+        return jsonify({"error": "Could not reach the payment provider."}), 502
+
+    if response.status_code >= 300:
+        print(f"[COINS] Razorpay payment lookup rejected ({response.status_code}): {response.text}")
+        return jsonify({"error": "The payment provider could not confirm this payment."}), 502
+
+    payment = response.json() or {}
+    if payment.get("order_id") != order_id:
+        return jsonify({"error": "This payment belongs to a different order."}), 400
+    if payment.get("status") != "captured":
+        # Authorized-but-uncaptured money has not settled; crediting here would
+        # hand out coins for a charge that can still fall through.
+        return jsonify({"error": "This payment has not completed yet."}), 400
+
+    try:
+        db_client = firestore.client()
+        order_ref = db_client.collection(COIN_ORDERS).document(order_id)
+        user_ref = db_client.collection('users').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def credit(transaction):
+            order_snap = order_ref.get(transaction=transaction)
+            if not order_snap.exists:
+                raise ValueError("Unknown order")
+            order = order_snap.to_dict() or {}
+            if order.get("uid") != uid:
+                raise ValueError("This order belongs to another account")
+
+            user_snap = user_ref.get(transaction=transaction)
+            balance = get_coin_balance(user_snap)
+
+            if order.get("status") == "paid":
+                # A retried confirmation, most likely the app resending after a
+                # dropped response. Report the balance without crediting twice.
+                if order.get("paymentId") == payment_id:
+                    return balance, 0
+                raise ValueError("This order has already been paid")
+            if order.get("status") != "created":
+                raise ValueError("This order is no longer open")
+
+            if int(payment.get("amount") or 0) != int(order.get("amountPaise") or 0):
+                raise ValueError("The payment amount does not match the order")
+
+            coins = int(order.get("coins") or 0)
+            new_balance = balance + coins
+            transaction.update(user_ref, {"coins": new_balance})
+            transaction.update(order_ref, {
+                "status": "paid",
+                "paymentId": payment_id,
+                "paidAt": firestore.SERVER_TIMESTAMP,
+            })
+            return new_balance, coins
+
+        new_balance, credited = credit(transaction)
+        return jsonify({"ok": True, "newBalance": new_balance, "coinsCredited": credited}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Purchase credit error for order {order_id}: {e}")
+        return jsonify({"error": "Could not add the coins to your balance."}), 500
+
+
+# The app opens this in a WebView rather than bundling a payments SDK, so the
+# checkout runs on Razorpay's own script and no card details pass through our
+# code. The result is handed back to the app over postMessage, and is only
+# ever a set of ids — the balance changes when /coins/purchase verifies them.
+RAZORPAY_CHECKOUT_PAGE = """<!doctype html>
+<html>
+<head><meta name="viewport" content="width=device-width, initial-scale=1" /></head>
+<body style="margin:0;background:#2E0138">
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<script>
+  var post = function (payload) {
+    if (window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+    }
+  };
+  var rzp = new Razorpay({
+    key: __KEY_ID__,
+    order_id: __ORDER_ID__,
+    amount: __AMOUNT_PAISE__,
+    currency: 'INR',
+    name: 'GenGal',
+    description: __DESCRIPTION__,
+    theme: { color: '#2E0138' },
+    handler: function (res) {
+      post({
+        type: 'success',
+        razorpay_order_id: res.razorpay_order_id,
+        razorpay_payment_id: res.razorpay_payment_id,
+        razorpay_signature: res.razorpay_signature
+      });
+    },
+    modal: { ondismiss: function () { post({ type: 'dismissed' }); } }
+  });
+  rzp.on('payment.failed', function (res) {
+    post({ type: 'failed', message: (res.error && res.error.description) || 'Payment failed' });
+  });
+  rzp.open();
+</script>
+</body>
+</html>"""
+
+
+@app.route('/pay/razorpay/<order_id>', methods=['GET'])
+def razorpay_checkout_page(order_id):
+    """Serves the checkout for one open order.
+
+    Nothing about the buyer is rendered here — the page carries only the order
+    id, the amount and the public key, so loading it without having opened the
+    order reveals nothing and still requires paying.
+    """
+    if not payments_ready():
+        return "Payments are not available.", 501
+
+    snap = firestore.client().collection(COIN_ORDERS).document(order_id).get()
+    if not snap.exists:
+        return "Unknown order.", 404
+    order = snap.to_dict() or {}
+    if order.get("status") != "created":
+        return "This order is no longer open.", 409
+
+    coins = int(order.get("coins") or 0)
+    page = (
+        RAZORPAY_CHECKOUT_PAGE
+        .replace("__KEY_ID__", json.dumps(env_value("RAZORPAY_KEY_ID")))
+        .replace("__ORDER_ID__", json.dumps(order_id))
+        .replace("__AMOUNT_PAISE__", json.dumps(int(order.get("amountPaise") or 0)))
+        .replace("__DESCRIPTION__", json.dumps(f"{coins} coins"))
+    )
+    return page, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+def assert_safe_production_config():
+    """Refuse to serve production traffic with a development escape hatch on.
+
+    Each of these is fine locally and catastrophic in production:
+      * ALLOW_DEV_OTP_BYPASS lets anyone sign in as any phone number with 000000.
+      * ALLOW_LEGACY_PLAINTEXT_LOGIN compares passwords without hashing.
+      * FLASK_DEBUG serves the Werkzeug console, which is remote code execution.
+
+    Leaving one of these set is a config mistake, not a code mistake, so it has
+    to fail loudly at boot rather than quietly weaken auth.
+    """
+    if os.environ.get("APP_ENV", "").lower() not in ("production", "prod"):
+        return
+
+    unsafe = [
+        name for name in (
+            "ALLOW_DEV_OTP_BYPASS",
+            "ALLOW_LEGACY_PLAINTEXT_LOGIN",
+            "FLASK_DEBUG",
+        )
+        if os.environ.get(name) == "true"
+    ]
+    if unsafe:
+        raise RuntimeError(
+            "Refusing to start in production with development flags enabled: "
+            + ", ".join(unsafe)
+            + ". Set them to false."
+        )
+
+
+# Runs on import too, so a WSGI server (gunicorn/waitress) gets the same check
+# as the dev entrypoint below.
+assert_safe_production_config()
+
+if __name__ == '__main__':
+    # Debug mode exposes the Werkzeug interactive debugger, so it must be opted
+    # into explicitly and never left on for a publicly reachable server.
+    debug_enabled = os.environ.get("FLASK_DEBUG") == "true"
+    host = os.environ.get("BIND_HOST", "127.0.0.1")
+    port = int(os.environ.get("PORT", "5000"))
+    if os.environ.get("APP_ENV", "").lower() in ("production", "prod"):
+        raise RuntimeError(
+            "app.run() is the Werkzeug development server and must not serve "
+            "production traffic. Run under a WSGI server, e.g. "
+            "`waitress-serve --port=%s app:app`." % port
+        )
+    app.run(host=host, port=port, debug=debug_enabled)

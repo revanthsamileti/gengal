@@ -1,6 +1,7 @@
 import React from 'react';
-import { View, StyleSheet, SafeAreaView, Platform } from 'react-native';
+import { View, StyleSheet, Platform } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, gradients } from '../theme/colors';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 
@@ -9,7 +10,6 @@ type ScreenShellProps = {
   tone?: 'dark' | 'light';
 };
 
-import Svg, { Path } from 'react-native-svg';
 
 export default function ScreenShell({ children, tone = 'dark' }: ScreenShellProps) {
   if (tone === 'light') {
@@ -50,7 +50,6 @@ const styles = StyleSheet.create({
     flex: 1, 
     backgroundColor: colors.background,
     width: '100%',
-    maxWidth: Platform.OS === 'web' ? 480 : undefined,
     alignSelf: 'center',
     boxShadow: Platform.OS === 'web' ? '0px 0px 20px rgba(0,0,0,0.1)' : undefined,
   },

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Platform, Image,
   ScrollView,
   StyleSheet,
@@ -11,9 +11,14 @@ import ScreenShell from '../components/ScreenShell';
 import { useUser } from '../context/UserContext';
 import GengalAvatar from '../components/GengalAvatar';
 import { skeuo } from '../theme/skeuomorphic';
+import { Alert } from '../components/CustomAlert';
+import { useActionLock } from '../hooks/useActionLock';
+import { saveLanguagePreference, getStoredLanguagePreference } from '../services/languageService';
+import { tap40 } from '../theme/touch';
 
 type LanguageScreenProps = {
   navigate: (screen: string, params?: any) => void;
+  goBack?: () => void;
   route?: any;
 };
 
@@ -29,9 +34,40 @@ const LANGUAGES = [
 export default function LanguageScreen({ navigate, route }: LanguageScreenProps) {
   const { profile: myProfile } = useUser();
   const [selectedLang, setSelectedLang] = useState('en');
-  
+  const { locked: saving, run: runSave } = useActionLock();
+
   const isEditMode = route?.params?.isEditMode || false;
   const returnTo = route?.params?.returnTo || 'Settings';
+
+  // Preselect what the user already chose instead of always defaulting to
+  // English. The profile wins once loaded; the local copy covers onboarding,
+  // where there is no account yet.
+  useEffect(() => {
+    let active = true;
+    if (myProfile?.language) {
+      setSelectedLang(myProfile.language);
+      return;
+    }
+    getStoredLanguagePreference().then((stored) => {
+      if (active && stored) setSelectedLang(stored);
+    });
+    return () => { active = false; };
+  }, [myProfile?.language]);
+
+  const handleSave = () =>
+    runSave(async () => {
+      try {
+        await saveLanguagePreference(selectedLang);
+      } catch (e: any) {
+        Alert.alert(
+          'Could not save',
+          e?.message || 'Your language preference was not saved. Please try again.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+      navigate(isEditMode ? returnTo : 'Phone');
+    });
 
   return (
     <ScreenShell tone="light">
@@ -41,9 +77,12 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
           {isEditMode ? (
             <TouchableOpacity
               style={styles.backButton}
+              hitSlop={tap40}
               activeOpacity={0.78}
               onPress={() => navigate(returnTo)}
-            >
+            
+              accessibilityRole="button"
+              accessibilityLabel="Go back">
               <MaterialIcons name="arrow-back" size={22} color="#5A075F" />
             </TouchableOpacity>
           ) : (
@@ -57,7 +96,9 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
               style={styles.avatarShadow}
               activeOpacity={0.85}
               onPress={() => navigate('Profile')}
-            >
+            
+              accessibilityRole="button"
+              accessibilityLabel="Open your profile">
               {myProfile?.avatarData ? (
                 <GengalAvatar data={myProfile.avatarData as any} size={36} />
               ) : (
@@ -96,6 +137,9 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
                     isSelected && styles.langCardSelected,
                   ]}
                   onPress={() => setSelectedLang(lang.id)}
+                  accessibilityRole="radio"
+                  accessibilityLabel={`${lang.name}, ${lang.sub}`}
+                  accessibilityState={{ selected: isSelected, checked: isSelected }}
                 >
                   <View>
                     <Text style={[styles.langName, isSelected && styles.langNameSelected]}>
@@ -113,20 +157,23 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
         </ScrollView>
 
         <View style={styles.footer}>
-          <TouchableOpacity activeOpacity={0.85} onPress={() => {
-            if (isEditMode) {
-              navigate(returnTo);
-            } else {
-              navigate('Phone');
-            }
-          }}>
+          <TouchableOpacity
+            activeOpacity={0.85}
+            onPress={handleSave}
+            disabled={saving}
+            accessibilityRole="button"
+            accessibilityLabel="Save language preference"
+            accessibilityState={{ disabled: saving }}
+          >
             <LinearGradient
               colors={['#FDE68A', '#EAB308', '#CA8A04']}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
-              style={styles.saveButton}
+              style={[styles.saveButton, saving && { opacity: 0.6 }]}
             >
-              <Text style={styles.saveButtonText}>SAVE PREFERENCES</Text>
+              <Text style={styles.saveButtonText}>
+                {saving ? 'SAVING…' : 'SAVE PREFERENCES'}
+              </Text>
             </LinearGradient>
           </TouchableOpacity>
         </View>

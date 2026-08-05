@@ -6,26 +6,25 @@ import { Platform, View,
   TouchableOpacity,
   Image,
   useWindowDimensions,
-  ActivityIndicator,
   Animated,
-  Alert } from 'react-native';
+  ActivityIndicator,
+  Easing } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
+import { useActionLock } from '../hooks/useActionLock';
 import BottomNav from '../components/BottomNav';
 import TopBar from '../components/TopBar';
 import GengalAvatar from '../components/GengalAvatar';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 
 import { subscribeToOnlineUsers, UserProfile as FirebaseUser } from '../services/userService';
-import { findMatch } from '../services/matchService';
 import { auth } from '../config/firebase';
 import CallPriceTag from '../components/CallPriceTag';
-import { useUser } from '../context/UserContext';
-import ConnectingOverlay from '../components/ConnectingOverlay';
 
 type HomeScreenProps = {
   navigate: (screen: string, params?: any) => void;
+  goBack?: () => void;
 };
 
 function ModeButton({
@@ -38,14 +37,20 @@ function ModeButton({
   navigate: HomeScreenProps['navigate'];
 }) {
   const isVideo = mode === 'video';
+  const { locked, run } = useActionLock();
 
   return (
     <TouchableOpacity
       activeOpacity={0.82}
-      style={[styles.modeButton, isVideo && styles.modeButtonVideo]}
-      onPress={() => {
-        navigate('Call', { profileName: profile.name, mode, isCaller: true, matchData: profile });
-      }}
+      style={[styles.modeButton, isVideo && styles.modeButtonVideo, locked && { opacity: 0.5 }]}
+      disabled={locked}
+      accessibilityRole="button"
+      accessibilityLabel={isVideo ? `Video call ${profile.name}` : `Call ${profile.name}`}
+      onPress={() =>
+        run(() => {
+          navigate('Call', { profileName: profile.name, mode, isCaller: true, matchData: profile });
+        })
+      }
     >
       <MaterialIcons
         name={isVideo ? 'videocam' : 'phone'}
@@ -57,6 +62,51 @@ function ModeButton({
       </Text>
       <CallPriceTag mode={mode} />
     </TouchableOpacity>
+  );
+}
+
+const HEART_LEFTS = [26, 78, 148, 214, 268];
+const HEART_SIZES = [11, 15, 9, 17, 12];
+
+function DriftingHeart({ index }: { index: number }) {
+  const drift = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    // Staggered via setTimeout rather than an Animated.delay inside the loop:
+    // the native driver does not reliably restart a looped sequence that leads
+    // with a delay, so each heart would fade out once and never come back.
+    const loop = Animated.loop(
+      Animated.timing(drift, {
+        toValue: 1,
+        duration: 6200,
+        easing: Easing.inOut(Easing.quad),
+        useNativeDriver: true,
+      })
+    );
+    const timer = setTimeout(() => loop.start(), index * 1400);
+    return () => {
+      clearTimeout(timer);
+      loop.stop();
+    };
+  }, [drift, index]);
+
+  const translateY = drift.interpolate({ inputRange: [0, 1], outputRange: [26, -104] });
+  const opacity = drift.interpolate({ inputRange: [0, 0.18, 0.72, 1], outputRange: [0, 0.5, 0.32, 0] });
+  const scale = drift.interpolate({ inputRange: [0, 1], outputRange: [0.65, 1.15] });
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={{
+        position: 'absolute',
+        bottom: 96,
+        left: HEART_LEFTS[index % HEART_LEFTS.length],
+        opacity,
+        transform: [{ translateY }, { scale }],
+      }}
+    >
+      <MaterialIcons name="favorite" size={HEART_SIZES[index % HEART_SIZES.length]} color="#E48AAE" />
+    </Animated.View>
   );
 }
 
@@ -93,41 +143,16 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
   const isSmall = height < 850;
 
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
-  const { profile: myProfile } = useUser();
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchCleanup, setSearchCleanup] = useState<(() => void) | null>(null);
   const [vipOnly, setVipOnly] = useState(false);
-
-  const handleExploreMatches = async () => {
-    if (!myProfile) {
-      Alert.alert('Profile not loaded', 'Please wait for your profile to load.');
-      return;
-    }
-
-    if (isSearching) {
-      if (searchCleanup) searchCleanup();
-      setIsSearching(false);
-      setSearchCleanup(null);
-      return;
-    }
-
-    setIsSearching(true);
-    try {
-      const cleanup = await findMatch(myProfile, (roomId, matchData) => {
-        setIsSearching(false);
-        setSearchCleanup(null);
-        navigate('Match', { profileName: matchData.nickname, matchData, roomId } as any);
-      });
-      setSearchCleanup(() => cleanup);
-    } catch (e) {
-      Alert.alert('Error', 'Could not start matchmaking.');
-      setIsSearching(false);
-    }
-  };
+  // Distinguishes "no one is online" from "we haven't heard back yet" — the
+  // empty state used to paint on first frame, before Firestore had answered.
+  const [hasLoaded, setHasLoaded] = useState(false);
 
   useEffect(() => {
+    setHasLoaded(false);
     const unsubscribe = subscribeToOnlineUsers((users) => {
       setFirebaseUsers(users);
+      setHasLoaded(true);
     }, auth.currentUser?.uid, vipOnly);
 
     return () => {
@@ -139,10 +164,12 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
   const displayProfiles = firebaseUsers.map(u => ({
     uid: u.uid,
     name: u.nickname || u.username || 'User',
-    age: (typeof u.age === 'number' ? u.age : parseInt(u.age || '20', 10)),
-    uri: u.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
+    // Age is shown only when the user actually gave one — the old `|| '20'`
+    // fallback printed a made-up age next to every incomplete profile.
+    age: (typeof u.age === 'number' ? u.age : (u.age ? parseInt(u.age, 10) : undefined)),
+    uri: u.avatarUrl || '',
     avatarData: u.avatarData,
-    tier: u.avatarUrl ? 'VIP' : 'Elite',
+    tier: u.tier,
     lang: u.language || 'EN',
     modes: ['call', 'video'] as Array<'call' | 'video'>,
     followers: Array.isArray(u.followers) ? u.followers.length.toString() : (u.followers?.toString() || '0'),
@@ -153,16 +180,6 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
-        {isSearching && (
-          <ConnectingOverlay 
-            mode="random" 
-            onCancel={() => {
-              if (searchCleanup) searchCleanup();
-              setIsSearching(false);
-              setSearchCleanup(null);
-            }} 
-          />
-        )}
         <TopBar navigate={navigate} />
 
         <ScrollView
@@ -176,16 +193,21 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
             onPress={() => navigate('Personal')}
           >
             <LinearGradient
-              colors={[...skeuoGradients.raised]}
+              colors={[...skeuoGradients.romanticHero]}
               start={{ x: 0, y: 0 }}
               end={{ x: 1, y: 1 }}
               style={[styles.hero, isSmall && styles.heroSmall]}
             >
               <View style={styles.heroWash} />
-              <View style={[styles.heroMoon, isSmall && styles.heroMoonSmall]} />
+              <View style={styles.heroBlush} />
+              {[0, 1, 2, 3, 4].map(i => <DriftingHeart key={i} index={i} />)}
 
-              <View style={[styles.heartOrb, isSmall && styles.heartOrbSmall]}>
-                <MaterialIcons name="favorite" size={34} color="#4A0049" />
+              <View style={styles.heroTop}>
+                <View style={[styles.heartOrb, isSmall && styles.heartOrbSmall]}>
+                  <View style={styles.heartOrbInner}>
+                    <MaterialIcons name="favorite" size={isSmall ? 26 : 30} color="#C2477E" />
+                  </View>
+                </View>
               </View>
 
               <View style={[styles.heroCopy, isSmall && styles.heroCopySmall]}>
@@ -196,26 +218,39 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
                   </View>
                 </View>
                 <Text style={styles.heroSub}>
-                  Find your perfect match in curated, high-value environment
+                  Somewhere out there, someone is hoping to meet you tonight.
                 </Text>
               </View>
 
-              <TouchableOpacity 
-                style={[styles.heroButton, isSmall && styles.heroButtonSmall, isSearching && { opacity: 0.8 }]} 
-                activeOpacity={0.8}
-                onPress={handleExploreMatches}
+              {/* Opens the Connect tab to browse people rather than starting a
+                  random paid call straight from the home screen. Random
+                  matchmaking still lives in Connect behind its own button. */}
+              <TouchableOpacity
+                style={[styles.heroButtonShell, isSmall && styles.heroButtonShellSmall]}
+                activeOpacity={0.85}
+                onPress={() => navigate('Personal')}
+                accessibilityRole="button"
+                accessibilityLabel="Explore matches, opens Connect"
               >
-                {isSearching ? (
-                  <ActivityIndicator color="#FFF7F2" size="small" style={{ marginRight: 8 }} />
-                ) : null}
-                <Text style={styles.heroButtonText}>{isSearching ? 'Cancel Search...' : 'Explore Matches'}</Text>
-                {!isSearching && <MaterialIcons name="arrow-forward" size={14} color="#FFF7F2" />}
+                <LinearGradient
+                  colors={[...skeuoGradients.romanticButton]}
+                  start={{ x: 0, y: 0 }}
+                  end={{ x: 1, y: 1 }}
+                  style={styles.heroButton}
+                >
+                  <MaterialIcons name="favorite" size={14} color="#F7C9DC" />
+                  <Text style={styles.heroButtonText}>Explore Matches</Text>
+                  <MaterialIcons name="arrow-forward" size={14} color="#FFF7F2" />
+                </LinearGradient>
               </TouchableOpacity>
             </LinearGradient>
           </TouchableOpacity>
 
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Online Now</Text>
+            <View style={styles.sectionTitleWrap}>
+              <MaterialIcons name="favorite" size={11} color="#D98BAE" />
+              <Text style={styles.sectionTitle}>Online Now</Text>
+            </View>
             <View style={styles.filterRow}>
               <TouchableOpacity
                 activeOpacity={0.75}
@@ -238,6 +273,22 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
             </TouchableOpacity>
           </View>
 
+          {!hasLoaded ? (
+            <View style={styles.emptyHearts}>
+              <ActivityIndicator color="#D98BAE" />
+              <Text style={styles.emptyText}>Looking for people online…</Text>
+            </View>
+          ) : displayProfiles.length === 0 ? (
+            <View style={styles.emptyHearts}>
+              <View style={styles.emptyHeartOrb}>
+                <MaterialIcons name="favorite-border" size={26} color="#D98BAE" />
+              </View>
+              <Text style={styles.emptyTitle}>Nobody's here just yet</Text>
+              <Text style={styles.emptyText}>
+                New hearts come online all evening. Start a private connect and we'll find someone for you.
+              </Text>
+            </View>
+          ) : (
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
@@ -256,7 +307,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
                     }}
                   >
                     <LinearGradient
-                      colors={['#F8EFCB', '#B89628', '#FFF8DB']}
+                      colors={[...skeuoGradients.blushRing]}
                       start={{ x: 0.1, y: 0 }}
                       end={{ x: 0.9, y: 1 }}
                       style={styles.profileRing}
@@ -264,8 +315,12 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
                       <View style={styles.profilePhotoWrap}>
                         {profile.avatarData ? (
                           <GengalAvatar data={profile.avatarData as any} size={70} />
-                        ) : (
+                        ) : profile.uri ? (
                           <Image source={{ uri: profile.uri }} style={styles.profilePhoto} />
+                        ) : (
+                          <View style={[styles.profilePhoto, styles.profilePhotoEmpty]}>
+                            <MaterialIcons name="person" size={34} color="#C9BDB2" />
+                          </View>
                         )}
                         <LinearGradient
                           colors={['transparent', 'rgba(50, 16, 36, 0.28)']}
@@ -274,11 +329,15 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
                         <View style={styles.onlineDot} />
                       </View>
                     </LinearGradient>
-                    <View style={styles.tierPill}>
-                      <MaterialIcons name="diamond" size={7} color="#B68D1C" />
-                      <Text style={styles.tierText}>{profile.tier}</Text>
-                    </View>
-                    <Text style={styles.profileName}>{profile.name}, {profile.age}</Text>
+                    {profile.tier === 'VIP' ? (
+                      <View style={styles.tierPill}>
+                        <MaterialIcons name="diamond" size={7} color="#B68D1C" />
+                        <Text style={styles.tierText}>VIP</Text>
+                      </View>
+                    ) : null}
+                    <Text style={styles.profileName}>
+                      {profile.age ? `${profile.name}, ${profile.age}` : profile.name}
+                    </Text>
                     <View style={styles.langRow}>
                       <MaterialIcons name="language" size={8} color="#B88A2E" />
                       <Text style={styles.profileLang}>{profile.lang}</Text>
@@ -293,6 +352,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
               </AnimatedProfileCard>
             ))}
           </ScrollView>
+          )}
 
           <View style={styles.tileGrid}>
             <TouchableOpacity style={[styles.tile, isSmall && styles.tileSmall]} activeOpacity={0.9} onPress={() => navigate('Club')}>
@@ -328,43 +388,6 @@ const styles = StyleSheet.create({
     maxWidth: 430,
     backgroundColor: 'transparent',
   },
-  header: {
-    height: 72,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    backgroundColor: '#FFFDF8',
-    borderBottomWidth: 1,
-    borderBottomColor: '#EFE3D2',
-  },
-  avatarShadow: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    padding: 3,
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#DFC260',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  avatar: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 18,
-  },
-  centerTitle: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 8,
-  },
-  brand: {
-    color: '#5A155A',
-    fontFamily: 'serif',
-    fontSize: 28,
-    fontWeight: '900',
-  },
   scroll: {
     paddingHorizontal: 26,
     paddingTop: 20,
@@ -376,66 +399,81 @@ const styles = StyleSheet.create({
   heroShell: {
     borderRadius: 24,
     borderWidth: 1,
-    borderColor: '#EAD8A9',
+    borderColor: '#F0D3DE',
     backgroundColor: '#FFFDF8',
-    boxShadow: Platform.OS === 'web' ? skeuo.deepShadow : undefined,
+    boxShadow: Platform.OS === 'web' ? '0 16px 34px rgba(140, 45, 95, 0.16)' : undefined,
+    shadowColor: '#8C2D5F',
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.16,
+    shadowRadius: 24,
+    elevation: 8,
     marginBottom: 28,
   },
   heroShellSmall: {
     marginBottom: 18,
   },
   hero: {
-    minHeight: 310,
+    minHeight: 320,
     borderRadius: 23,
     overflow: 'hidden',
     paddingHorizontal: 24,
-    paddingTop: 52,
+    paddingTop: 30,
     paddingBottom: 22,
     justifyContent: 'flex-end',
   },
   heroSmall: {
-    minHeight: 240,
-    paddingTop: 36,
+    minHeight: 262,
+    paddingTop: 22,
   },
   heroWash: {
     position: 'absolute',
-    top: -10,
-    right: -18,
-    width: 230,
-    height: 226,
-    borderRadius: 115,
-    backgroundColor: '#E9E0E2',
+    top: -46,
+    right: -40,
+    width: 240,
+    height: 240,
+    borderRadius: 120,
+    backgroundColor: 'rgba(255, 255, 255, 0.55)',
   },
-  heroMoon: {
+  heroBlush: {
     position: 'absolute',
-    top: 60,
-    left: '50%',
-    width: 112,
-    height: 112,
-    marginLeft: -56,
-    borderRadius: 56,
-    backgroundColor: '#FDF7E8',
+    bottom: -70,
+    left: -50,
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: 'rgba(226, 138, 178, 0.16)',
   },
-  heroMoonSmall: {
-    top: 40,
+  heroTop: {
+    alignItems: 'center',
+    marginBottom: 20,
   },
   heartOrb: {
-    position: 'absolute',
-    top: 93,
-    left: '50%',
-    width: 62,
-    height: 62,
-    marginLeft: -31,
-    borderRadius: 31,
+    width: 76,
+    height: 76,
+    borderRadius: 38,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFF9EA',
+    backgroundColor: 'rgba(255, 255, 255, 0.62)',
     borderWidth: 1,
-    borderColor: '#FFFFFF',
-    boxShadow: Platform.OS === 'web' ? '0 2px 4px rgba(0,0,0,0.1)' : undefined,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
   },
   heartOrbSmall: {
-    top: 70,
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+  },
+  heartOrbInner: {
+    width: '76%',
+    height: '76%',
+    borderRadius: 999,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    shadowColor: '#C2477E',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    elevation: 5,
   },
   heroCopy: {
     gap: 9,
@@ -452,8 +490,9 @@ const styles = StyleSheet.create({
   heroTitle: {
     color: '#5B1A62',
     fontFamily: 'serif',
-    fontSize: 19,
+    fontSize: 21,
     fontWeight: '700',
+    letterSpacing: 0.2,
   },
   premiumBadge: {
     paddingHorizontal: 7,
@@ -467,26 +506,33 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   heroSub: {
-    color: '#8F8491',
+    color: '#8A6B7E',
     fontSize: 13,
     lineHeight: 20,
-    maxWidth: 260,
+    maxWidth: 268,
     fontWeight: '600',
+    fontStyle: 'italic',
+  },
+  heroButtonShell: {
+    height: 52,
+    borderRadius: 26,
+    overflow: 'hidden',
+    shadowColor: '#4B0054',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    elevation: 7,
+  },
+  heroButtonShellSmall: {
+    height: 48,
   },
   heroButton: {
-    height: 52,
-    borderRadius: 10,
+    flex: 1,
+    borderRadius: 26,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
-    backgroundColor: '#4B0054',
-    borderWidth: 1,
-    borderColor: '#7B2B82',
-    boxShadow: Platform.OS === 'web' ? '0 9px 16px rgba(75, 0, 84, 0.28)' : undefined,
-  },
-  heroButtonSmall: {
-    height: 48,
   },
   heroButtonText: {
     color: '#FFF7F2',
@@ -526,6 +572,11 @@ const styles = StyleSheet.create({
   filterPillTextActive: {
     color: '#8A6715',
   },
+  sectionTitleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
   sectionTitle: {
     color: '#5C3B23',
     fontFamily: 'serif',
@@ -533,9 +584,45 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   viewAll: {
-    color: '#B78F22',
+    color: '#C2477E',
     fontSize: 12,
     fontWeight: '800',
+  },
+  emptyHearts: {
+    alignItems: 'center',
+    paddingVertical: 30,
+    paddingHorizontal: 26,
+    marginBottom: 32,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 246, 249, 0.75)',
+    borderWidth: 1,
+    borderColor: '#F5DFE7',
+  },
+  emptyHeartOrb: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#F7E0E9',
+    marginBottom: 12,
+  },
+  emptyTitle: {
+    color: '#7A256D',
+    fontFamily: 'serif',
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 6,
+  },
+  emptyText: {
+    color: '#A98D9C',
+    fontSize: 12,
+    lineHeight: 18,
+    fontWeight: '600',
+    textAlign: 'center',
+    maxWidth: 250,
   },
   profileScroller: {
     marginHorizontal: -26,
@@ -561,7 +648,12 @@ const styles = StyleSheet.create({
     borderRadius: 39,
     padding: 3,
     marginBottom: 5,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    boxShadow: Platform.OS === 'web' ? '0 8px 18px rgba(180, 90, 130, 0.22)' : undefined,
+    shadowColor: '#B45A82',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 4,
   },
   profilePhotoWrap: {
     flex: 1,
@@ -574,6 +666,11 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
     borderRadius: 34,
+  },
+  profilePhotoEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F2ECE4',
   },
   profileVignette: {
     ...StyleSheet.absoluteFill,
@@ -599,15 +696,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 3,
-    backgroundColor: '#FFF8DD',
+    backgroundColor: '#FFF4F8',
     borderWidth: 1,
-    borderColor: '#E9D383',
+    borderColor: '#F0C9DA',
     marginTop: -13,
     marginBottom: 5,
-    boxShadow: Platform.OS === 'web' ? '0 4px 8px rgba(96, 65, 20, 0.12)' : undefined,
+    boxShadow: Platform.OS === 'web' ? '0 4px 8px rgba(150, 70, 110, 0.14)' : undefined,
   },
   tierText: {
-    color: '#8F6920',
+    color: '#A34C7B',
     fontSize: 7,
     fontWeight: '900',
     textTransform: 'uppercase',
@@ -644,12 +741,21 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    backgroundColor: '#7A256D',
+    backgroundColor: '#8E2A6B',
     borderWidth: 1,
-    borderColor: '#7A256D',
-    boxShadow: Platform.OS === 'web' ? '0 6px 12px rgba(122, 37, 109, 0.3)' : undefined,
+    borderColor: '#A63C80',
+    boxShadow: Platform.OS === 'web' ? '0 6px 12px rgba(142, 42, 107, 0.3)' : undefined,
+    shadowColor: '#8E2A6B',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.28,
+    shadowRadius: 8,
+    elevation: 3,
   },
-  modeButtonVideo: {},
+  modeButtonVideo: {
+    backgroundColor: '#C2477E',
+    borderColor: '#D96297',
+    shadowColor: '#C2477E',
+  },
   modeText: {
     color: '#FFFFFF',
     fontSize: 9,
@@ -663,14 +769,19 @@ const styles = StyleSheet.create({
   tile: {
     flex: 1,
     minHeight: 172,
-    borderRadius: 14,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
     backgroundColor: '#FFFDF8',
     borderWidth: 1,
-    borderColor: '#FFFFFF',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    borderColor: '#F7E7EE',
+    boxShadow: Platform.OS === 'web' ? '0 10px 22px rgba(150, 80, 115, 0.13)' : undefined,
+    shadowColor: '#96506F',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.13,
+    shadowRadius: 16,
+    elevation: 4,
   },
   tileSmall: {
     minHeight: 140,

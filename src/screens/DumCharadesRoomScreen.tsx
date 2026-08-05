@@ -8,6 +8,7 @@ import {
   Text,
   TextInput,
   TouchableOpacity,
+  Pressable,
   View,
   KeyboardAvoidingView,
   Animated,
@@ -16,13 +17,22 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import { tap42 } from '../theme/touch';
 import { MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from '../components/GengalAvatar';
+import { Alert } from '../components/CustomAlert';
 import ScreenShell from '../components/ScreenShell';
+import { useActionLock } from '../hooks/useActionLock';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
+import { useRoomVoice, VoiceRole } from '../hooks/useRoomVoice';
+import { useRoomPresence } from '../hooks/useRoomPresence';
+import ConnectionBanner from '../components/rooms/ConnectionBanner';
+import { RoomHeader, RoomDock, RoomSheet, RoomGifts } from '../components/rooms/RoomChrome';
+import { roomPalette, RoomTone } from '../theme/roomTheme';
 import {
+  subscribeToRoundAnswer,
   ChillRoom, ChillEvent,
   CHILL_GIFTS, pickRandomMovie,
   subscribeToChillRoom, subscribeToChillEvents,
@@ -177,46 +187,6 @@ const spotStyles = StyleSheet.create({
   name: { color: '#FFFDF8', fontSize: 12, fontWeight: '900', maxWidth: 90 },
 });
 
-// ── Gift bar ──────────────────────────────────────────────────────────────────
-
-function GiftBar({
-  onGift,
-  recipientUid,
-  recipientName,
-}: {
-  onGift: (gift: typeof CHILL_GIFTS[0]) => void;
-  recipientUid: string;
-  recipientName: string;
-}) {
-  return (
-    <View style={giftStyles.row}>
-      {CHILL_GIFTS.map(g => (
-        <TouchableOpacity
-          key={g.id}
-          style={giftStyles.btn}
-          activeOpacity={0.78}
-          onPress={() => onGift(g)}
-        >
-          <Text style={giftStyles.emoji}>{g.emoji}</Text>
-          <Text style={giftStyles.cost}>{g.cost}</Text>
-        </TouchableOpacity>
-      ))}
-    </View>
-  );
-}
-
-const giftStyles = StyleSheet.create({
-  row: { flexDirection: 'row', gap: 8, paddingHorizontal: 14 },
-  btn: {
-    flex: 1, alignItems: 'center', gap: 2,
-    paddingVertical: 8, borderRadius: 12,
-    backgroundColor: 'rgba(255,253,248,0.07)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
-  },
-  emoji: { fontSize: 18 },
-  cost: { color: '#D4B142', fontSize: 9, fontWeight: '900' },
-});
-
 // ── Scoreboard widget ─────────────────────────────────────────────────────────
 
 function Scoreboard({ scores, members }: { scores: Record<string, number>; members: { uid: string; nickname: string }[] }) {
@@ -320,6 +290,10 @@ const feedStyles = StyleSheet.create({
 
 // ── Main Room Screen ──────────────────────────────────────────────────────────
 
+/** Matches the audio rooms: a live stage reads best dark. */
+const TONE: RoomTone = 'dark';
+const C = roomPalette(TONE);
+
 export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props) {
   const roomId = route?.params?.roomId ?? '';
   const { profile } = useUser();
@@ -333,31 +307,82 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
   const [guessText, setGuessText] = useState('');
   const [inputMode, setInputMode] = useState<'chat' | 'guess'>('chat');
   const [sending, setSending] = useState(false);
-  const [showGifts, setShowGifts] = useState(false);
   const [showScoreboard, setShowScoreboard] = useState(false);
   const [showPrompt, setShowPrompt] = useState(false);
   const [confetti, setConfetti] = useState(false);
   const [secondsLeft, setSecondsLeft] = useState(45);
   const [hostPickingActor, setHostPickingActor] = useState(false);
+  // Round transitions write shared game state, so a double-tap would score
+  // twice or skip a round for everyone in the room.
+  const { locked: roundBusy, run: runRound } = useActionLock();
   const chatRef = useRef<ScrollView>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const isHost = room?.hostUid === myUid;
   const isActor = room?.actorUid === myUid;
   const isGuesser = room?.guesserUid === myUid;
+
+  // Charades is played out loud: the actor describes and the guesser answers, so
+  // both need a live mic. The host keeps one to run the round. Everyone else
+  // listens. Previously this screen had no voice at all.
+  const voiceRole: VoiceRole =
+    (isHost || isActor || isGuesser) ? 'broadcaster' : 'audience';
+  const { toggleMic, micMuted, toggleSpeaker, speakerOn, error: voiceError } =
+    useRoomVoice(roomId, voiceRole, !!room);
+
+  // The answer is no longer on the room document. Only the actor and the host
+  // can read it; for everyone else this subscription errors and stays null,
+  // which is the point.
+  const [roundAnswer, setRoundAnswer] = useState<string | null>(null);
+  const [giftSheet, setGiftSheet] = useState(false);
+  const [giftTargetUid, setGiftTargetUid] = useState<string | null>(null);
+  useEffect(() => {
+    if (!roomId || !(isActor || isHost)) { setRoundAnswer(null); return; }
+    return subscribeToRoundAnswer(roomId, setRoundAnswer);
+  }, [roomId, isActor, isHost]);
+
   const isPlaying = room?.phase === 'acting' || room?.phase === 'prompt';
 
-  // Members list derived from scores map
-  const members = useMemo(() => {
-    if (!room) return [];
-    return Object.entries(room.scores).map(([uid]) => ({
-      uid,
-      nickname: uid === room.hostUid ? room.hostNickname
-        : uid === room.actorUid ? (room.actorNickname ?? uid)
-        : uid === room.guesserUid ? (room.guesserNickname ?? uid)
-        : uid,
-    }));
-  }, [room]);
+  // Who is actually in the room right now.
+  //
+  // This was derived from the `scores` map, which nothing ever removes from —
+  // so the scoreboard and the actor picker listed everyone who had *ever*
+  // joined, and showed a raw Firestore uid for anyone who wasn't currently the
+  // host, actor or guesser. The heartbeat roster carries real nicknames and
+  // ages people out when they leave.
+  const { members: presentMembers, liveCount, connection } = useRoomPresence({
+    collectionName: 'chill_rooms',
+    roomId,
+    uid: myUid,
+    nickname: myName,
+    avatarData: myAvatarData,
+    isHost,
+    enabled: !!room,
+  });
+
+  const members = useMemo(
+    () => presentMembers.map((m) => ({ uid: m.uid, nickname: m.nickname })),
+    [presentMembers],
+  );
+
+  // Everyone present except yourself. The actor leads the list and is the
+  // default recipient, since that is who a round is usually thanking.
+  const giftTargets = useMemo(
+    () =>
+      presentMembers
+        .filter((m) => m.uid !== myUid)
+        .sort((a, b) => Number(b.uid === room?.actorUid) - Number(a.uid === room?.actorUid))
+        .map((m) => ({ uid: m.uid, nickname: m.nickname, avatarData: m.avatarData })),
+    [presentMembers, myUid, room?.actorUid],
+  );
+
+  // Falls back to the actor, then to whoever is first, so the sheet always has
+  // a valid recipient even if the selected person just left.
+  const activeGiftTarget =
+    giftTargets.find((t) => t.uid === giftTargetUid)?.uid
+    ?? giftTargets.find((t) => t.uid === room?.actorUid)?.uid
+    ?? giftTargets[0]?.uid
+    ?? null;
 
   // Subscribe to room
   useEffect(() => {
@@ -391,12 +416,12 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
 
   // Show prompt popup when actor
   useEffect(() => {
-    if (isActor && room?.phase === 'prompt' && room?.currentMovie) {
+    if (isActor && room?.phase === 'prompt' && roundAnswer) {
       setShowPrompt(true);
     } else {
       setShowPrompt(false);
     }
-  }, [room?.phase, isActor]);
+  }, [room?.phase, isActor, roundAnswer]);
 
   // Countdown timer
   useEffect(() => {
@@ -409,8 +434,8 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
       setSecondsLeft(remaining);
       if (remaining === 0) {
         if (timerRef.current) clearInterval(timerRef.current);
-        if (isHost && room?.currentMovie) {
-          markTimeUp(roomId, room.currentMovie);
+        if (isHost && roundAnswer) {
+          markTimeUp(roomId, roundAnswer);
         }
       }
     };
@@ -447,18 +472,24 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
     }
   }, [inputMode, chatText, guessText, roomId, myUid, myName]);
 
-  const handleGift = useCallback(async (gift: typeof CHILL_GIFTS[0]) => {
-    if (!room?.actorUid || !roomId) return;
-    setShowGifts(false);
+  const handleGift = useCallback(async (gift: typeof CHILL_GIFTS[0], toUid: string) => {
+    if (!roomId || !toUid) return;
     try {
       await sendChillGift(
         roomId, myUid, myName, myAvatarData,
-        room.actorUid, gift.name, gift.cost,
+        toUid, gift.name, gift.cost,
       );
-    } catch { /* insufficient coins */ }
-  }, [room?.actorUid, roomId, myUid, myName]);
+    } catch (e: any) {
+      // This spends coins. Swallowing the failure left the user unable to tell
+      // whether the gift went and whether they were charged for it.
+      Alert.alert(
+        'Gift not sent',
+        e?.message || 'You may not have enough coins. Nothing was charged.',
+      );
+    }
+  }, [roomId, myUid, myName, myAvatarData]);
 
-  const handleStartRound = useCallback(async (actorUid: string, actorNickname: string, actorAvatarData: any) => {
+  const handleStartRound = useCallback((actorUid: string, actorNickname: string, actorAvatarData: any) => runRound(async () => {
     if (!room || !roomId) return;
     const guesserUid = room.guesserUid ?? '';
     const movie = pickRandomMovie(room.language);
@@ -471,17 +502,17 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
     setHostPickingActor(false);
     // Begin acting after a brief prompt window
     setTimeout(() => beginActing(roomId), 4000);
-  }, [room, roomId]);
+  }), [room, roomId, runRound]);
 
-  const handleMarkCorrect = useCallback(async (winnerUid: string, winnerName: string) => {
-    if (!room?.currentMovie || !roomId) return;
-    await markCorrect(roomId, winnerUid, winnerName, room.currentMovie, room.scores);
-  }, [room, roomId]);
+  const handleMarkCorrect = useCallback((winnerUid: string, winnerName: string) => runRound(async () => {
+    if (!roundAnswer || !roomId || !room) return;
+    await markCorrect(roomId, winnerUid, winnerName, roundAnswer, room.scores);
+  }), [room, roomId, roundAnswer, runRound]);
 
-  const handleNextRound = useCallback(async () => {
+  const handleNextRound = useCallback(() => runRound(async () => {
     if (!roomId) return;
     await resetToWaiting(roomId);
-  }, [roomId]);
+  }), [roomId, runRound]);
 
   const handleLeave = useCallback(async () => {
     await leaveChillRoom(roomId, myUid, myName);
@@ -507,31 +538,72 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
         <View style={styles.phone}>
           <Confetti visible={confetti} />
 
-          {/* ── Stage Header ── */}
-          <LinearGradient colors={['#0D0010', '#2A0128']} style={styles.stageHeader}>
-            <View style={styles.stageTop}>
-              <TouchableOpacity onPress={handleLeave} style={styles.backBtn}>
-                <MaterialIcons name="arrow-back" size={20} color="rgba(255,253,248,0.7)" />
-              </TouchableOpacity>
-
-              <View style={styles.stageCenter}>
-                <View style={styles.livePill}>
-                  <View style={styles.liveDot} />
-                  <Text style={styles.livePillText}>DUMB CHARADES</Text>
-                </View>
-                <Text style={styles.roomLanguage}>{room.language}</Text>
-              </View>
-
-              <View style={styles.stageRight}>
-                <TouchableOpacity onPress={() => setShowScoreboard(s => !s)} style={styles.iconBtn}>
-                  <MaterialIcons name="leaderboard" size={20} color="#D4B142" />
-                </TouchableOpacity>
-                {members.length > 0 && (
-                  <Text style={styles.memberCount}>{room.activeMemberCount}</Text>
+          <RoomHeader
+            tone={TONE}
+            eyebrow={`Charades · ${room.language}`}
+            title={
+              phase === 'acting' ? 'Round in play'
+              : phase === 'prompt' ? 'Getting ready'
+              : phase === 'result' ? 'Round over'
+              : 'Waiting to start'
+            }
+            onBack={handleLeave}
+            watching={liveCount}
+            right={
+              <View style={styles.headerActions}>
+                {voiceRole === 'broadcaster' && (
+                  <Pressable
+                    onPress={toggleMic}
+                    accessibilityRole="button"
+                    accessibilityLabel={micMuted ? 'Unmute your microphone' : 'Mute your microphone'}
+                    accessibilityState={{ selected: micMuted }}
+                    style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
+                  >
+                    <MaterialIcons
+                      name={micMuted ? 'mic-off' : 'mic'}
+                      size={18}
+                      color={micMuted ? C.danger : C.accent}
+                    />
+                  </Pressable>
+                )}
+                <Pressable
+                  onPress={toggleSpeaker}
+                  accessibilityRole="button"
+                  accessibilityLabel={speakerOn ? 'Turn the speaker off' : 'Turn the speaker on'}
+                  style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
+                >
+                  <MaterialIcons
+                    name={speakerOn ? 'volume-up' : 'volume-off'}
+                    size={18}
+                    color={speakerOn ? C.accent : C.inkFaint}
+                  />
+                </Pressable>
+                <Pressable
+                  onPress={() => setShowScoreboard((v) => !v)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Show the scoreboard"
+                  accessibilityState={{ selected: showScoreboard }}
+                  style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
+                >
+                  <MaterialIcons name="leaderboard" size={18} color={C.accent} />
+                </Pressable>
+                {phase === 'acting' && !isActor && (
+                  <Pressable
+                    onPress={() => setGiftSheet(true)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Send a gift to the actor"
+                    style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
+                  >
+                    <MaterialIcons name="card-giftcard" size={18} color={C.accent} />
+                  </Pressable>
                 )}
               </View>
-            </View>
+            }
+          />
 
+          <ConnectionBanner state={connection} tone={TONE} />
+
+          <LinearGradient colors={[C.bg, '#2A0128']} style={styles.stageHeader}>
             {/* ── Host avatar (top center) ── */}
             <View style={styles.hostRow}>
               <View style={styles.hostAvatarWrap}>
@@ -596,7 +668,7 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
             {phase === 'waiting' && (
               <View style={styles.waitingRow}>
                 <Text style={styles.waitingText}>
-                  {room.activeMemberCount < 2
+                  {liveCount < 2
                     ? 'Waiting for players to join…'
                     : isHost ? 'Ready! Pick an actor to start.' : 'Waiting for host to start…'}
                 </Text>
@@ -609,56 +681,76 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
             <Scoreboard scores={room.scores} members={members} />
           )}
 
-          {/* ── Gift bar ── */}
-          {phase === 'acting' && !isActor && (
-            <View style={styles.giftSection}>
-              <Text style={styles.giftLabel}>Send a gift to the Actor</Text>
-              <GiftBar
-                onGift={handleGift}
-                recipientUid={room.actorUid ?? ''}
-                recipientName={room.actorNickname ?? ''}
-              />
-            </View>
-          )}
-
-          {/* ── Host controls ── */}
-          {isHost && (
-            <View style={styles.hostControls}>
-              {phase === 'waiting' && room.activeMemberCount >= 2 && (
-                <TouchableOpacity
-                  style={styles.controlBtn}
-                  onPress={() => setHostPickingActor(true)}
-                >
-                  <MaterialIcons name="play-arrow" size={16} color="#FFF" />
-                  <Text style={styles.controlBtnText}>Start Round</Text>
-                </TouchableOpacity>
-              )}
-              {phase === 'acting' && (
-                <>
-                  <TouchableOpacity
-                    style={[styles.controlBtn, styles.correctBtn]}
-                    onPress={() => handleMarkCorrect(room.guesserUid ?? '', room.guesserNickname ?? '')}
+          {/* Tells everyone what the round is doing, and carries the host's
+              next action. Previously only the host saw any control here, so
+              players had no idea what a phase meant or what came next. */}
+          <RoomDock
+            tone={TONE}
+            eyebrow={isActor ? 'You are acting' : isGuesser ? 'You are guessing' : isHost ? 'You are hosting' : 'Watching'}
+            headline={
+              phase === 'waiting'
+                ? (liveCount < 2 ? 'Waiting for players' : 'Ready to start')
+                : phase === 'prompt' ? 'Get ready'
+                : phase === 'acting' ? (isActor ? 'Act it out' : 'Guess the movie')
+                : room.winnerUid ? `${room.winnerNickname} got it` : 'Time up'
+            }
+            hint={
+              phase === 'acting' && isActor ? 'No words, no spelling it out.'
+              : phase === 'acting' ? 'Type your guess below.'
+              : phase === 'result' && room.revealedMovie ? `It was ${room.revealedMovie}.`
+              : phase === 'waiting' && !isHost ? 'The host picks who acts.'
+              : null
+            }
+            action={
+              isHost ? (
+                phase === 'waiting' && liveCount >= 2 ? (
+                  <Pressable
+                    onPress={() => setHostPickingActor(true)}
+                    accessibilityRole="button"
+                    accessibilityLabel="Pick an actor and start the round"
+                    style={({ pressed }) => [styles.dockCta, pressed && { opacity: 0.75 }]}
                   >
-                    <MaterialIcons name="check-circle" size={16} color="#FFF" />
-                    <Text style={styles.controlBtnText}>Correct!</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.controlBtn, styles.skipBtn]}
-                    onPress={() => room.currentMovie && markTimeUp(roomId, room.currentMovie)}
+                    <MaterialIcons name="play-arrow" size={18} color={C.onAccent} />
+                    <Text style={styles.dockCtaText}>Start</Text>
+                  </Pressable>
+                ) : phase === 'acting' ? (
+                  <View style={styles.dockPair}>
+                    <Pressable
+                      onPress={() => handleMarkCorrect(room.guesserUid ?? '', room.guesserNickname ?? '')}
+                      disabled={roundBusy}
+                      accessibilityRole="button"
+                      accessibilityLabel="Mark the guess correct"
+                      accessibilityState={{ disabled: roundBusy }}
+                      style={({ pressed }) => [styles.dockCta, pressed && { opacity: 0.75 }, roundBusy && { opacity: 0.5 }]}
+                    >
+                      <MaterialIcons name="check" size={18} color={C.onAccent} />
+                      <Text style={styles.dockCtaText}>Correct</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={() => roundAnswer && markTimeUp(roomId, roundAnswer)}
+                      accessibilityRole="button"
+                      accessibilityLabel="Skip this round"
+                      style={({ pressed }) => [styles.dockGhost, pressed && { opacity: 0.75 }]}
+                    >
+                      <MaterialIcons name="skip-next" size={18} color={C.inkSoft} />
+                    </Pressable>
+                  </View>
+                ) : phase === 'result' ? (
+                  <Pressable
+                    onPress={handleNextRound}
+                    disabled={roundBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel="Start the next round"
+                    accessibilityState={{ disabled: roundBusy }}
+                    style={({ pressed }) => [styles.dockCta, pressed && { opacity: 0.75 }, roundBusy && { opacity: 0.5 }]}
                   >
-                    <MaterialIcons name="skip-next" size={16} color="#FFF" />
-                    <Text style={styles.controlBtnText}>Skip</Text>
-                  </TouchableOpacity>
-                </>
-              )}
-              {phase === 'result' && (
-                <TouchableOpacity style={styles.controlBtn} onPress={handleNextRound}>
-                  <MaterialIcons name="replay" size={16} color="#FFF" />
-                  <Text style={styles.controlBtnText}>Next Round</Text>
-                </TouchableOpacity>
-              )}
-            </View>
-          )}
+                    <MaterialIcons name="replay" size={18} color={C.onAccent} />
+                    <Text style={styles.dockCtaText}>Next</Text>
+                  </Pressable>
+                ) : null
+              ) : null
+            }
+          />
 
           {/* ── Chat / Guess feed ── */}
           <ScrollView
@@ -703,7 +795,15 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
                 returnKeyType="send"
                 maxLength={120}
               />
-              <TouchableOpacity style={styles.sendBtn} onPress={handleSend} disabled={sending}>
+              <TouchableOpacity
+                style={styles.sendBtn}
+                hitSlop={tap42}
+                onPress={handleSend}
+                disabled={sending}
+                accessibilityRole="button"
+                accessibilityLabel="Send your guess"
+                accessibilityState={{ disabled: sending }}
+              >
                 {sending
                   ? <ActivityIndicator size="small" color="#FFF" />
                   : <MaterialIcons name="send" size={16} color="#FFF" />}
@@ -713,13 +813,32 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
         </View>
       </KeyboardAvoidingView>
 
+      <Modal visible={giftSheet} transparent animationType="slide" onRequestClose={() => setGiftSheet(false)}>
+        <RoomSheet tone={TONE} title="Send a gift" onClose={() => setGiftSheet(false)} bottomInset={0}>
+          <RoomGifts
+            tone={TONE}
+            // Anyone actually in the room, not just the actor — the roster is
+            // real now, so there is no reason to limit who can be thanked.
+            targets={giftTargets}
+            selectedUid={activeGiftTarget}
+            onSelectTarget={setGiftTargetUid}
+            gifts={CHILL_GIFTS}
+            onSend={(g) => {
+              const full = CHILL_GIFTS.find((x) => x.id === g.id);
+              if (full && activeGiftTarget) handleGift(full, activeGiftTarget);
+              setGiftSheet(false);
+            }}
+          />
+        </RoomSheet>
+      </Modal>
+
       {/* ── Actor Prompt Modal ── */}
       <Modal visible={showPrompt} transparent animationType="slide" onRequestClose={() => setShowPrompt(false)}>
         <View style={modalStyles.overlay}>
           <View style={modalStyles.card}>
             <MaterialIcons name="movie" size={36} color="#D4B142" />
             <Text style={modalStyles.title}>Your Movie</Text>
-            <Text style={modalStyles.movie}>{room.currentMovie}</Text>
+            <Text style={modalStyles.movie}>{roundAnswer}</Text>
             <Text style={modalStyles.hint}>
               Don't say the name! Use actions, sounds, or clues.{'\n'}Guesser has to guess it!
             </Text>
@@ -791,6 +910,23 @@ const modalStyles = StyleSheet.create({
 });
 
 const styles = StyleSheet.create({
+  headerActions: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  headerBtn: {
+    width: 34, height: 34, borderRadius: 17,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: C.card, borderWidth: 1, borderColor: C.line,
+  },
+  dockPair: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dockCta: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    minHeight: 44, paddingHorizontal: 16, borderRadius: 22, backgroundColor: C.accent,
+  },
+  dockCtaText: { color: C.onAccent, fontSize: 13, fontWeight: '900' },
+  dockGhost: {
+    width: 44, height: 44, borderRadius: 22,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: C.line, backgroundColor: C.card,
+  },
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430, backgroundColor: '#0D0010' },
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
 
@@ -800,31 +936,6 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: 'rgba(212,177,66,0.15)',
   },
-  stageTop: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 14, paddingTop: 52, paddingBottom: 10, gap: 8,
-  },
-  backBtn: {
-    width: 36, height: 36, borderRadius: 18,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.07)',
-  },
-  stageCenter: { flex: 1, alignItems: 'center', gap: 2 },
-  livePill: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10,
-    backgroundColor: 'rgba(255,253,248,0.1)',
-  },
-  liveDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#5EBB62' },
-  livePillText: { color: '#FFFDF8', fontSize: 9, fontWeight: '900', letterSpacing: 1 },
-  roomLanguage: { color: 'rgba(255,253,248,0.45)', fontSize: 10, fontWeight: '700' },
-  stageRight: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  iconBtn: {
-    width: 36, height: 36, borderRadius: 18,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.07)',
-  },
-  memberCount: { color: 'rgba(255,253,248,0.5)', fontSize: 10, fontWeight: '700' },
 
   // Host row
   hostRow: { alignItems: 'center', gap: 4, paddingBottom: 10 },
@@ -860,21 +971,8 @@ const styles = StyleSheet.create({
   waitingText: { color: 'rgba(255,253,248,0.5)', fontSize: 13, fontWeight: '600', textAlign: 'center' },
 
   // Gift section
-  giftSection: { paddingVertical: 8, gap: 6 },
-  giftLabel: { color: 'rgba(255,253,248,0.4)', fontSize: 10, fontWeight: '700', letterSpacing: 0.5, paddingHorizontal: 14 },
 
   // Host controls
-  hostControls: {
-    flexDirection: 'row', gap: 8, paddingHorizontal: 14, paddingVertical: 8,
-  },
-  controlBtn: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 10, borderRadius: 14,
-    backgroundColor: '#5B0068', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
-  },
-  correctBtn: { backgroundColor: '#1A6B33' },
-  skipBtn: { backgroundColor: '#6B3B00' },
-  controlBtnText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
 
   // Feed
   feed: { flex: 1, backgroundColor: '#0D0010' },

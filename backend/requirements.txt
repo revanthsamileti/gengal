@@ -1,0 +1,7 @@
+Flask==3.0.3
+flask-cors==4.0.1
+opencv-python-headless==4.9.0.80
+numpy==1.26.4
+agora-token-builder==1.0.0
+firebase-admin==6.5.0
+requests==2.32.3

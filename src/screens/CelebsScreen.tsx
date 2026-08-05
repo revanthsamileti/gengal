@@ -15,11 +15,12 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
+import { useActionLock } from '../hooks/useActionLock';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
 import CallPriceTag from '../components/CallPriceTag';
-import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
+import { skeuo } from '../theme/skeuomorphic';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import { subscribeToOnlineUsers, UserProfile } from '../services/userService';
@@ -32,6 +33,7 @@ import {
   ExpertRoom,
   RoomEvent,
 } from '../services/expertRoomService';
+import { tap28 } from '../theme/touch';
 
 type CelebsScreenProps = {
   navigate: (screen: string, params?: any) => void;
@@ -96,7 +98,9 @@ function LiveRoomChat({
           <Text style={chatStyles.hostName} numberOfLines={1}>{room.hostNickname}</Text>
           <Text style={chatStyles.topic} numberOfLines={1}>{room.topic}</Text>
         </View>
-        <TouchableOpacity onPress={onClose} style={chatStyles.closeBtn}>
+        <TouchableOpacity onPress={onClose} style={chatStyles.closeBtn} hitSlop={tap28}
+          accessibilityRole="button"
+          accessibilityLabel="Close">
           <MaterialIcons name="close" size={18} color="#FFFDF8" />
         </TouchableOpacity>
       </LinearGradient>
@@ -123,7 +127,9 @@ function LiveRoomChat({
       </ScrollView>
 
       {/* Input */}
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      {/* Android needs an explicit behavior here too; with none, the keyboard
+          covered the composer entirely. */}
+      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
         <View style={chatStyles.inputRow}>
           <TextInput
             style={chatStyles.input}
@@ -139,7 +145,9 @@ function LiveRoomChat({
             style={[chatStyles.sendBtn, !chatText.trim() && chatStyles.sendBtnDisabled]}
             onPress={handleSend}
             disabled={!chatText.trim() || sending}
-          >
+          
+            accessibilityRole="button"
+            accessibilityLabel="Send message">
             {sending
               ? <ActivityIndicator size="small" color="#FFF" />
               : <MaterialIcons name="send" size={16} color="#FFF" />}
@@ -238,12 +246,23 @@ function CelebCard({
   const profile = {
     uid: user.uid,
     name: user.nickname || user.username || 'User',
-    age: typeof user.age === 'number' ? user.age : parseInt(user.age || '20', 10),
+    age: typeof user.age === 'number' ? user.age : (user.age ? parseInt(user.age, 10) : undefined),
     uri: user.avatarUrl || '',
     avatarData: user.avatarData,
     language: user.language || 'EN',
     bio: user.bio || '',
   };
+
+  const { locked: callLocked, run: runCall } = useActionLock();
+  const startCall = (mode: 'call' | 'video') =>
+    runCall(() => {
+      navigate('Call', {
+        profileName: profile.name,
+        mode,
+        isCaller: true,
+        matchData: { ...profile, modes: ['call', 'video'] },
+      });
+    });
 
   return (
     <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideAnim }] }}>
@@ -295,9 +314,12 @@ function CelebCard({
         <View style={cardStyles.actions}>
           {/* Call */}
           <TouchableOpacity
-            style={cardStyles.actionBtn}
+            style={[cardStyles.actionBtn, callLocked && { opacity: 0.5 }]}
             activeOpacity={0.82}
-            onPress={() => navigate('Call', { profileName: profile.name, mode: 'call', isCaller: true, matchData: { ...profile, modes: ['call', 'video'] } })}
+            disabled={callLocked}
+            accessibilityRole="button"
+            accessibilityLabel={`Call ${profile.name}`}
+            onPress={() => startCall('call')}
           >
             <MaterialIcons name="phone" size={14} color="#FFF" />
             <Text style={cardStyles.actionText}>Call</Text>
@@ -306,9 +328,12 @@ function CelebCard({
 
           {/* Video */}
           <TouchableOpacity
-            style={[cardStyles.actionBtn, cardStyles.actionBtnVideo]}
+            style={[cardStyles.actionBtn, cardStyles.actionBtnVideo, callLocked && { opacity: 0.5 }]}
             activeOpacity={0.82}
-            onPress={() => navigate('Call', { profileName: profile.name, mode: 'video', isCaller: true, matchData: { ...profile, modes: ['call', 'video'] } })}
+            disabled={callLocked}
+            accessibilityRole="button"
+            accessibilityLabel={`Video call ${profile.name}`}
+            onPress={() => startCall('video')}
           >
             <MaterialIcons name="videocam" size={14} color="#FFF7FF" />
             <Text style={[cardStyles.actionText, cardStyles.actionTextVideo]}>Video</Text>
@@ -397,11 +422,15 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
   const [vipUsers, setVipUsers] = useState<UserProfile[]>([]);
   const [liveRooms, setLiveRooms] = useState<ExpertRoom[]>([]);
   const [activeChat, setActiveChat] = useState<ExpertRoom | null>(null);
+  const [vipsLoaded, setVipsLoaded] = useState(false);
 
   useEffect(() => {
+    // VIP is the paid tier. This used to select on `avatarUrl`, which filled
+    // the Celebs page with anyone who had uploaded a picture.
     const unsub = subscribeToOnlineUsers((users) => {
-      setVipUsers(users.filter(u => Boolean(u.avatarUrl)));
-    }, auth.currentUser?.uid);
+      setVipUsers(users.filter(u => u.isVip === true));
+      setVipsLoaded(true);
+    }, auth.currentUser?.uid, true);
     return unsub;
   }, []);
 
@@ -451,7 +480,11 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
           ) : null}
 
           {/* VIP list */}
-          {vipUsers.length === 0 ? (
+          {!vipsLoaded ? (
+            <View style={styles.empty}>
+              <ActivityIndicator color="#4B0054" />
+            </View>
+          ) : vipUsers.length === 0 ? (
             <View style={styles.empty}>
               <MaterialIcons name="diamond" size={40} color="#D1B23B" />
               <Text style={styles.emptyTitle}>No VIPs online</Text>
@@ -471,7 +504,6 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
             </View>
           )}
 
-          <View style={{ height: 110 }} />
         </ScrollView>
 
         <BottomNav active="Celebs" navigate={navigate} />
@@ -482,7 +514,7 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 24 },
+  scroll: { paddingBottom: 110 },
 
   hero: {
     marginHorizontal: 14,

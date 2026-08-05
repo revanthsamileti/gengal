@@ -1,13 +1,13 @@
 import React, { useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing, Dimensions, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing, Dimensions, Platform, Modal } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { skeuoGradients } from '../theme/skeuomorphic';
 
 type ConnectingOverlayProps = {
   mode: 'random' | 'private';
   targetName?: string;
   onCancel: () => void;
+  status?: 'connecting' | 'ringing';
 };
 
 const { width, height } = Dimensions.get('window');
@@ -66,7 +66,7 @@ function FloatingHeart({ index, delay }: { index: number, delay: number }) {
   );
 }
 
-export default function ConnectingOverlay({ mode, targetName, onCancel }: ConnectingOverlayProps) {
+export default function ConnectingOverlay({ mode, targetName, onCancel, status = 'connecting' }: ConnectingOverlayProps) {
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const progressAnim = useRef(new Animated.Value(0)).current;
 
@@ -104,6 +104,7 @@ export default function ConnectingOverlay({ mode, targetName, onCancel }: Connec
   });
 
   return (
+    <Modal visible transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
     <View style={styles.container}>
       {mode === 'private' && (
         <>
@@ -139,14 +140,24 @@ export default function ConnectingOverlay({ mode, targetName, onCancel }: Connec
       {/* Text Content */}
       <View style={styles.textContent}>
         <Text style={styles.title}>
-          {mode === 'random' ? 'Finding a random connection...' : 'Finding your connection...'}
+          {status === 'ringing'
+            ? 'Ringing...'
+            : (mode === 'random' ? 'Finding a random connection...' : 'Connecting...')}
         </Text>
         
         {mode === 'random' ? (
           <Text style={styles.subtitle}>Your destiny is being chosen</Text>
         ) : (
           <Text style={styles.subtitle}>
-            Connecting you with <Text style={styles.targetName}>{targetName}</Text> for an exclusive private conversation.
+            {status === 'ringing' ? (
+              <>
+                Waiting for <Text style={styles.targetName}>{targetName}</Text> to answer...
+              </>
+            ) : (
+              <>
+                Connecting you with <Text style={styles.targetName}>{targetName}</Text> for an exclusive private conversation.
+              </>
+            )}
           </Text>
         )}
       </View>
@@ -184,6 +195,7 @@ export default function ConnectingOverlay({ mode, targetName, onCancel }: Connec
         )}
       </View>
     </View>
+    </Modal>
   );
 }
 

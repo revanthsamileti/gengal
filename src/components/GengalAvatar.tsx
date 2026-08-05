@@ -100,8 +100,6 @@ export default function GengalAvatar({ data, size = 150 }: { data?: AvatarData; 
         eyebrows: [avatarDNA.eyebrowType || "defaultNatural"],
         mouth: [avatarDNA.mouthType || "smile"],
         backgroundColor: ["transparent"],
-        radius: 50,
-        scale: 75,
       };
 
       if (avatarDNA.facialHairType && avatarDNA.facialHairType !== 'none') {

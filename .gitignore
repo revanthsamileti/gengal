@@ -32,10 +32,129 @@ yarn-error.*
 
 # local env files
 .env*.local
+.env
+.env.*
+!/.env.example
+**/serviceAccountKey.json
 
 # typescript
 *.tsbuildinfo
 
+# generated diagnostics and local build artifacts
+*.log
+*.apk
+*.zip
+*.xml
+screen*.png
+audit*.png
+phone*_screen*.png
+phone*_*.xml
+phone*_*.png
+window_dump*.xml
+gengal_*.png
+ringing_*.png
+talking*.png
+fetch.png
+current_screen*
+usb-phone-screen.png
+phone_screen_issue*.png
+backend/venv/
+temp_media/
+.gradle-user-home/
+.jdk/
+.tmp/
+
+# one-off fix/rewrite scripts (already applied)
+fix_*.py
+fix_*.js
+rewrite_*.py
+patch_*.py
+add_*.py
+inject_*.py
+parse_*.py
+check_*.py
+ui_rewrite*.py
+update_call_screen.py
+append_styles.py
+apply_ludo_theme.py
+clean_ludo.py
+export_code.py
+generate_ringtone.py
+listen_calls.py
+revert_ringtone.py
+
+# temp proxy/debug files
+proxy.js
+robust_proxy.js
+tcp_proxy*.js
+refactor.js
+all_code_export.md
+remote_logger.txt
+browser_logs.txt
+old_ludo.tsx
+-L
+dump*.xml
+*_bugs.txt
+nav_bugs.txt
+logcat*.txt
+log1.txt
+log2.txt
+log3.txt
+
+# downloaded binaries
+cloudflared.exe
+android-ndk*.zip
+gradle-*.zip
+
+# tunnel/debug logs
+*_tunnel.*.log
+cloudflare.log
+serveo.log
+pinggy.log
+localtunnel.log
+tunnel_output.txt
+ngrok*.log
+expo-*.log
+metro-*.log
+
+# Throwaway probe scripts that used to litter the repo root. Scoped to the root
+# so it stops swallowing the real suite under backend/tests/, which it did.
+/test_*.svg
+/test_*.py
+
+# adb scripts
+adb_*.bat
+adb_*.log
+run_gengal_dev.bat
+fix-firewall.bat
+
+# expo cache
+.expo-cache/
+
 # generated native folders
 /ios
 /android
+.aider*
+
+# python bytecode
+__pycache__/
+*.pyc
+
+# Vendored third-party agent/skill packs. ~6.3k files and 1.24M lines that got
+# committed by accident and have nothing to do with the app; they are tooling
+# installed per-machine, not project source.
+.agents/
+
+# IDE settings, per-developer
+.idea/
+
+# Device-testing artefacts. Screenshots and logcat dumps pulled off the phones
+# during verification passes — useful in the moment, noise in history.
+.scratch_*.png
+*_screenshot_*.png
+vivo_*.png
+samsung_*.png
+mobile_screen.png
+metro_log.txt
+backend_log.txt
+backend/debug_events.log

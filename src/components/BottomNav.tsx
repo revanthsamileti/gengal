@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Platform } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { skeuoGradients } from '../theme/skeuomorphic';
 
 type TabId = 'Home' | 'Club' | 'Personal' | 'Activity' | 'Celebs' | 'Chill';
@@ -9,9 +10,10 @@ type TabId = 'Home' | 'Club' | 'Personal' | 'Activity' | 'Celebs' | 'Chill';
 const TABS: { id: TabId; label: string; icon: keyof typeof MaterialIcons.glyphMap; screen?: string }[] = [
   { id: 'Home', label: 'Home', icon: 'home', screen: 'Home' },
   { id: 'Club', label: 'Club', icon: 'castle', screen: 'Club' },
+  { id: 'Celebs', label: 'Celebs', icon: 'diamond', screen: 'Celebs' },
   { id: 'Chill', label: 'Chill', icon: 'sports-esports', screen: 'Chill' },
   { id: 'Activity', label: 'Activity', icon: 'notifications-none', screen: 'Activity' },
-  { id: 'Personal', label: 'Me', icon: 'person-pin', screen: 'Personal' },
+  { id: 'Personal', label: 'Connect', icon: 'connect-without-contact', screen: 'Personal' },
 ];
 
 type BottomNavProps = {
@@ -20,9 +22,12 @@ type BottomNavProps = {
 };
 
 export default function BottomNav({ active, navigate }: BottomNavProps) {
+  const insets = useSafeAreaInsets();
+  const bottomPadding = insets.bottom > 0 ? insets.bottom : (Platform.OS === 'ios' ? 24 : 16);
+
   return (
     <View style={styles.container}>
-      <View style={[styles.bar, Platform.OS === 'web' && styles.barWeb]}>
+      <View style={[styles.bar, Platform.OS === 'web' && styles.barWeb, { paddingBottom: bottomPadding }]}>
         {TABS.map((tab) => {
           const isActive = tab.id === active;
           return (
@@ -35,6 +40,9 @@ export default function BottomNav({ active, navigate }: BottomNavProps) {
                   navigate(tab.screen);
                 }
               }}
+              accessibilityRole="tab"
+              accessibilityLabel={`${tab.label} tab`}
+              accessibilityState={{ selected: isActive }}
             >
               {isActive ? (
                 <LinearGradient colors={[...skeuoGradients.gold]} style={styles.activePlate} />
@@ -59,15 +67,21 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
+    zIndex: 99,
   },
   bar: {
     flexDirection: 'row',
     paddingTop: 10,
-    paddingBottom: Platform.OS === 'ios' ? 24 : 12,
     paddingHorizontal: 12,
     borderTopWidth: 1,
     borderTopColor: '#FFFFFF',
     backgroundColor: '#FFFDF8',
+    // Native shadows:
+    elevation: 8,
+    shadowColor: '#3E2E1F',
+    shadowOffset: { width: 0, height: -4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
   },
   barWeb: {
     boxShadow: Platform.OS === 'web' ? '0 -10px 22px rgba(62, 46, 31, 0.13), inset 0 1px 0 rgba(255,255,255,0.9)' : undefined,

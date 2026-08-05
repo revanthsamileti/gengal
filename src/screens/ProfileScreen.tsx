@@ -1,18 +1,23 @@
 import React, { useState, useEffect } from 'react';
+import { tap34, tap42 } from '../theme/touch';
 import { ActivityIndicator, Platform, Image,
+  KeyboardAvoidingView,
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
   TouchableOpacity,
   View, } from 'react-native';
+import { Alert } from '../components/CustomAlert';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import BottomNav from '../components/BottomNav';
+import { useActionLock } from '../hooks/useActionLock';
 
 import { useUser } from '../context/UserContext';
-import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, UserProfile as FirebaseUser } from '../services/userService';
+import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, getFollowerCount, UserProfile as FirebaseUser } from '../services/userService';
 import GengalAvatar from '../components/GengalAvatar';
 import CallPriceTag from '../components/CallPriceTag';
 import { auth } from '../config/firebase';
@@ -20,6 +25,7 @@ import { auth } from '../config/firebase';
 type ProfileScreenProps = {
   profileName?: string;
   navigate: (screen: string, params?: any) => void;
+  goBack?: () => void;
   route?: any;
 };
 
@@ -33,12 +39,28 @@ function ModeButton({
   navigate: ProfileScreenProps['navigate'];
 }) {
   const isVideo = mode === 'video';
+  const { locked, run } = useActionLock();
+  const peerName = (profile as any).name || (profile as any).nickname || (profile as any).username;
+  // Seeded demo profiles carry a uid ('ref_elena', …) so CallScreen's uid guard
+  // would let them through and bill for a call to an account that never existed.
+  // They have to be excluded here explicitly.
+  const canCall = !!(profile as any)?.uid && (profile as any)?.isSampleProfile !== true;
 
   return (
     <TouchableOpacity
       activeOpacity={0.85}
-      style={[styles.modeButton, isVideo && styles.modeButtonVideo]}
-      onPress={() => navigate('Call', { profileName: (profile as any).name || (profile as any).nickname || (profile as any).username, mode, isCaller: true })}
+      style={[styles.modeButton, isVideo && styles.modeButtonVideo, (!canCall || locked) && { opacity: 0.5 }]}
+      disabled={!canCall || locked}
+      accessibilityRole="button"
+      accessibilityLabel={isVideo ? `Video call ${peerName}` : `Call ${peerName}`}
+      accessibilityState={{ disabled: !canCall || locked }}
+      onPress={() =>
+        run(() => {
+          // matchData carries the uid CallScreen needs to create the offer.
+          // Omitting it previously made every call from this screen fail.
+          navigate('Call', { profileName: peerName, mode, isCaller: true, matchData: profile });
+        })
+      }
     >
       <MaterialIcons
         name={isVideo ? 'videocam' : 'phone'}
@@ -78,11 +100,12 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
 
   const allProfiles = [
     ...firebaseUsers.map(u => ({
+      uid: u.uid,
       name: u.nickname || u.username || 'User',
-      age: u.age || 20,
+      age: u.age || undefined,
       lang: u.language || 'EN',
-      tier: u.avatarUrl ? 'VIP' : 'Elite',
-      uri: u.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
+      tier: u.tier,
+      uri: u.avatarUrl || '',
       avatarData: u.avatarData,
       bio: u.bio || '',
       followers: Array.isArray(u.followers) ? u.followers.length.toString() : (u.followers?.toString() || '0'),
@@ -90,11 +113,12 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
       modes: ['call', 'video'] as Array<'call' | 'video'>
     })),
     ...(myProfile ? [{
+      uid: myProfile.uid,
       name: myProfile.nickname || myProfile.username || 'User',
-      age: myProfile.age || 20,
+      age: myProfile.age || undefined,
       lang: myProfile.language || 'EN',
-      tier: myProfile.avatarUrl ? 'VIP' : 'Elite',
-      uri: myProfile.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
+      tier: myProfile.tier,
+      uri: myProfile.avatarUrl || '',
       avatarData: myProfile.avatarData,
       bio: myProfile.bio || '',
       followers: Array.isArray(myProfile.followers) ? myProfile.followers.length.toString() : (myProfile.followers?.toString() || '0'),
@@ -105,11 +129,12 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
 
   const matchData = route?.params?.matchData;
   let profile = matchData ? {
+    uid: matchData.uid,
     name: matchData.name || matchData.nickname || 'User',
-    age: matchData.age || 20,
+    age: matchData.age || undefined,
     lang: matchData.lang || matchData.language || 'EN',
-    tier: (matchData.avatarUrl || matchData.uri) ? 'VIP' : 'Elite',
-    uri: matchData.uri || matchData.avatarUrl || 'https://images.unsplash.com/photo-1506794778202-cad84cf45f1d?q=80&w=200&auto=format&fit=crop',
+    tier: matchData.tier,
+    uri: matchData.uri || matchData.avatarUrl || '',
     avatarData: matchData.avatarData,
     bio: matchData.bio || '',
     followers: matchData.followers?.toString() || '0',
@@ -127,6 +152,22 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
   const myFollowing: string[] = Array.isArray(myProfile?.following) ? (myProfile!.following as string[]) : [];
   const [isFollowing, setIsFollowing] = useState(() => targetUid ? myFollowing.includes(targetUid) : false);
   const [isBlocked, setIsBlocked] = useState(false);
+
+  // Followers are a subcollection now, so the count comes from an aggregate query
+  // rather than the length of an array on the profile document.
+  const [followerCount, setFollowerCount] = useState<number | null>(null);
+  const countedUid = targetUid || (isCurrentUser ? myProfile?.uid : undefined);
+  useEffect(() => {
+    if (!countedUid) {
+      setFollowerCount(null);
+      return;
+    }
+    let active = true;
+    getFollowerCount(countedUid).then(count => {
+      if (active) setFollowerCount(count);
+    });
+    return () => { active = false; };
+  }, [countedUid, isFollowing]);
 
   useEffect(() => {
     if (targetUid) {
@@ -149,17 +190,53 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
     <ScreenShell tone="light">
       <View style={styles.phone}>
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backButton} activeOpacity={0.78} onPress={() => navigate('Home')}>
+          <TouchableOpacity
+            style={styles.backButton}
+            hitSlop={tap42}
+            activeOpacity={0.78}
+            onPress={() => navigate('Home')}
+            accessibilityRole="button"
+            accessibilityLabel="Go back"
+          >
             <MaterialIcons name="arrow-back" size={22} color="#5A075F" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>{isCurrentUser ? 'My Profile' : 'Profile'}</Text>
-          <TouchableOpacity 
-            style={styles.headerIcon} 
-            activeOpacity={0.8}
-            onPress={() => isCurrentUser && navigate('Settings')}
-          >
-            <MaterialIcons name={isCurrentUser ? 'settings' : 'favorite-border'} size={22} color="#92750B" />
-          </TouchableOpacity>
+          {/* Only the owner has an action here. The heart icon shown to other
+              viewers was a button whose handler did nothing. */}
+          {isCurrentUser ? (
+            <View style={styles.headerActions}>
+              <TouchableOpacity
+                style={styles.headerIcon}
+                hitSlop={tap42}
+                activeOpacity={0.8}
+                onPress={() => {
+                  setEditForm({
+                    nickname: myProfile?.nickname || myProfile?.username || '',
+                    age: myProfile?.age != null ? String(myProfile.age) : '',
+                    language: myProfile?.language || '',
+                    avatarUrl: myProfile?.avatarUrl || '',
+                  });
+                  setIsEditModalVisible(true);
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Edit profile"
+              >
+                <MaterialIcons name="edit" size={22} color="#92750B" />
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.headerIcon}
+                hitSlop={tap42}
+                activeOpacity={0.8}
+                onPress={() => navigate('Settings')}
+                accessibilityRole="button"
+                accessibilityLabel="Settings"
+              >
+                <MaterialIcons name="settings" size={22} color="#92750B" />
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <View style={styles.headerIcon} />
+          )}
         </View>
 
         <ScrollView
@@ -182,18 +259,26 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
               <View style={styles.avatarInner}>
                 {(profile as any).avatarData ? (
                   <GengalAvatar data={(profile as any).avatarData} size={118} />
-                ) : (
+                ) : profile.uri ? (
                   <Image source={{ uri: profile.uri }} style={styles.avatar} />
+                ) : (
+                  <View style={[styles.avatar, styles.avatarEmpty]}>
+                    <MaterialIcons name="person" size={56} color="#C9BDB2" />
+                  </View>
                 )}
               </View>
             </LinearGradient>
 
-            <View style={styles.tierPill}>
-              <MaterialIcons name="diamond" size={12} color="#B68D1C" />
-              <Text style={styles.tierText}>{profile.tier}</Text>
-            </View>
+            {profile.tier === 'VIP' ? (
+              <View style={styles.tierPill}>
+                <MaterialIcons name="diamond" size={12} color="#B68D1C" />
+                <Text style={styles.tierText}>VIP</Text>
+              </View>
+            ) : null}
 
-            <Text style={styles.name}>{profile.name}, {profile.age}</Text>
+            <Text style={styles.name}>
+              {profile.age ? `${profile.name}, ${profile.age}` : profile.name}
+            </Text>
             <View style={styles.languageRow}>
               <MaterialIcons name="language" size={15} color="#B68D1C" />
               <Text style={styles.language}>{profile.lang}</Text>
@@ -205,15 +290,19 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
             </View>
 
             <View style={styles.statsRow}>
-              <TouchableOpacity style={styles.statItem} activeOpacity={0.78}>
-                <Text style={styles.statValue}>{profile.followers}</Text>
+              {/* Plain Views: there is no followers/following list to open,
+                  and a Touchable that does nothing reads as a broken button. */}
+              <View style={styles.statItem}>
+                <Text style={styles.statValue}>
+                  {followerCount !== null ? followerCount.toString() : profile.followers}
+                </Text>
                 <Text style={styles.statLabel}>Followers</Text>
-              </TouchableOpacity>
+              </View>
               <View style={styles.statDivider} />
-              <TouchableOpacity style={styles.statItem} activeOpacity={0.78}>
+              <View style={styles.statItem}>
                 <Text style={styles.statValue}>{profile.following}</Text>
                 <Text style={styles.statLabel}>Following</Text>
-              </TouchableOpacity>
+              </View>
             </View>
 
             <Text style={styles.bio}>{profile.bio}</Text>
@@ -224,29 +313,6 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
               <>
                 <Text style={styles.panelTitle}>Your profile</Text>
                 <View style={styles.ownerActions}>
-                  <TouchableOpacity 
-                    style={styles.ownerButton} 
-                    activeOpacity={0.82}
-                    onPress={() => {
-                      navigate('ProfileDetails', {
-                        isEditMode: true,
-                        returnTo: 'Profile',
-                        name: myProfile?.username || '',
-                        nickname: myProfile?.nickname || '',
-                        dob: myProfile?.age || '',
-                        gender: myProfile?.gender || '',
-                        country: myProfile?.country || '',
-                        state: myProfile?.state || '',
-                        city: myProfile?.city || '',
-                        language: myProfile?.language || '',
-                        bio: myProfile?.bio || '',
-                      });
-                    }}
-                  >
-                    <MaterialIcons name="edit" size={18} color="#836A07" />
-                    <Text style={styles.ownerButtonText}>Edit Profile</Text>
-                  </TouchableOpacity>
-
                   <TouchableOpacity 
                     style={styles.ownerButton} 
                     activeOpacity={0.82}
@@ -282,6 +348,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                   <TouchableOpacity
                     activeOpacity={0.82}
                     style={[styles.followButton, isFollowing && styles.followingButton]}
+                    hitSlop={tap34}
                     onPress={async () => {
                       const myUid = auth.currentUser?.uid;
                       if (!myUid || !targetUid) {
@@ -320,6 +387,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                   <TouchableOpacity
                     activeOpacity={0.84}
                     style={styles.chatButton}
+                    hitSlop={tap42}
                     onPress={() => navigate('Chat', { profileName: profile.name })}
                   >
                     <MaterialIcons name="chat-bubble-outline" size={18} color="#4B0054" />
@@ -328,6 +396,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                   <TouchableOpacity
                     activeOpacity={0.84}
                     style={[styles.blockButton, isBlocked && styles.blockButtonActive]}
+                    hitSlop={tap42}
                     onPress={() => setIsBlocked((value) => !value)}
                   >
                     <MaterialIcons
@@ -363,12 +432,25 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
         <BottomNav active="Home" navigate={navigate} />
       </View>
 
-      {isEditModalVisible && (
-        <View style={styles.modalOverlay}>
+      {/* A native Modal, not a plain absolutely-positioned View: on Android
+          zIndex only affects paint order, so an overlay declared as a sibling
+          loses touch dispatch to the content behind it. */}
+      <Modal
+        visible={isEditModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsEditModalVisible(false)}
+      >
+        <KeyboardAvoidingView
+          style={styles.modalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
           <View style={styles.modalContent}>
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Edit Profile</Text>
-              <TouchableOpacity onPress={() => setIsEditModalVisible(false)}>
+              <TouchableOpacity onPress={() => setIsEditModalVisible(false)}
+                accessibilityRole="button"
+                accessibilityLabel="Close">
                 <MaterialIcons name="close" size={24} color="#5A155A" />
               </TouchableOpacity>
             </View>
@@ -413,8 +495,23 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
             <TouchableOpacity 
               style={[styles.saveButton, isSaving && { opacity: 0.7 }]} 
               activeOpacity={0.8}
+              disabled={isSaving}
               onPress={async () => {
-                if (!auth.currentUser) return;
+                if (!auth.currentUser || isSaving) return;
+
+                const nickname = editForm.nickname.trim();
+                if (!nickname) {
+                  Alert.alert('Name required', 'Please enter a name to display.');
+                  return;
+                }
+                // Age drives who can see and call this profile, so it has to be
+                // a real number rather than whatever the field happens to hold.
+                const age = parseInt(editForm.age, 10);
+                if (editForm.age.trim() && (Number.isNaN(age) || age < 18 || age > 120)) {
+                  Alert.alert('Check your age', 'Please enter an age between 18 and 120.');
+                  return;
+                }
+
                 setIsSaving(true);
                 try {
                   const formattedLang = editForm.language
@@ -424,14 +521,15 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                     .join(' ');
 
                   await saveUserProfile(auth.currentUser.uid, {
-                    nickname: editForm.nickname,
-                    age: parseInt(editForm.age) || editForm.age,
+                    nickname,
+                    ...(editForm.age.trim() ? { age } : {}),
                     language: formattedLang,
                     avatarUrl: myProfile?.avatarUrl || '' // Preserve existing or default
                   });
                   setIsEditModalVisible(false);
                 } catch (e) {
                   console.error('Save failed', e);
+                  Alert.alert('Could not save', 'Your changes were not saved. Please try again.');
                 } finally {
                   setIsSaving(false);
                 }
@@ -440,8 +538,8 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
               <Text style={styles.saveButtonText}>{isSaving ? 'Saving...' : 'Save Changes'}</Text>
             </TouchableOpacity>
           </View>
-        </View>
-      )}
+        </KeyboardAvoidingView>
+      </Modal>
 
     </ScreenShell>
   );
@@ -477,6 +575,10 @@ const styles = StyleSheet.create({
     fontFamily: 'serif',
     fontSize: 28,
     fontWeight: '900',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    gap: 8,
   },
   headerIcon: {
     width: 42,
@@ -520,6 +622,11 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
     borderRadius: 57,
+  },
+  avatarEmpty: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F2ECE4',
   },
   tierPill: {
     marginTop: -10,
@@ -678,17 +785,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#E1C460',
   },
-  ownerButtonDark: {
-    backgroundColor: '#4B0054',
-    borderColor: '#4B0054',
-  },
   ownerButtonText: {
     color: '#836A07',
     fontSize: 12,
     fontWeight: '900',
-  },
-  ownerButtonTextLight: {
-    color: '#FFF7FF',
   },
   modeRow: {
     flexDirection: 'row',

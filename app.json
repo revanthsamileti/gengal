@@ -24,7 +24,8 @@
         "android.permission.MODIFY_AUDIO_SETTINGS",
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.BLUETOOTH",
-        "android.permission.INTERNET"
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS"
       ]
     },
     "web": {
@@ -43,8 +44,23 @@
         {
           "photosPermission": "The app accesses your photos to let you share them with your friends."
         }
+      ],
+      "expo-secure-store",
+      "expo-asset",
+      "expo-splash-screen",
+      [
+        "expo-notifications",
+        {
+          "defaultChannel": "calls"
+        }
       ]
     ],
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/5dad5e21-3524-4aff-98e7-d1c6bc12a2ef"
+    },
     "extra": {
       "eas": {
         "projectId": "5dad5e21-3524-4aff-98e7-d1c6bc12a2ef"

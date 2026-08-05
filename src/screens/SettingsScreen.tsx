@@ -1,35 +1,62 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Platform, Modal } from 'react-native';
+import { Alert } from '../components/CustomAlert';
+import React, { useState, useEffect } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform, Modal } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { auth, db } from '../config/firebase';
-import { deleteUser, signOut } from 'firebase/auth';
+import { auth } from '../config/firebase';
+import { deleteUser } from 'firebase/auth';
 import { doc, deleteDoc } from 'firebase/firestore';
 import ScreenShell from '../components/ScreenShell';
 import { useUser } from '../context/UserContext';
 import GengalAvatar from '../components/GengalAvatar';
+import { clearAuthSession, logout, purgeAccountData } from '../services/authService';
+import { checkIsAdmin } from '../services/adminService';
+import { tap40 } from '../theme/touch';
 
 type SettingsScreenProps = {
   navigate: (screen: string, params?: any) => void;
   goBack?: () => void;
 };
 
-const MENU_ITEMS = [
-  { key: 'avatar', label: 'Edit Avatar & Profile', icon: 'face', color: '#9333EA', bg: '#F3E8FF', screen: 'FinalizeInvite' },
+type MenuItem = {
+  key: string;
+  label: string;
+  icon: string;
+  color: string;
+  bg: string;
+  screen: string;
+  params?: Record<string, any>;
+};
+
+const MENU_ITEMS: MenuItem[] = [
+  { key: 'avatar', label: 'Edit Avatar & Profile', icon: 'face', color: '#9333EA', bg: '#F3E8FF', screen: 'FinalizeInvite', params: { isEditMode: true } },
   { key: 'language', label: 'App Language', icon: 'language', color: '#F97316', bg: '#FFEDD5', screen: 'Language', params: { isEditMode: true, returnTo: 'Settings' } },
   { key: 'coins', label: 'Buy Coins', icon: 'monetization-on', color: '#D49A0B', bg: '#FFF8DD', screen: 'Coins' },
   { key: 'earnings', label: 'Earnings', icon: 'account-balance-wallet', color: '#16A34A', bg: '#DCFCE7', screen: 'Earnings' },
-  { key: 'admin', label: 'Admin Panel', icon: 'admin-panel-settings', color: '#0284C7', bg: '#E0F2FE', screen: 'AdminPanel' },
 ];
+
+// Shown only to accounts on the backend's administrator allowlist.
+const ADMIN_MENU_ITEM: MenuItem = { key: 'admin', label: 'Admin Panel', icon: 'admin-panel-settings', color: '#0284C7', bg: '#E0F2FE', screen: 'AdminPanel' };
 
 export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps) {
   const { profile } = useUser();
   const [isDeleting, setIsDeleting] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isAdmin, setIsAdmin] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    checkIsAdmin().then(result => {
+      if (active) setIsAdmin(result);
+    });
+    return () => { active = false; };
+  }, []);
+
+  const menuItems = isAdmin ? [...MENU_ITEMS, ADMIN_MENU_ITEM] : MENU_ITEMS;
 
   const handleLogout = async () => {
     try {
-      await signOut(auth);
+      await logout();
     } catch (e) {
       Alert.alert('Error', 'Failed to log out.');
     }
@@ -41,20 +68,32 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
     if (!user) return;
     setIsDeleting(true);
     try {
-      await deleteDoc(doc(db, 'users', user.uid));
+      await clearAuthSession();
+      // Purge server-side data first: deleteUser invalidates the credential, so
+      // anything attempted afterwards is rejected (the old order silently left
+      // the profile document behind).
+      //
+      // This throws if anything survived, which stops us deleting the auth
+      // record. Losing the account while the data remains is the one outcome
+      // there is no way back from — the rules only let the owner clean up, and
+      // after deleteUser there is no owner. Better to fail and let them retry.
+      await purgeAccountData();
       await deleteUser(user);
     } catch (error: any) {
       if (error.code === 'auth/requires-recent-login') {
         Alert.alert('Security Verification', 'Please log in again before deleting your account.');
-        await signOut(auth);
+        await logout();
       } else {
-        Alert.alert('Error', 'Could not delete account. Please try again.');
+        Alert.alert(
+          'Account not deleted',
+          'We could not remove all of your data, so your account is untouched. Please check your connection and try again.',
+        );
       }
       setIsDeleting(false);
     }
   };
 
-  const tier = profile?.avatarUrl ? 'VIP' : 'Elite';
+  const tier = profile?.tier === 'VIP' ? 'VIP' : 'Standard';
   const tierColor = tier === 'VIP' ? '#9A1E8A' : '#B99916';
 
   return (
@@ -62,7 +101,9 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
       <View style={styles.phone}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => goBack ? goBack() : navigate('Home')}>
+          <TouchableOpacity style={styles.backBtn} hitSlop={tap40} onPress={() => goBack ? goBack() : navigate('Home')}
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={22} color="#4B0054" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Settings</Text>
@@ -71,7 +112,7 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
 
         {/* Profile card */}
         {profile && (
-          <TouchableOpacity style={styles.profileCard} activeOpacity={0.88} onPress={() => navigate('FinalizeInvite')}>
+          <TouchableOpacity style={styles.profileCard} activeOpacity={0.88} onPress={() => navigate('FinalizeInvite', { isEditMode: true, existingAvatarData: profile.avatarData, gender: profile.gender })}>
             <View style={styles.avatarWrap}>
               {profile.avatarData ? (
                 <GengalAvatar data={profile.avatarData as any} size={56} />
@@ -93,7 +134,7 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
         )}
 
         <View style={styles.content}>
-          {MENU_ITEMS.map((item) => (
+          {menuItems.map((item) => (
             <TouchableOpacity
               key={item.key}
               style={styles.menuItem}

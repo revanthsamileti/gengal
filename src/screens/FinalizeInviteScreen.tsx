@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
   Alert,
   Animated,
   PanResponder,
@@ -8,7 +7,6 @@ import {
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
   useWindowDimensions,
@@ -22,7 +20,7 @@ import DiamondBadge from '../components/DiamondBadge';
 import GengalAvatar, { AvatarData, DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';
 import { auth, db } from '../config/firebase';
 import { getUserProfile, saveUserProfile } from '../services/userService';
-import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
+import { skeuo } from '../theme/skeuomorphic';
 
 type FinalizeInviteScreenProps = {
   navigation?: any;
@@ -188,7 +186,7 @@ function AvatarOption({
   );
 }
 
-export default function FinalizeInviteScreen({ navigation, navigate: directNavigate, route }: any) {
+export default function FinalizeInviteScreen({ navigation, navigate: directNavigate, route, goBack }: any) {
   const { height } = useWindowDimensions();
   const navigate = directNavigate || navigation?.navigate || (() => {});
   const { params } = route || {};
@@ -231,7 +229,9 @@ export default function FinalizeInviteScreen({ navigation, navigate: directNavig
   const [avatarData, setAvatarData] = useState<AvatarData>(getInitialAvatar(isMasc));
 
   useEffect(() => {
-    setAvatarData(getInitialAvatar(effectiveGender === 'Masculine'));
+    if (!params?.existingAvatarData) {
+      setAvatarData(getInitialAvatar(effectiveGender === 'Masculine'));
+    }
   }, [effectiveGender]);
   const isExpandedRef = useRef(false);
   const EXPAND_OFFSET = 240;
@@ -329,7 +329,15 @@ export default function FinalizeInviteScreen({ navigation, navigate: directNavig
   const renderStudio = () => (
     <View style={styles.builder}>
       <View style={[styles.builderTopActions, { top: Math.max((Platform.OS === 'android' ? StatusBar.currentHeight || 24 : 44) + 10, 50) }]}>
-        <Pressable onPress={() => navigate('ProfileDetails', { ...params, gender: effectiveGender })}>
+        <Pressable onPress={() => {
+          if (params?.isEditMode && goBack) {
+            goBack();
+          } else {
+            navigate('ProfileDetails', { ...params, gender: effectiveGender });
+          }
+        }}
+          accessibilityRole="button"
+          accessibilityLabel="Go back">
           {({ pressed }) => (
             <View style={[styles.builderCircleBtn, pressed && { transform: [{ translateY: 2 }], boxShadow: 'none' }]}>
               <MaterialIcons name="arrow-back" size={26} color={skeuo.plum} />
@@ -697,14 +705,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  avatarOptionDarkSquare: {
-    flex: 1,
-    backgroundColor: '#1E1E24',
-    borderRadius: 10,
-    overflow: 'hidden',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
   builderCategoryBar: {
     position: 'absolute',
     left: 0,
@@ -733,88 +733,5 @@ const styles = StyleSheet.create({
   builderTabLabelActive: {
     color: skeuo.plum,
   },
-  stageHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 20,
-    paddingTop: 20,
-    paddingBottom: 14,
-    backgroundColor: skeuo.surfaceRaised,
-    borderBottomWidth: 1,
-    borderColor: skeuo.border,
-    boxShadow: Platform.OS === 'web' ? '0 8px 18px rgba(83, 58, 29, 0.10)' : undefined,
-  },
-  brand: { color: skeuo.plum, fontFamily: 'serif', fontSize: 28, fontWeight: '900' },
-  backButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    backgroundColor: skeuo.surfaceRaised,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: skeuo.border,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
   contentArea: { flex: 1 },
-  infoContainer: { paddingHorizontal: 24, paddingTop: 28, paddingBottom: 112 },
-  infoTitle: { color: skeuo.plum, fontFamily: 'serif', fontSize: 30, fontWeight: '900', marginBottom: 22 },
-  successBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F1F8EA',
-    padding: 12,
-    borderRadius: 16,
-    marginBottom: 22,
-    gap: 8,
-    borderWidth: 1,
-    borderColor: '#D7EDC8',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  successText: { color: '#4F8B36', fontSize: 13, fontWeight: '800' },
-  formGroup: { marginBottom: 18 },
-  label: { fontSize: 11, fontWeight: '900', color: '#9A8772', marginBottom: 8, letterSpacing: 1.1 },
-  input: {
-    backgroundColor: '#FFFDF8',
-    borderRadius: 18,
-    height: 54,
-    paddingHorizontal: 17,
-    color: skeuo.plum,
-    fontSize: 16,
-    fontWeight: '700',
-    borderWidth: 1,
-    borderColor: skeuo.border,
-    boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
-  },
-  genderToggleFrame: {
-    flexDirection: 'row',
-    backgroundColor: '#F0E5D4',
-    padding: 5,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: skeuo.border,
-    boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
-  },
-  toggleBtn: { flex: 1, height: 42, borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
-  activeMasculine: { backgroundColor: '#FFFDF8', borderWidth: 1, borderColor: '#D9C58B', boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined },
-  activeFeminine: { backgroundColor: '#FFFDF8', borderWidth: 1, borderColor: '#D9C58B', boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined },
-  toggleBtnText: { fontSize: 12, fontWeight: '900', color: '#9A8772', letterSpacing: 1 },
-  textActive: { color: skeuo.plum },
-  saveActionBtn: { width: '100%', height: 58, borderRadius: 29, marginTop: 30, overflow: 'hidden', boxShadow: Platform.OS === 'web' ? skeuo.goldShadow : undefined },
-  saveGradient: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  saveActionText: { color: '#563F00', fontWeight: '900', fontSize: 14, letterSpacing: 1.6 },
-  footerTabBar: {
-    backgroundColor: skeuo.surfaceRaised,
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingBottom: Platform.OS === 'ios' ? 24 : 12,
-    borderTopWidth: 1,
-    borderColor: skeuo.border,
-  },
-  tabBtn: { marginHorizontal: 18, borderRadius: 18, padding: 10, alignItems: 'center', justifyContent: 'center', flex: 1 },
-  tabLabel: { fontSize: 13, color: '#9A8772', fontWeight: '900', marginTop: 4, letterSpacing: 0.5 },
-  activeTabLabel: { color: skeuo.plum },
 });

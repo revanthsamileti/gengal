@@ -1,11 +1,11 @@
-// @ts-nocheck
 import React, { useState, useEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
 import { Platform, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { View, ActivityIndicator, Text, Alert, Animated, Easing, Image } from 'react-native';
+import { View, Text, Animated, Easing } from 'react-native';
 import { auth } from './src/config/firebase';
-import { onAuthStateChanged, User, signOut } from 'firebase/auth';
+import { onAuthStateChanged, User } from 'firebase/auth';
 import { useFonts } from 'expo-font';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
 import HomeScreen from './src/screens/HomeScreen';
 import ExpertRoomScreen from './src/screens/ExpertRoomScreen';
@@ -27,9 +27,9 @@ import ActivityScreen from './src/screens/ActivityScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
-import { ThemeProvider } from './src/theme/ThemeContext';
 import { UserProvider } from './src/context/UserContext';
-import { getUserProfile, updateUserStatus } from './src/services/userService';
+import { updateUserStatus } from './src/services/userService';
+import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
 import CreatePasswordScreen from './src/screens/CreatePasswordScreen';
 import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
 import LoginPasswordScreen from './src/screens/LoginPasswordScreen';
@@ -38,6 +38,7 @@ import ChillScreen from './src/screens/ChillScreen';
 import DumCharadesRoomScreen from './src/screens/DumCharadesRoomScreen';
 import LudoScreen from './src/screens/LudoScreen';
 import LudoBoardScreen from './src/screens/LudoBoardScreen';
+import { CustomAlert } from './src/components/CustomAlert';
 
 // --- REMOTE LOGGER ---
 if (Platform.OS === 'web') {
@@ -74,20 +75,6 @@ if (Platform.OS === 'web') {
   } catch (e) {}
 }
 // ----------------------
-type ScreenName = 'Home' | 'Club' | 'ExpertRoom' | 'Personal' | 'Profile' | 'Call' | 'Match' | 'Chat' | 'Language' | 'Phone' | 'Otp' | 'Avatar' | 'FinalizeInvite' | 'ProfileDetails' | 'ActiveConnects' | 'Activity'
-  | 'Settings'
-  | 'AdminPanel'
-  | 'Coins'
-  | 'Earnings'
-  | 'CreatePassword'
-  | 'ForgotPassword'
-  | 'LoginPassword'
-  | 'Celebs'
-  | 'Chill'
-  | 'DumCharadesRoom'
-  | 'Ludo'
-  | 'LudoBoard';
-
 type NavigationParams = {
   profileName?: string;
   mode?: 'call' | 'video';
@@ -95,8 +82,86 @@ type NavigationParams = {
   roomId?: string;
   matchData?: any;
   isCaller?: boolean;
+  isIncomingPending?: boolean;
   [key: string]: any;
 };
+
+type ScreenContext = {
+  params: NavigationParams;
+  navigate: (next: string, params?: NavigationParams) => void;
+  goBack: () => void;
+};
+
+/**
+ * The single source of truth for what screens exist and how each is rendered.
+ *
+ * This used to live in three hand-maintained places — a `ScreenName` union, a
+ * long `next === 'X' || next === 'Y'` guard inside `navigate`, and an if-chain
+ * in the render. Miss any one of them and `navigate('NewScreen')` silently did
+ * nothing, which is exactly the kind of bug that only shows up on a device.
+ * Now the union, the guard and the render all derive from this object.
+ */
+const SCREENS = {
+  Home: ({ navigate, goBack }: ScreenContext) => <HomeScreen navigate={navigate} goBack={goBack} />,
+  ExpertRoom: ({ navigate, goBack, params }: ScreenContext) => <ExpertRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  Club: ({ navigate, goBack }: ScreenContext) => <ClubScreen navigate={navigate} goBack={goBack} />,
+  Personal: ({ navigate, goBack }: ScreenContext) => <PersonalScreen navigate={navigate} goBack={goBack} />,
+  Profile: ({ navigate, goBack, params }: ScreenContext) => (
+    <ProfileScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
+  ),
+  Call: ({ navigate, goBack, params }: ScreenContext) => (
+    <CallScreen
+      profileName={params.profileName}
+      mode={params.mode}
+      roomId={params.roomId}
+      matchData={params.matchData}
+      isCaller={params.isCaller}
+      isIncomingPending={params.isIncomingPending}
+      navigate={navigate}
+      goBack={goBack}
+    />
+  ),
+  Match: ({ navigate, goBack, params }: ScreenContext) => (
+    <MatchScreen profileName={params.profileName} matchData={params.matchData} roomId={params.roomId} navigate={navigate} goBack={goBack} />
+  ),
+  Chat: ({ navigate, goBack, params }: ScreenContext) => (
+    <ChatScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
+  ),
+  Language: ({ navigate, goBack, params }: ScreenContext) => <LanguageScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  Phone: ({ navigate, goBack, params }: ScreenContext) => <PhoneScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  Otp: ({ navigate, goBack, params }: ScreenContext) => <OtpScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  Avatar: ({ navigate, goBack, params }: ScreenContext) => <AvatarScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  FinalizeInvite: ({ navigate, goBack, params }: ScreenContext) => <FinalizeInviteScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  ProfileDetails: ({ navigate, goBack, params }: ScreenContext) => <ProfileDetailsScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  ActiveConnects: ({ navigate, goBack }: ScreenContext) => <ActiveConnectsScreen navigate={navigate} goBack={goBack} />,
+  Activity: ({ navigate }: ScreenContext) => <ActivityScreen navigate={navigate} />,
+  Settings: ({ navigate, goBack }: ScreenContext) => <SettingsScreen navigate={navigate} goBack={goBack} />,
+  AdminPanel: ({ navigate, goBack }: ScreenContext) => <AdminPanelScreen navigate={navigate} goBack={goBack} />,
+  Coins: ({ navigate, goBack }: ScreenContext) => <CoinsScreen navigate={navigate} goBack={goBack} />,
+  Earnings: ({ navigate, goBack }: ScreenContext) => <EarningsScreen navigate={navigate} goBack={goBack} />,
+  CreatePassword: ({ navigate, goBack, params }: ScreenContext) => <CreatePasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  ForgotPassword: ({ navigate, goBack, params }: ScreenContext) => <ForgotPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  LoginPassword: ({ navigate, goBack, params }: ScreenContext) => <LoginPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  Celebs: ({ navigate, goBack }: ScreenContext) => <CelebsScreen navigate={navigate} goBack={goBack} />,
+  Chill: ({ navigate, goBack }: ScreenContext) => <ChillScreen navigate={navigate} goBack={goBack} />,
+  DumCharadesRoom: ({ navigate, goBack, params }: ScreenContext) => <DumCharadesRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  Ludo: ({ navigate, goBack }: ScreenContext) => <LudoScreen navigate={navigate} goBack={goBack} />,
+  LudoBoard: ({ navigate, goBack, params }: ScreenContext) => <LudoBoardScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+} as const;
+
+type ScreenName = keyof typeof SCREENS;
+
+const isScreenName = (value: string): value is ScreenName =>
+  Object.prototype.hasOwnProperty.call(SCREENS, value);
+
+/**
+ * Bottom-nav destinations. Tapping one replaces the stack instead of pushing,
+ * so hopping between tabs doesn't build an unbounded history that the hardware
+ * back button then has to walk back through one entry at a time.
+ */
+const TAB_SCREENS: ReadonlySet<string> = new Set<ScreenName>([
+  'Home', 'Club', 'Celebs', 'Chill', 'Activity', 'Personal',
+]);
 
 class ErrorBoundary extends Component<{children: ReactNode}, {hasError: boolean, error: Error | null}> {
   constructor(props: {children: ReactNode}) {
@@ -193,6 +258,11 @@ export default function App() {
   const screen = currentRoute.name;
   const params = currentRoute.params;
 
+  const screenRef = useRef<ScreenName>(screen);
+  useEffect(() => {
+    screenRef.current = screen;
+  }, [screen]);
+
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -201,11 +271,23 @@ export default function App() {
   };
 
   const navigate = (next: string, nextParams: NavigationParams = {}) => {
-    if (
-      next === 'Home' || next === 'Club' || next === 'ExpertRoom' || next === 'Personal' || next === 'Profile' || next === 'Call' || next === 'Match' || next === 'Chat' || next === 'Language' || next === 'Phone' || next === 'FinalizeInvite' || next === 'ProfileDetails' || next === 'ActiveConnects' || next === 'Activity' || next === 'Settings' || next === 'AdminPanel' || next === 'Coins' || next === 'Earnings' || next === 'CreatePassword' || next === 'ForgotPassword' || next === 'Otp' || next === 'Avatar' || next === 'LoginPassword' || next === 'Celebs' || next === 'Chill' || next === 'DumCharadesRoom' || next === 'Ludo' || next === 'LudoBoard'
-    ) {
-      setNavStack(prev => [...prev, { name: next as ScreenName, params: nextParams }]);
+    if (!isScreenName(next)) {
+      // Previously an unknown name was dropped in silence, so a typo or a
+      // screen missing from the registry looked like a dead button.
+      console.error(`[Navigation] Unknown screen "${next}" — check the SCREENS registry in App.tsx.`);
+      return;
     }
+
+    if (TAB_SCREENS.has(next)) {
+      // Rebase rather than push: Home stays underneath so hardware back still
+      // leads out of a tab, but hopping between tabs can't grow the stack.
+      setNavStack(next === 'Home'
+        ? [{ name: 'Home', params: nextParams }]
+        : [{ name: 'Home', params: {} }, { name: next, params: nextParams }]);
+      return;
+    }
+
+    setNavStack(prev => [...prev, { name: next, params: nextParams }]);
   };
 
   const goBack = () => {
@@ -228,35 +310,41 @@ export default function App() {
   }, [navStack.length]);
 
   useEffect(() => {
-    let prevUid: string | null = null;
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setIsLoading(false);
+      
       if (currentUser) {
-        prevUid = currentUser.uid;
-        updateUserStatus(currentUser.uid, true);
-        try {
-          const profile = await getUserProfile(currentUser.uid);
-          const isComplete = Boolean(profile && profile.username && profile.nickname && profile.age && profile.gender && (profile.avatar3dUrl || profile.avatarData || profile.avatarUrl));
-
-          if (isComplete) {
-            if (['Language', 'Phone', 'Otp', 'FinalizeInvite', 'ProfileDetails', 'Avatar', 'CreatePassword', 'LoginPassword'].includes(screen)) {
-              resetTo('Home');
-            }
-          } else {
-            resetTo('ProfileDetails');
-          }
-        } catch (e) {
-          resetTo('ProfileDetails');
-        }
+        resetTo('Home');
       } else {
-        if (prevUid) updateUserStatus(prevUid, false);
-        prevUid = null;
         resetTo('Language');
       }
-      setIsLoading(false);
     });
 
-    return unsubscribe;
+    return () => unsubscribe();
   }, []);
+
+  // Inbound calls push a Call screen with the offer already attached. Guard
+  // against interrupting a call that is already on screen.
+  useIncomingCallWatcher(user, (call) => {
+    if (screenRef.current === 'Call') return;
+    setNavStack(prev => [...prev, {
+      name: 'Call',
+      params: {
+        profileName: call.callerName,
+        mode: call.mode,
+        roomId: call.roomId,
+        isCaller: false,
+        isIncomingPending: true,
+        matchData: {
+          uid: call.callerUid,
+          nickname: call.callerName,
+          avatarUrl: call.callerAvatarUrl,
+          avatarData: call.callerAvatarData,
+        },
+      },
+    }]);
+  });
 
   useEffect(() => {
     const subscription = AppState.addEventListener('change', (nextState) => {
@@ -276,48 +364,16 @@ export default function App() {
   }
 
   return (
-    <ErrorBoundary>
-      <UserProvider>
-        <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
-        {screen === 'Home' && <HomeScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'ExpertRoom' && <ExpertRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Club' && <ClubScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Personal' && <PersonalScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Profile' && (
-          <ProfileScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
-        )}
-        {screen === 'Call' && (
-          <CallScreen profileName={params.profileName} mode={params.mode} roomId={params.roomId} matchData={params.matchData} isCaller={params.isCaller} navigate={navigate} goBack={goBack} />
-        )}
-        {screen === 'Match' && (
-          <MatchScreen profileName={params.profileName} matchData={params.matchData} roomId={params.roomId} navigate={navigate} goBack={goBack} />
-        )}
-        {screen === 'Chat' && (
-          <ChatScreen profileName={params.profileName} navigate={navigate} goBack={goBack} route={{ params }} />
-        )}
-        {screen === 'Language' && <LanguageScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Phone' && <PhoneScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Otp' && <OtpScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Avatar' && <AvatarScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'FinalizeInvite' && <FinalizeInviteScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'ProfileDetails' && (
-          <ProfileDetailsScreen navigate={navigate} goBack={goBack} route={{ params }} />
-        )}
-        {screen === 'ActiveConnects' && <ActiveConnectsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Activity' && <ActivityScreen navigate={navigate} />}
-        {screen === 'Settings' && <SettingsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'AdminPanel' && <AdminPanelScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Coins' && <CoinsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Earnings' && <EarningsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'CreatePassword' && <CreatePasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'ForgotPassword' && <ForgotPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'LoginPassword' && <LoginPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Celebs' && <CelebsScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'Chill' && <ChillScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'DumCharadesRoom' && <DumCharadesRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-        {screen === 'Ludo' && <LudoScreen navigate={navigate} goBack={goBack} />}
-        {screen === 'LudoBoard' && <LudoBoardScreen navigate={navigate} goBack={goBack} route={{ params }} />}
-      </UserProvider>
-    </ErrorBoundary>
+    <SafeAreaProvider>
+      <ErrorBoundary>
+        <UserProvider>
+          <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
+          {SCREENS[screen]({ params, navigate, goBack })}
+          {/* Mounted last so its Modal renders above every screen. Without this
+              the imperative Alert API silently no-ops (see CustomAlert.tsx). */}
+          <CustomAlert />
+        </UserProvider>
+      </ErrorBoundary>
+    </SafeAreaProvider>
   );
 }

@@ -1,1 +1,2 @@
-export const getAgoraEngine = () => require('react-native-agora');
+import * as agora from 'react-native-agora';
+export const getAgoraEngine = () => agora;

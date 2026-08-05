@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { RosterPreviewEntry } from './presenceService';
 import {
   collection,
   doc,
@@ -83,9 +84,22 @@ export interface LudoRoom {
   hostUid: string;
   phase: LudoPhase;
   status: 'live' | 'closed';
+  gameMode: 'per_game' | 'per_token';
+  ticketPrice: number;       // e.g. 50 coins to join
+  audienceBets: Record<string, { color: TokenColor, amount: number }>; // map of uid to bet
   // Players (up to 4)
   players: LudoPlayer[];
   activeMemberCount: number;
+  /**
+   * Everyone heartbeating in the room — players and spectators together.
+   * Spectators are this minus the seated players; `spectatorCount` was a bare
+   * counter that only ever grew when a watcher's client died without leaving.
+   */
+  presentCount?: number;
+  /** Host heartbeat. Absent on rooms created before presence existed. */
+  hostLastSeen?: Timestamp;
+  /** Up to four present members, denormalised by the host for lobby cards. */
+  roster?: RosterPreviewEntry[];
   // Game state
   tokens: Token[];           // all 16 tokens
   currentTurn: TokenColor;   // whose turn
@@ -97,7 +111,8 @@ export interface LudoRoom {
   finishRank: number;        // 1 for first to finish, increments
   winnersOrder: string[];    // uids in finish order
   // Spectator
-  spectatorCount: number;
+  /** @deprecated Drifting counter, replaced by `presentCount` minus seated players. */
+  spectatorCount?: number;
   // Meta
   createdAt?: Timestamp;
 }
@@ -265,6 +280,7 @@ export const createLudoRoom = async (
   hostUid: string,
   hostNickname: string,
   hostAvatarData: any,
+  gameMode: 'per_game' | 'per_token'
 ): Promise<string> => {
   const hostPlayer: LudoPlayer = {
     uid: hostUid,
@@ -279,8 +295,14 @@ export const createLudoRoom = async (
     hostUid,
     phase: 'waiting',
     status: 'live',
+    gameMode,
+    ticketPrice: 50,
+    audienceBets: {},
     players: [hostPlayer],
     activeMemberCount: 1,
+    presentCount: 1,
+    // Seeded so a host that dies before its first heartbeat still ages out.
+    hostLastSeen: Timestamp.now(),
     tokens: buildInitialTokens(),
     currentTurn: 'red',
     diceValue: null,
@@ -349,7 +371,14 @@ export const joinLudoRoom = async (
 
   if (room.phase !== 'waiting' || room.players.length >= 4) {
     // Join as spectator
-    await updateDoc(doc(db, 'ludo_rooms', roomId), { spectatorCount: increment(1) });
+    // Spectator headcount comes from heartbeat presence now, so there is no
+    // counter to bump — and none to leak when this client dies without leaving.
+    await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
+    return { joined: true, asSpectator: true };
+  }
+
+  // Join as spectator initially for all new monetized games unless host
+  if (uid !== room.hostUid) {
     await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
     return { joined: true, asSpectator: true };
   }
@@ -361,17 +390,77 @@ export const joinLudoRoom = async (
     uid, nickname, avatarData: avatarData || null,
     color, isHost: false, isOnline: true, score: 0,
   };
+
+  const updatedPlayers = [...room.players, newPlayer];
+  await updateDoc(doc(db, 'ludo_rooms', roomId), {
+    players: updatedPlayers,
+    activeMemberCount: increment(1),
+  });
+  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined the table' });
+  return { joined: true, asSpectator: false };
+};
+
+export const buyLudoTicket = async (
+  roomId: string,
+  uid: string,
+  nickname: string,
+  avatarData: any,
+  ticketPrice: number,
+  hostUid: string,
+  targetColor: TokenColor
+) => {
+  const { deductUserCoinsWithCommission } = await import('./coinService');
+  const commission = Math.floor(ticketPrice * 0.1);
+  await deductUserCoinsWithCommission(uid, ticketPrice, hostUid, commission);
+
+  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
+  const room = snap.data() as LudoRoom;
+  
+  if (room.players.find(p => p.color === targetColor)) {
+    throw new Error('Color already taken');
+  }
+
+  const newPlayer: LudoPlayer = {
+    uid, nickname, avatarData: avatarData || null,
+    color: targetColor, isHost: false, isOnline: true, score: 0,
+  };
+
   await updateDoc(doc(db, 'ludo_rooms', roomId), {
     players: [...room.players, newPlayer],
     activeMemberCount: increment(1),
   });
-  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
-  return { joined: true, asSpectator: false };
+  await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: `bought a ticket and joined the table!` });
+};
+
+export const placeLudoBet = async (
+  roomId: string,
+  uid: string,
+  nickname: string,
+  color: TokenColor,
+  amount: number,
+  hostUid: string
+) => {
+  const { deductUserCoinsWithCommission } = await import('./coinService');
+  const commission = Math.floor(amount * 0.1);
+  await deductUserCoinsWithCommission(uid, amount, hostUid, commission);
+
+  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
+  const room = snap.data() as LudoRoom;
+  const newBets = { ...room.audienceBets };
+  
+  if (newBets[uid]) {
+    newBets[uid].amount += amount;
+  } else {
+    newBets[uid] = { color, amount };
+  }
+
+  await updateDoc(doc(db, 'ludo_rooms', roomId), { audienceBets: newBets });
+  await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, text: `placed a ${amount} 💎 bet on ${color}!` });
 };
 
 export const leaveLudoRoom = async (roomId: string, uid: string, nickname: string, asSpectator: boolean) => {
   if (asSpectator) {
-    await updateDoc(doc(db, 'ludo_rooms', roomId), { spectatorCount: increment(-1) });
+    // Presence expiry handles this; see joinLudoRoom.
     return;
   }
   const snap = await getDoc(doc(db, 'ludo_rooms', roomId));

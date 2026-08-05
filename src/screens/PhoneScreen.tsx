@@ -1,22 +1,22 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect } from 'react';
+import { tap36 } from '../theme/touch';
 import {
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-  TextInput,
   Platform,
   ScrollView,
   Pressable,
+  Modal,
+  TextInput,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
-import { sendOTP, verifyOTP, loginWithPassword, checkUserExists } from '../services/authService';
-import { collection, query, where, getDocs } from 'firebase/firestore';
-import { db } from '../config/firebase';
-import { ActivityIndicator } from 'react-native';
+import { sendOTP, checkUserExists } from '../services/authService';
+import { ActivityIndicator, StatusBar } from 'react-native';
 
 type PhoneScreenProps = {
   navigate: (screen: string, params?: any) => void;
@@ -25,6 +25,24 @@ type PhoneScreenProps = {
 };
 
 const NUMPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'backspace'];
+/**
+ * `min`/`max` are the national significant number length, excluding the dial
+ * code. A flat 10-digit rule used to be hardcoded, which made it impossible for
+ * anyone outside India/US/Canada to finish signing up — a UAE number is 9
+ * digits and could never reach the threshold.
+ */
+const COUNTRY_CODES = [
+  { country: 'India', code: '+91', iso: 'IN', min: 10, max: 10 },
+  { country: 'United States', code: '+1', iso: 'US', min: 10, max: 10 },
+  { country: 'United Kingdom', code: '+44', iso: 'GB', min: 9, max: 10 },
+  { country: 'Australia', code: '+61', iso: 'AU', min: 9, max: 9 },
+  { country: 'France', code: '+33', iso: 'FR', min: 9, max: 9 },
+  { country: 'Germany', code: '+49', iso: 'DE', min: 10, max: 11 },
+  { country: 'United Arab Emirates', code: '+971', iso: 'AE', min: 9, max: 9 },
+  { country: 'Saudi Arabia', code: '+966', iso: 'SA', min: 9, max: 9 },
+  { country: 'Singapore', code: '+65', iso: 'SG', min: 8, max: 8 },
+  { country: 'Canada', code: '+1', iso: 'CA', min: 10, max: 10 },
+];
 
 export let globalAuthMode: 'signup' | 'login' = 'signup';
 
@@ -32,7 +50,9 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
   const [authMode, setAuthMode] = useState<'signup' | 'login'>('signup');
   const [phone, setPhone] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [countryCode, setCountryCode] = useState('+1');
+  const [countryCode, setCountryCode] = useState('+91');
+  const [countryIso, setCountryIso] = useState('IN');
+  const [isCountryOpen, setIsCountryOpen] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
@@ -40,7 +60,10 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
       const p = route.params.phone;
       if (p.startsWith('+')) {
         const spaceIdx = p.indexOf(' ') !== -1 ? p.indexOf(' ') : (p.length > 10 ? p.length - 10 : 2);
-        setCountryCode(p.substring(0, spaceIdx));
+        const nextCode = p.substring(0, spaceIdx);
+        const nextCountry = COUNTRY_CODES.find((item) => item.code === nextCode);
+        setCountryCode(nextCode);
+        if (nextCountry) setCountryIso(nextCountry.iso);
         setPhone(p.substring(spaceIdx).trim());
       } else {
         setPhone(p);
@@ -48,52 +71,24 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
     }
   }, [route?.params?.phone]);
 
-  const cycleCountryCode = () => {
-    const codes = ['+1', '+91', '+44', '+61', '+33', '+49'];
-    const currentIndex = codes.indexOf(countryCode);
-    const nextIndex = (currentIndex + 1) % codes.length;
-    setCountryCode(codes[nextIndex]);
-  };
-
   useEffect(() => {
     globalAuthMode = authMode;
   }, [authMode]);
 
-  useEffect(() => {
-    fetch('https://ipwho.is/')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data?.calling_code) {
-          setCountryCode('+' + data.calling_code);
-        } else {
-          throw new Error('Fallback');
-        }
-      })
-      .catch(() => {
-        try {
-          const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-          if (tz.includes('Kolkata') || tz.includes('Calcutta')) setCountryCode('+91');
-          else if (tz.includes('London')) setCountryCode('+44');
-          else if (tz.includes('Sydney') || tz.includes('Melbourne')) setCountryCode('+61');
-          else if (tz.includes('Paris')) setCountryCode('+33');
-          else if (tz.includes('Berlin')) setCountryCode('+49');
-        } catch (err) {
-          console.log(err);
-        }
-      });
-  }, []);
+  const selectedCountry = COUNTRY_CODES.find((item) => item.iso === countryIso) || COUNTRY_CODES.find((item) => item.code === countryCode) || COUNTRY_CODES[0];
+  const isPhoneComplete = phone.length >= selectedCountry.min && phone.length <= selectedCountry.max;
 
   const handlePress = (val: string) => {
     if (val === '') return;
     if (val === 'backspace') {
       setPhone((p) => p.slice(0, -1));
     } else {
-      if (phone.length < 10) setPhone((p) => p + val);
+      if (phone.length < selectedCountry.max) setPhone((p) => p + val);
     }
   };
 
   const handleContinue = async () => {
-    if (phone.length === 10) {
+    if (isPhoneComplete) {
       setIsLoading(true);
       setErrorMsg('');
       try {
@@ -131,7 +126,7 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         handlePress('backspace');
       } else if (e.key === 'Enter') {
         e.preventDefault();
-        if (phone.length === 10) {
+        if (isPhoneComplete) {
           handleContinue();
         }
       }
@@ -139,17 +134,14 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [phone, isLoading, authMode, countryCode]);
-
-  const formatPhone = (p: string) => {
-    if (!p) return '0000000000';
-    return p;
-  };
+    // countryIso matters here too: selectedCountry resolves by iso first, and
+    // it is what decides the accepted digit length.
+  }, [phone, isLoading, authMode, countryCode, countryIso]);
 
   return (
     <ScreenShell tone="light">
       <ScrollView 
-        contentContainerStyle={[styles.phoneContainer, { flexGrow: 1 }]} 
+        contentContainerStyle={[styles.phoneContainer, { flexGrow: 1, paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight || 24) + 20 : 60 }]} 
         bounces={false} 
         showsVerticalScrollIndicator={false}
       >
@@ -170,19 +162,49 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         <View style={styles.inputWrapper}>
           <View style={styles.inputBox}>
             <TouchableOpacity 
-              style={styles.flagContainer} 
+              style={styles.countrySelector} 
               activeOpacity={0.7} 
-              onPress={cycleCountryCode}
+              onPress={() => setIsCountryOpen(true)}
             >
-              <MaterialIcons name="flag" size={16} color="#5A155A" />
-              <Text style={styles.countryCode}>{countryCode}</Text>
+              <View style={styles.countryIsoBadge}>
+                <Text style={styles.countryIsoText}>{selectedCountry.iso}</Text>
+              </View>
+              <View style={styles.countryCodeBlock}>
+                <Text style={styles.countryName} numberOfLines={1}>{selectedCountry.country}</Text>
+                <Text style={styles.countryCode}>{countryCode}</Text>
+              </View>
+              <MaterialIcons name="keyboard-arrow-down" size={18} color="#5A155A" />
               <View style={styles.divider} />
             </TouchableOpacity>
-            <Text 
+            {/* A real TextInput, not a Text: this is the first field in the
+                signup funnel, and as a Text it could not be autofilled, pasted
+                into, or corrected mid-way. The numpad below still drives the
+                same state, so both input methods stay in sync. */}
+            <TextInput
               style={[styles.inputText, !phone && styles.placeholderText, { flex: 1 }, Platform.OS === 'web' && { outlineStyle: 'none' } as any]}
-            >
-              {phone ? formatPhone(phone) : '0000000000'}
-            </Text>
+              value={phone}
+              onChangeText={(text) => {
+                // Autofill and paste often arrive with the country code, spaces
+                // or punctuation attached.
+                let digits = text.replace(/\D/g, '');
+                const bare = countryCode.replace(/\D/g, '');
+                if (bare && digits.startsWith(bare) && digits.length > selectedCountry.max) {
+                  digits = digits.slice(bare.length);
+                }
+                setPhone(digits.slice(0, selectedCountry.max));
+              }}
+              placeholder="0000000000"
+              placeholderTextColor="#B9A7B9"
+              keyboardType="phone-pad"
+              textContentType="telephoneNumber"
+              autoComplete="tel"
+              inputMode="tel"
+              maxLength={selectedCountry.max}
+              returnKeyType="done"
+              onSubmitEditing={() => { if (isPhoneComplete && !isLoading) handleContinue(); }}
+              accessibilityLabel="Phone number"
+              numberOfLines={1}
+            />
           </View>
         </View>
 
@@ -195,14 +217,16 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
               <Pressable
                 key={i}
                 onPress={() => handlePress(key)}
+                accessibilityRole="button"
+                accessibilityLabel={key === 'backspace' ? 'Delete last digit' : key}
                 style={({ pressed }) => [
-                  styles.numpadKey, 
+                  styles.numpadKey,
                   styles.numpadKeyElevated,
                   pressed && { transform: [{ translateY: 2 }], boxShadow: 'none' }
                 ]}
               >
                 {key === 'backspace' ? (
-                  <MaterialIcons name="backspace" size={20} color="#3A0D3A" />
+                  <MaterialIcons name="backspace" size={26} color="#3A0D3A" />
                 ) : (
                   <Text style={styles.numpadText}>{key}</Text>
                 )}
@@ -213,13 +237,13 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         
         <View style={styles.footer}>
           <Pressable
-            disabled={phone.length < 10 || isLoading}
+            disabled={!isPhoneComplete || isLoading}
             onPress={handleContinue}
           >
             {({ pressed }) => (
               <View style={[
                 styles.continueButtonWrapper,
-                (phone.length < 10) && styles.disabledWrapper,
+                !isPhoneComplete && styles.disabledWrapper,
                 pressed && { elevation: 0, shadowOpacity: 0, boxShadow: 'none' }
               ]}>
                 <LinearGradient
@@ -244,6 +268,52 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
           </Pressable>
 
         </View>
+
+        <Modal
+          visible={isCountryOpen}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setIsCountryOpen(false)}
+        >
+          <Pressable style={styles.modalOverlay} onPress={() => setIsCountryOpen(false)}>
+            <View style={styles.countrySheet}>
+              <View style={styles.countrySheetHeader}>
+                <Text style={styles.countrySheetTitle}>Select Country Code</Text>
+                <TouchableOpacity hitSlop={tap36} style={styles.countryCloseButton} onPress={() => setIsCountryOpen(false)}
+                  accessibilityRole="button"
+                  accessibilityLabel="Close">
+                  <MaterialIcons name="close" size={20} color="#5A155A" />
+                </TouchableOpacity>
+              </View>
+              {COUNTRY_CODES.map((item) => {
+                const isSelected = item.iso === selectedCountry.iso;
+                return (
+                  <TouchableOpacity
+                    key={`${item.iso}-${item.code}`}
+                    style={[styles.countryOption, isSelected && styles.countryOptionSelected]}
+                    activeOpacity={0.78}
+                    onPress={() => {
+                      setCountryCode(item.code);
+                      setCountryIso(item.iso);
+                      // Trim anything the previous country allowed but this one
+                      // does not, so the field can never sit over the limit.
+                      setPhone((p) => p.slice(0, item.max));
+                      setIsCountryOpen(false);
+                    }}
+                  >
+                    <View style={styles.countryOptionLeft}>
+                      <View style={styles.countryIsoBadge}>
+                        <Text style={styles.countryIsoText}>{item.iso}</Text>
+                      </View>
+                      <Text style={styles.countryOptionName}>{item.country}</Text>
+                    </View>
+                    <Text style={styles.countryOptionCode}>{item.code}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </Pressable>
+        </Modal>
       </ScrollView>
     </ScreenShell>
   );
@@ -251,8 +321,7 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
 
 const styles = StyleSheet.create({
   phoneContainer: {
-    paddingTop: 40,
-    paddingHorizontal: 30,
+    paddingHorizontal: 24,
     backgroundColor: skeuo.surface,
   },
   header: {
@@ -260,15 +329,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     marginBottom: 20,
-  },
-  backBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#FAF5EE',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
   },
   brand: {
     color: skeuo.plum,
@@ -301,14 +361,15 @@ const styles = StyleSheet.create({
   inputBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
     backgroundColor: skeuo.surfaceInset,
     borderRadius: 16,
     borderWidth: 1,
     borderColor: skeuo.border,
-    paddingVertical: 20,
-    paddingHorizontal: 20,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
     width: '100%',
+    minHeight: 78,
     boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
     elevation: 2,
     shadowColor: '#533A1D',
@@ -316,29 +377,57 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 3,
   },
-  flagContainer: {
+  countrySelector: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginRight: 15,
+    width: 110,
+    flexShrink: 0,
+  },
+  countryIsoBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F4E7F5',
+    borderWidth: 1,
+    borderColor: '#E1CBE4',
+  },
+  countryIsoText: {
+    color: '#5A155A',
+    fontSize: 11,
+    fontWeight: '900',
+  },
+  countryCodeBlock: {
+    flex: 1,
+    marginLeft: 8,
+    minWidth: 0,
+  },
+  countryName: {
+    color: '#7B6E79',
+    fontSize: 10,
+    fontWeight: '800',
   },
   countryCode: {
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '800',
     color: '#1A1A1A',
-    marginLeft: 6,
   },
   divider: {
     width: 1,
-    height: 20,
+    height: 34,
     backgroundColor: '#E5E7EB',
-    marginLeft: 15,
+    marginLeft: 10,
   },
   inputText: {
     flex: 1,
     fontSize: 22,
-    fontWeight: '600',
+    fontWeight: '700',
     color: '#1A1A1A',
     letterSpacing: 2,
+    textAlign: 'left',
+    marginLeft: 16,
+    minWidth: 0,
   },
   placeholderText: {
     color: '#D1D5DB',
@@ -347,16 +436,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     justifyContent: 'center',
-    gap: 15,
+    gap: 12,
     width: '100%',
+    maxWidth: 290,
+    alignSelf: 'center',
     marginBottom: 20,
   },
   numpadKey: {
-    width: '28%',
-    aspectRatio: 2,
+    width: 82,
+    height: 56,
     alignItems: 'center',
     justifyContent: 'center',
-    borderRadius: 12,
+    borderRadius: 16,
   },
   numpadKeyElevated: {
     backgroundColor: skeuo.surfaceRaised,
@@ -406,15 +497,74 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
   },
-  toggleAuthModeBtn: {
-    marginTop: 12,
-    alignItems: 'center',
-    paddingVertical: 10,
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(32, 16, 36, 0.32)',
+    justifyContent: 'flex-end',
   },
-  toggleAuthModeText: {
+  countrySheet: {
+    alignSelf: 'center',
+    width: '100%',
+    maxWidth: 430,
+    maxHeight: '72%',
+    backgroundColor: skeuo.surface,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 24,
+    boxShadow: Platform.OS === 'web' ? '0 -14px 34px rgba(54, 30, 58, 0.18)' : undefined,
+  },
+  countrySheetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  countrySheetTitle: {
+    color: skeuo.plum,
+    fontSize: 18,
+    fontWeight: '900',
+    fontFamily: 'serif',
+  },
+  countryCloseButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F4EEE8',
+  },
+  countryOption: {
+    minHeight: 52,
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  countryOptionSelected: {
+    backgroundColor: '#F7ECF8',
+    borderColor: '#E1CBE4',
+  },
+  countryOptionLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+    gap: 10,
+  },
+  countryOptionName: {
+    flex: 1,
+    color: '#3A0D3A',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  countryOptionCode: {
     color: '#5A155A',
     fontSize: 14,
-    fontWeight: '700',
-    letterSpacing: -0.2,
+    fontWeight: '900',
   },
 });

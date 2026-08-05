@@ -1,0 +1,344 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function changedKeys() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
+    // Public profile fields only. Phone numbers and push tokens live in
+    // /user_private, password material in /user_credentials, because a document
+    // that any signed-in user can read must not carry private data.
+    function userCreateKeys() {
+      return [
+        'uid',
+        'language',
+        'country',
+        'state',
+        'city',
+        'nickname',
+        'username',
+        'age',
+        'gender',
+        'bio',
+        'avatarUrl',
+        'avatar3dUrl',
+        'avatarData',
+        'coins',
+        'hearts',
+        'respectBadges',
+        'unrewardedCallSeconds',
+        'totalReceivedCallSeconds',
+        'tier',
+        'isOnline',
+        'isActiveMode',
+        'isSessionActive',
+        'following',
+        'createdAt',
+        'lastActive'
+      ];
+    }
+
+    function userMutableKeys() {
+      return [
+        'language',
+        'country',
+        'state',
+        'city',
+        'nickname',
+        'username',
+        'age',
+        'gender',
+        'bio',
+        'avatarUrl',
+        'avatar3dUrl',
+        'avatarData',
+        'isOnline',
+        'isActiveMode',
+        'isSessionActive',
+        'following',
+        'lastActive'
+      ];
+    }
+
+    function privilegedFields() {
+      return ['password', 'passwordHash', 'phoneNumber', 'expoPushToken'];
+    }
+
+    // On create, the document must not contain any privileged field at all.
+    function noPrivilegedFieldsOnCreate() {
+      return !request.resource.data.keys().hasAny(privilegedFields());
+    }
+
+    // On update, only the *changed* keys are inspected. Checking the whole
+    // document would lock existing accounts out of editing their profile
+    // entirely, because pre-migration documents still carry phoneNumber.
+    function noPrivilegedFieldsChanged() {
+      return !changedKeys().hasAny(privilegedFields());
+    }
+
+    function participantInChat(chatId) {
+      return signedIn()
+        && get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]);
+    }
+
+    // Ownership and pricing fields on a room may only ever be set by its host.
+    // Everything else (membership counts, queues, turn state) is writable by
+    // participants, which is what the gameplay clients actually need.
+    function roomProtectedKeys() {
+      return ['hostUid', 'createdAt', 'ticketPrice', 'ratePerMin', 'gameMode', 'tier', 'status'];
+    }
+
+    /** Reads a field off a room document, for subcollection rules. */
+    function roomField(collectionName, roomId, field) {
+      return get(/databases/$(database)/documents/$(collectionName)/$(roomId)).data[field];
+    }
+
+    function canUpdateRoom() {
+      return signedIn() && (
+        resource.data.hostUid == request.auth.uid
+        || !changedKeys().hasAny(roomProtectedKeys())
+      );
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create: if isOwner(userId)
+        && request.resource.data.keys().hasOnly(userCreateKeys())
+        && request.resource.data.uid == userId
+        && request.resource.data.coins == 500
+        && request.resource.data.hearts == 0
+        && request.resource.data.respectBadges == 0
+        && noPrivilegedFieldsOnCreate();
+      allow update: if isOwner(userId)
+        && changedKeys().hasOnly(userMutableKeys())
+        && noPrivilegedFieldsChanged();
+      allow delete: if isOwner(userId);
+
+      // One document per follower, id = follower uid, so a user can only ever
+      // add or remove themselves from someone else's follower list.
+      match /followers/{followerUid} {
+        allow read: if signedIn();
+        allow create: if isOwner(followerUid)
+          && request.resource.data.uid == followerUid;
+        allow delete: if isOwner(followerUid);
+        allow update: if false;
+      }
+    }
+
+    // Owner-only. Holds phoneNumber and expoPushToken; the backend reads it via
+    // the Admin SDK when it needs to deliver a push or look up an account.
+    match /user_private/{userId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // Password hashes. Server-side only, in both directions.
+    match /user_credentials/{userId} {
+      allow read, write: if false;
+    }
+
+    match /incoming_calls/{receiverId} {
+      allow read, update, delete: if signedIn()
+        && (request.auth.uid == receiverId || resource.data.callerUid == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.callerUid == request.auth.uid
+        && request.resource.data.receiverUid == receiverId;
+    }
+
+    match /chats/{chatId} {
+      allow create: if signedIn()
+        && request.resource.data.participants is list
+        && request.resource.data.participants.hasAny([request.auth.uid]);
+      allow read, update, delete: if signedIn()
+        && resource.data.participants.hasAny([request.auth.uid]);
+
+      match /messages/{messageId} {
+        allow read: if participantInChat(chatId);
+        allow create: if participantInChat(chatId)
+          && request.resource.data.senderId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+
+    // Call history. Opened by the caller, readable and closable by either party.
+    match /calls/{callId} {
+      allow read: if signedIn()
+        && (resource.data.callerUid == request.auth.uid
+            || resource.data.receiverUid == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.callerUid == request.auth.uid;
+      allow update: if signedIn()
+        && (resource.data.callerUid == request.auth.uid
+            || resource.data.receiverUid == request.auth.uid)
+        && !changedKeys().hasAny(['callerUid', 'receiverUid', 'createdAt']);
+      allow delete: if false;
+    }
+
+    // Pricing and payout rates. Written only by the backend admin endpoint.
+    match /settings/{docId} {
+      allow read: if signedIn();
+      allow write: if false;
+    }
+
+    // Open and settled coin top-ups. Written only by the Admin SDK, and closed
+    // to clients in both directions: a readable order would leak the frozen
+    // coin yield, and a writable one would let a client mark itself paid.
+    match /coin_orders/{orderId} {
+      allow read, write: if false;
+    }
+
+    // Payout requests awaiting manual review. A user may file their own and
+    // read it back, but never approve it: status is fixed to "pending" on
+    // create and the client cannot update or delete afterwards.
+    match /withdrawalRequests/{requestId} {
+      allow read: if signedIn() && resource.data.uid == request.auth.uid;
+      allow create: if signedIn()
+                    && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.keys().hasOnly(
+                         ['uid', 'hearts', 'amountInr', 'status', 'createdAt'])
+                    && request.resource.data.hearts is number
+                    && request.resource.data.amountInr is number
+                    && request.resource.data.hearts > 0
+                    && request.resource.data.amountInr > 0;
+      allow update, delete: if false;
+    }
+
+    match /chill_rooms/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
+      allow update: if canUpdateRoom();
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
+
+      match /events/{eventId} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.resource.data.senderUid == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      // The round's answer. Only the actor performing it and the host running
+      // the game may read it — a guesser subscribing here is denied, which is
+      // the entire point of moving it off the shared room document.
+      match /private/{docId} {
+        allow read: if signedIn() && (
+          roomField('chill_rooms', roomId, 'actorUid') == request.auth.uid
+          || roomField('chill_rooms', roomId, 'hostUid') == request.auth.uid
+        );
+        allow write: if signedIn()
+          && roomField('chill_rooms', roomId, 'hostUid') == request.auth.uid;
+      }
+
+      // Heartbeat presence. A client may only assert its own presence, and the
+      // host may evict. Nothing billable is stored here — Chill rooms are free
+      // to sit in — so unlike expert_rooms there are no protected fields.
+      match /members/{memberUid} {
+        allow read: if signedIn();
+        allow create, update: if isOwner(memberUid);
+        allow delete: if isOwner(memberUid)
+          || roomField('chill_rooms', roomId, 'hostUid') == request.auth.uid;
+      }
+    }
+
+    match /expert_rooms/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
+      allow update: if canUpdateRoom();
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
+
+      match /events/{eventId} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.resource.data.senderUid == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      // Gift leaderboard, keyed by sender.
+      match /gifters/{gifterUid} {
+        allow read: if signedIn();
+        allow create, update: if isOwner(gifterUid);
+        allow delete: if false;
+      }
+
+      // A user may only raise or lower their own hand; the host may clear one.
+      match /hand_requests/{requesterUid} {
+        allow read: if signedIn();
+        allow create: if isOwner(requesterUid);
+        allow delete: if isOwner(requesterUid)
+          || roomField('expert_rooms', roomId, 'hostUid') == request.auth.uid;
+        allow update: if false;
+      }
+
+      // Membership drives per-minute billing. Clients create and remove their
+      // own record, but the billing fields are written only by the backend
+      // through the Admin SDK.
+      match /members/{memberUid} {
+        allow read: if signedIn();
+        allow create: if isOwner(memberUid)
+          && !request.resource.data.keys().hasAny(['lastBilledAt', 'coinsSpent', 'secondsInRoom']);
+        allow update: if isOwner(memberUid)
+          && !changedKeys().hasAny(['lastBilledAt', 'coinsSpent', 'secondsInRoom']);
+        allow delete: if isOwner(memberUid)
+          || roomField('expert_rooms', roomId, 'hostUid') == request.auth.uid;
+      }
+    }
+
+    // public_rooms intentionally has no rules: the "go live and take call
+    // requests" feature was never built (every service function was dead code
+    // with no call sites). Default-deny is correct until it exists — leaving an
+    // open rule for a collection nothing reads is pure downside.
+
+    match /ludo_rooms/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
+      allow update: if canUpdateRoom();
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
+
+      match /events/{eventId} {
+        allow read: if signedIn();
+        allow create: if signedIn() && request.resource.data.senderUid == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      // Heartbeat presence, covering players and spectators alike. Seats and
+      // stakes live on the room's `players` array and are not affected by this
+      // — a player who briefly drops offline keeps their seat.
+      match /members/{memberUid} {
+        allow read: if signedIn();
+        allow create, update: if isOwner(memberUid);
+        allow delete: if isOwner(memberUid)
+          || roomField('ludo_rooms', roomId, 'hostUid') == request.auth.uid;
+      }
+    }
+
+    match /rooms/{roomId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && (request.resource.data.host.uid == request.auth.uid || request.resource.data.guest.uid == request.auth.uid);
+      allow update, delete: if signedIn()
+        && (resource.data.host.uid == request.auth.uid || resource.data.guest.uid == request.auth.uid);
+      // No subcollections are used under a matchmaking room; default-deny.
+    }
+
+    match /matchmaking_pool/{docId} {
+      allow read: if signedIn();
+      allow create, update: if isOwner(docId)
+        && request.resource.data.uid == request.auth.uid;
+      allow delete: if isOwner(docId);
+
+      // A second searcher claims this entry to pair up. Only the pairing fields
+      // may change, and only out of the 'searching' state, so an entry cannot be
+      // hijacked or rewritten by a third party.
+      allow update: if signedIn()
+        && resource.data.status == 'searching'
+        && request.resource.data.status == 'matched'
+        && request.resource.data.uid == resource.data.uid
+        && changedKeys().hasOnly(['status', 'matchedRoomId']);
+    }
+  }
+}

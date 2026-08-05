@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import { Alert } from '../components/CustomAlert';
+import React, { useEffect, useRef, useState } from 'react';
 import { Platform, ActivityIndicator,
-  Alert,
+  KeyboardAvoidingView,
   ScrollView,
   StyleSheet,
   Text,
@@ -12,12 +13,13 @@ import { Platform, ActivityIndicator,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
-import { collection, getDocs, query, where } from 'firebase/firestore';
 import DiamondBadge from '../components/DiamondBadge';
-import { AvatarData, DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';
-import { auth, db } from '../config/firebase';
+import { DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';
+import { auth } from '../config/firebase';
+import { checkUsernameAvailable } from '../services/authService';
 import { getUserProfile, saveUserProfile } from '../services/userService';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
+import { tap42 } from '../theme/touch';
 
 const COUNTRY_LANGUAGE_MAP: Record<string, string[]> = {
   'United States': ['English', 'Spanish'],
@@ -37,6 +39,7 @@ const COUNTRIES = Object.keys(COUNTRY_LANGUAGE_MAP).sort();
 
 type ProfileDetailsScreenProps = {
   navigate: (screen: string, params?: any) => void;
+  goBack?: () => void;
   route: any;
 };
 
@@ -54,10 +57,101 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
   const [bio, setBio] = useState(route?.params?.bio || '');
   const [isLoading, setIsLoading] = useState(false);
   const [usernameError, setUsernameError] = useState(false);
+  // Return advances through the form instead of dismissing the keyboard.
+  const usernameRef = useRef<TextInput>(null);
+  const ageRef = useRef<TextInput>(null);
   const [ageError, setAgeError] = useState(false);
   
   const [isCountryModalVisible, setIsCountryModalVisible] = useState(false);
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
+  const [isDetectingState, setIsDetectingState] = useState(false);
+  const [autoDetectedState, setAutoDetectedState] = useState(false);
+
+  const detectStateAutomatically = async (isUserInitiated = false) => {
+    if (!isUserInitiated && (stateText || route?.params?.state || isEditMode)) return;
+    setIsDetectingState(true);
+    try {
+      let detectedRegion = '';
+      let detectedCountry = '';
+      let detectedCity = '';
+
+      // Primary: ipwhois.app
+      try {
+        const res = await fetch('https://ipwhois.app/json/');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.success !== false && data.region) {
+            detectedRegion = data.region;
+            detectedCountry = data.country || '';
+            detectedCity = data.city || '';
+          }
+        }
+      } catch (err) {
+        console.warn('ipwhois fallback needed:', err);
+      }
+
+      // Fallback 1: ipapi.co
+      if (!detectedRegion) {
+        try {
+          const res2 = await fetch('https://ipapi.co/json/');
+          if (res2.ok) {
+            const data2 = await res2.json();
+            if (data2.region) {
+              detectedRegion = data2.region;
+              detectedCountry = data2.country_name || '';
+              detectedCity = data2.city || '';
+            }
+          }
+        } catch (err2) {
+          console.warn('ipapi fallback needed:', err2);
+        }
+      }
+
+      // Fallback 2: freeipapi.com
+      if (!detectedRegion) {
+        try {
+          const res3 = await fetch('https://freeipapi.com/api/json/');
+          if (res3.ok) {
+            const data3 = await res3.json();
+            if (data3.regionName) {
+              detectedRegion = data3.regionName;
+              detectedCountry = data3.countryName || '';
+              detectedCity = data3.cityName || '';
+            }
+          }
+        } catch (err3) {
+          console.warn('freeipapi fallback needed:', err3);
+        }
+      }
+
+      if (detectedRegion) {
+        setStateText(detectedRegion);
+        setAutoDetectedState(true);
+      }
+      if (!city && detectedCity) {
+        setCity(detectedCity);
+      }
+      if (!country && detectedCountry) {
+        setCountry(detectedCountry);
+      }
+      if (isUserInitiated && !detectedRegion) {
+        Alert.alert('Detection Notice', 'Could not detect location automatically. Please enter your state manually.');
+      }
+    } catch (e) {
+      if (isUserInitiated) {
+        Alert.alert('Detection Failed', 'Unable to automatically detect location. Please check your network.');
+      }
+    } finally {
+      setIsDetectingState(false);
+    }
+  };
+
+  useEffect(() => {
+    // Auto-detect state name automatically during registration when screen mounts
+    if (!isEditMode && !stateText && !route?.params?.state) {
+      detectStateAutomatically(false);
+    }
+  }, []);
 
   const handleUsernameChange = (val: string) => {
     setUsername(val);
@@ -130,19 +224,11 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
     setIsLoading(true);
     try {
       const cleanUsername = username.trim().toLowerCase();
-      const usersRef = collection(db, 'users');
-      const q = query(usersRef, where('username', '==', cleanUsername));
-      const querySnapshot = await getDocs(q);
-      let isUnique = true;
-
-      // Ensure username is globally unique across all users
-      if (!querySnapshot.empty) {
-        querySnapshot.forEach((docSnap) => {
-          if (docSnap.id !== auth.currentUser?.uid) {
-            isUnique = false;
-          }
-        });
-      }
+      // Goes through the backend (Admin SDK) rather than a client Firestore
+      // query: during signup this runs before signInWithCustomToken, so there
+      // is no Firebase Auth session yet and the users/{uid} read rule would
+      // reject a direct client query outright.
+      const isUnique = await checkUsernameAvailable(cleanUsername, auth.currentUser?.uid);
 
       if (!isUnique) {
         Alert.alert('Username Taken', 'This username is already in use. Please choose another one.');
@@ -178,7 +264,8 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
           state: stateText,
           city,
           language,
-          bio: bio.trim()
+          bio: bio.trim(),
+          avatar: avatarData
         });
       }
 
@@ -193,7 +280,9 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
   return (
     <View style={styles.container}>
       <View style={styles.stageHeader}>
-        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton} hitSlop={tap42}
+          accessibilityRole="button"
+          accessibilityLabel="Go back">
           <MaterialIcons name="arrow-back" size={23} color={skeuo.plum} />
         </TouchableOpacity>
         <Text style={styles.brand}>Gengal</Text>
@@ -201,12 +290,25 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
       </View>
 
       <View style={styles.contentArea}>
-        <ScrollView contentContainerStyle={styles.infoContainer}>
+        {/* Long form: the lower fields (State, City, Gender) and the Save
+            button were sitting under the keyboard on smaller devices. */}
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        >
+        <ScrollView contentContainerStyle={styles.infoContainer} keyboardShouldPersistTaps="handled">
           <Text style={styles.infoTitle}>Profile Details</Text>
 
           <View style={styles.formGroup}>
             <Text style={styles.label}>NICKNAME</Text>
-            <TextInput style={styles.input} value={nickname} onChangeText={setNickname} />
+            <TextInput
+              style={styles.input}
+              value={nickname}
+              onChangeText={setNickname}
+              returnKeyType="next"
+              onSubmitEditing={() => usernameRef.current?.focus()}
+              accessibilityLabel="Nickname"
+            />
             <Text style={styles.hintText}>Your public display name</Text>
           </View>
 
@@ -217,13 +319,32 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
 
           <View style={styles.formGroup}>
             <Text style={styles.label}>USERNAME</Text>
-            <TextInput style={[styles.input, usernameError && styles.inputError]} value={username} onChangeText={handleUsernameChange} autoCapitalize="none" />
+            <TextInput
+              ref={usernameRef}
+              style={[styles.input, usernameError && styles.inputError]}
+              value={username}
+              onChangeText={handleUsernameChange}
+              autoCapitalize="none"
+              autoCorrect={false}
+              returnKeyType="next"
+              onSubmitEditing={() => ageRef.current?.focus()}
+              accessibilityLabel="Username"
+            />
             <Text style={[styles.hintText, usernameError && styles.hintError]}>Only lowercase letters, numbers, and underscores</Text>
           </View>
 
           <View style={styles.formGroup}>
             <Text style={styles.label}>AGE</Text>
-            <TextInput style={[styles.input, ageError && styles.inputError]} value={age} onChangeText={handleAgeChange} keyboardType="numeric" />
+            <TextInput
+              ref={ageRef}
+              style={[styles.input, ageError && styles.inputError]}
+              value={age}
+              onChangeText={handleAgeChange}
+              keyboardType="number-pad"
+              maxLength={3}
+              returnKeyType="done"
+              accessibilityLabel="Age"
+            />
             <Text style={[styles.hintText, ageError && styles.hintError]}>Must be 18 or older to join</Text>
           </View>
 
@@ -258,22 +379,61 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
           ) : null}
 
           <View style={styles.formGroup}>
-            <Text style={styles.label}>STATE / REGION (Optional)</Text>
-            <TextInput style={styles.input} value={stateText} onChangeText={setStateText} placeholder="e.g. California" placeholderTextColor="#A0A0A0" />
+            <View style={styles.labelRow}>
+              <Text style={[styles.label, { marginBottom: 0 }]}>STATE / REGION</Text>
+              <TouchableOpacity
+                onPress={() => detectStateAutomatically(true)}
+                disabled={isDetectingState}
+                style={styles.autoDetectBtn}
+                activeOpacity={0.8}
+              >
+                {isDetectingState ? (
+                  <ActivityIndicator size="small" color={skeuo.plum} style={{ marginRight: 5 }} />
+                ) : (
+                  <MaterialIcons name="my-location" size={13} color={skeuo.plum} style={{ marginRight: 5 }} />
+                )}
+                <Text style={styles.autoDetectText}>
+                  {isDetectingState ? 'Detecting...' : autoDetectedState ? '✨ Auto-Detected' : 'Auto Detect'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+            <TextInput
+              style={[styles.input, { marginTop: 8 }]}
+              value={stateText}
+              onChangeText={(val) => {
+                setStateText(val);
+                setAutoDetectedState(false);
+              }}
+              placeholder="e.g. Maharashtra (Auto-detecting...)"
+              placeholderTextColor="#A0A0A0"
+            />
+            {autoDetectedState && (
+              <Text style={styles.autoDetectSuccess}>
+                ✓ State automatically detected during registration
+              </Text>
+            )}
           </View>
 
           <View style={styles.formGroup}>
             <Text style={styles.label}>CITY (Optional)</Text>
-            <TextInput style={styles.input} value={city} onChangeText={setCity} placeholder="e.g. Los Angeles" placeholderTextColor="#A0A0A0" />
+            <TextInput
+              style={styles.input}
+              value={city}
+              onChangeText={setCity}
+              placeholder="e.g. Los Angeles"
+              placeholderTextColor="#A0A0A0"
+              returnKeyType="done"
+              accessibilityLabel="City"
+            />
           </View>
 
           <View style={styles.formGroup}>
             <Text style={styles.label}>IDENTITY</Text>
             <View style={styles.genderToggleFrame}>
-              <TouchableOpacity style={[styles.toggleBtn, gender === 'Masculine' && styles.activeMasculine]} onPress={() => setGender('Masculine')}>
+              <TouchableOpacity hitSlop={tap42} style={[styles.toggleBtn, gender === 'Masculine' && styles.activeMasculine]} onPress={() => setGender('Masculine')}>
                 <Text style={[styles.toggleBtnText, gender === 'Masculine' && styles.textActive]}>MASCULINE</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={[styles.toggleBtn, gender === 'Feminine' && styles.activeFeminine]} onPress={() => setGender('Feminine')}>
+              <TouchableOpacity hitSlop={tap42} style={[styles.toggleBtn, gender === 'Feminine' && styles.activeFeminine]} onPress={() => setGender('Feminine')}>
                 <Text style={[styles.toggleBtnText, gender === 'Feminine' && styles.textActive]}>FEMININE</Text>
               </TouchableOpacity>
             </View>
@@ -285,6 +445,7 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
             </LinearGradient>
           </TouchableOpacity>
         </ScrollView>
+        </KeyboardAvoidingView>
       </View>
 
       <Modal visible={isCountryModalVisible} transparent animationType="fade">
@@ -364,21 +525,36 @@ const styles = StyleSheet.create({
   contentArea: { flex: 1 },
   infoContainer: { paddingHorizontal: 24, paddingTop: 28, paddingBottom: 112 },
   infoTitle: { color: skeuo.plum, fontFamily: 'serif', fontSize: 30, fontWeight: '900', marginBottom: 22 },
-  successBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F1F8EA',
-    padding: 12,
-    borderRadius: 16,
-    marginBottom: 22,
-    gap: 8,
-    borderWidth: 1,
-    borderColor: '#D7EDC8',
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  successText: { color: '#4F8B36', fontSize: 13, fontWeight: '800' },
   formGroup: { marginBottom: 18 },
   label: { fontSize: 11, fontWeight: '900', color: '#9A8772', marginBottom: 8, letterSpacing: 1.1 },
+  labelRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  autoDetectBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F7EEFA',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#E2C8E6',
+  },
+  autoDetectText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: skeuo.plum,
+  },
+  autoDetectSuccess: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#3E7B27',
+    marginTop: 6,
+    marginLeft: 4,
+  },
   input: {
     backgroundColor: skeuo.surfaceInset,
     borderRadius: 18,
@@ -390,19 +566,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: skeuo.border,
     boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
-  },
-  pickerContainer: {
-    backgroundColor: skeuo.surfaceInset,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: skeuo.border,
-    boxShadow: Platform.OS === 'web' ? skeuo.insetShadow : undefined,
-    overflow: 'hidden',
-  },
-  picker: {
-    height: 54,
-    color: skeuo.plum,
-    fontWeight: '700',
   },
   modalOverlay: {
     flex: 1,

@@ -1,3 +1,4 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Platform,
@@ -8,8 +9,8 @@ import {
   View,
   Modal,
   ActivityIndicator,
-  Animated,
-} from 'react-native';
+  Animated } from 'react-native';
+import type { TextStyle } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
@@ -24,6 +25,9 @@ import {
   subscribeToChillRooms,
   createChillRoom,
 } from '../services/chillService';
+import { deductUserCoins } from '../services/coinService';
+import { useLiveRooms } from '../hooks/useRoomPresence';
+import RosterStrip from '../components/rooms/RosterStrip';
 import {
   LudoRoom,
   subscribeToLudoRooms,
@@ -39,6 +43,8 @@ interface Props {
 type ActiveGame = 'charades' | 'ludo';
 
 // ── Dumb Charades room card ───────────────────────────────────────────────────
+
+const chillTabular: TextStyle = { fontVariant: ['tabular-nums'] };
 
 function CharadesRoomCard({ room, onJoin }: { room: ChillRoom; onJoin: () => void }) {
   const fade = useRef(new Animated.Value(0)).current;
@@ -56,7 +62,17 @@ function CharadesRoomCard({ room, onJoin }: { room: ChillRoom; onJoin: () => voi
 
   return (
     <Animated.View style={{ opacity: fade }}>
-      <TouchableOpacity style={crStyles.card} activeOpacity={0.82} onPress={onJoin}>
+      <TouchableOpacity
+        style={crStyles.card}
+        activeOpacity={0.82}
+        onPress={onJoin}
+        accessibilityRole="button"
+        accessibilityLabel={
+          `${room.hostNickname}'s charades room. ${room.language}, ` +
+          `${room.activeMemberCount} ${room.activeMemberCount === 1 ? 'player' : 'players'}. ` +
+          `${phaseLabel[room.phase] ?? room.phase}. Free to join.`
+        }
+      >
         <LinearGradient colors={['#1A0714', '#2E0138']} style={StyleSheet.absoluteFill} />
         <View style={crStyles.row}>
           <View style={crStyles.avatar}>
@@ -64,17 +80,21 @@ function CharadesRoomCard({ room, onJoin }: { room: ChillRoom; onJoin: () => voi
           </View>
           <View style={crStyles.info}>
             <Text style={crStyles.host} numberOfLines={1}>{room.hostNickname}</Text>
-            <Text style={crStyles.sub}>{room.language} · {room.activeMemberCount} players</Text>
+            <Text style={[crStyles.sub, chillTabular]}>
+              {room.language} · {room.activeMemberCount} {room.activeMemberCount === 1 ? 'player' : 'players'}
+            </Text>
+            {/* Who is actually in there right now, from the host's roster preview. */}
+            <RosterStrip roster={room.roster} count={room.activeMemberCount} size={20} tone="dark" />
           </View>
           <View style={[crStyles.pill, { borderColor: color + '55', backgroundColor: color + '18' }]}>
             {room.phase === 'acting' && <View style={[crStyles.dot, { backgroundColor: color }]} />}
             <Text style={[crStyles.pillText, { color }]}>{phaseLabel[room.phase] ?? room.phase}</Text>
           </View>
         </View>
-        <TouchableOpacity style={crStyles.joinBtn} onPress={onJoin} activeOpacity={0.82}>
+        <View style={crStyles.joinBtn} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
           <MaterialIcons name="login" size={13} color="#FFFDF8" />
-          <Text style={crStyles.joinText}>Join Room</Text>
-        </TouchableOpacity>
+          <Text style={crStyles.joinText}>Join room</Text>
+        </View>
       </TouchableOpacity>
     </Animated.View>
   );
@@ -327,20 +347,35 @@ export default function ChillScreen({ navigate, goBack }: Props) {
   const myAvatarData = profile?.avatarData;
 
   const [activeGame, setActiveGame] = useState<ActiveGame>('ludo');
-  const [charadeRooms, setCharadeRooms] = useState<ChillRoom[]>([]);
+  const [allCharadeRooms, setAllCharadeRooms] = useState<ChillRoom[]>([]);
+  // Rooms whose host stopped heartbeating are abandoned, whatever `status` says.
+  const charadeRooms = useLiveRooms(allCharadeRooms);
   const [ludoRooms, setLudoRooms] = useState<LudoRoom[]>([]);
   const [showCreateCharades, setShowCreateCharades] = useState(false);
+  const [ludoCreateModalVisible, setLudoCreateModalVisible] = useState(false);
   const [creatingLudo, setCreatingLudo] = useState(false);
   const [joiningLudoId, setJoiningLudoId] = useState<string | null>(null);
   const [langFilter, setLangFilter] = useState<string | null>(null);
 
+  // "No rooms yet" and "we haven't heard back yet" look identical otherwise,
+  // so the empty state used to flash on every cold open.
+  const [charadesLoaded, setCharadesLoaded] = useState(false);
+  const [ludoLoaded, setLudoLoaded] = useState(false);
+
   useEffect(() => {
-    const unsub = subscribeToChillRooms(setCharadeRooms, langFilter ?? undefined);
+    setCharadesLoaded(false);
+    const unsub = subscribeToChillRooms((rooms) => {
+      setAllCharadeRooms(rooms);
+      setCharadesLoaded(true);
+    }, langFilter ?? undefined);
     return unsub;
   }, [langFilter]);
 
   useEffect(() => {
-    const unsub = subscribeToLudoRooms(setLudoRooms);
+    const unsub = subscribeToLudoRooms((rooms) => {
+      setLudoRooms(rooms);
+      setLudoLoaded(true);
+    });
     return unsub;
   }, []);
 
@@ -357,15 +392,24 @@ export default function ChillScreen({ navigate, goBack }: Props) {
   }, [navigate]);
 
   // Ludo actions
-  const handleCreateLudo = useCallback(async () => {
+  const handleCreateLudo = useCallback(async (mode: 'per_game' | 'per_token') => {
+    if (!profile || profile.coins === undefined || profile.coins < 10) {
+      Alert.alert('Insufficient Coins', 'You need at least 10 coins to create a room.');
+      return;
+    }
     setCreatingLudo(true);
+    setLudoCreateModalVisible(false);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData);
+      await deductUserCoins(myUid, 10);
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
+    } catch (e) {
+      console.error(e);
+      Alert.alert('Error', 'Failed to create room.');
     } finally {
       setCreatingLudo(false);
     }
-  }, [myUid, myName, myAvatarData, navigate]);
+  }, [myUid, myName, myAvatarData, navigate, profile]);
 
   const handleJoinLudo = useCallback(async (room: LudoRoom) => {
     if (!room.id || joiningLudoId) return;
@@ -488,7 +532,11 @@ export default function ChillScreen({ navigate, goBack }: Props) {
 
               {/* Room list */}
               <View style={styles.list}>
-                {charadeRooms.length === 0 ? (
+                {!charadesLoaded ? (
+                  <View style={styles.empty}>
+                    <ActivityIndicator color="#5B0068" />
+                  </View>
+                ) : charadeRooms.length === 0 ? (
                   <View style={styles.empty}>
                     <MaterialIcons name="theaters" size={42} color="#8B3A93" />
                     <Text style={styles.emptyTitle}>No rooms yet</Text>
@@ -525,7 +573,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                 <TouchableOpacity
                   style={[styles.createBtn, { backgroundColor: '#1A6B33', borderColor: 'rgba(94,187,98,0.3)' },
                     creatingLudo && styles.createBtnLoading]}
-                  onPress={handleCreateLudo}
+                  onPress={() => setLudoCreateModalVisible(true)}
                   disabled={creatingLudo}
                   activeOpacity={0.82}
                 >
@@ -554,7 +602,11 @@ export default function ChillScreen({ navigate, goBack }: Props) {
 
               {/* Room list */}
               <View style={styles.list}>
-                {ludoRooms.length === 0 ? (
+                {!ludoLoaded ? (
+                  <View style={styles.empty}>
+                    <ActivityIndicator color="#5B0068" />
+                  </View>
+                ) : ludoRooms.length === 0 ? (
                   <View style={styles.empty}>
                     <MaterialIcons name="casino" size={42} color="#3F7D2B" />
                     <Text style={styles.emptyTitle}>No rooms open</Text>
@@ -562,7 +614,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                     <TouchableOpacity
                       style={[styles.emptyBtn, { backgroundColor: '#1A6B33' },
                         creatingLudo && styles.createBtnLoading]}
-                      onPress={handleCreateLudo}
+                      onPress={() => setLudoCreateModalVisible(true)}
                       disabled={creatingLudo}
                     >
                       {creatingLudo
@@ -584,24 +636,64 @@ export default function ChillScreen({ navigate, goBack }: Props) {
             </>
           )}
 
-          <View style={{ height: 110 }} />
         </ScrollView>
+
+        <Modal visible={ludoCreateModalVisible} transparent animationType="slide" onRequestClose={() => setLudoCreateModalVisible(false)}>
+          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
+            <View style={{ backgroundColor: '#FFFDF8', width: '85%', borderRadius: 20, padding: 24, alignItems: 'center' }}>
+              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#4A3600', marginBottom: 8 }}>Choose Game Mode</Text>
+              <Text style={{ fontSize: 13, color: '#7E7368', textAlign: 'center', marginBottom: 20 }}>
+                Creating a room costs 10 coins. You will earn a 10% commission from player tickets and bets!
+              </Text>
+              
+              <TouchableOpacity
+                style={[styles.createBtn, { width: '100%', marginBottom: 12, backgroundColor: '#4A3600', justifyContent: 'center' }, creatingLudo && styles.createBtnLoading]}
+                disabled={creatingLudo}
+                accessibilityRole="button"
+                accessibilityLabel="Create per game mode room for 10 coins"
+                onPress={() => handleCreateLudo('per_game')}
+              >
+                <Text style={{color: '#FFF', fontWeight: '800'}}>Per Game Mode</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
+                Players buy a fixed ticket (50 coins) to join your table.
+              </Text>
+
+              <TouchableOpacity
+                style={[styles.createBtn, { width: '100%', backgroundColor: '#1A6B33', marginBottom: 12, justifyContent: 'center' }, creatingLudo && styles.createBtnLoading]}
+                disabled={creatingLudo}
+                accessibilityRole="button"
+                accessibilityLabel="Create per token mode room for 10 coins"
+                onPress={() => handleCreateLudo('per_token')}
+              >
+                <Text style={{color: '#FFF', fontWeight: '800'}}>Per Token Mode</Text>
+              </TouchableOpacity>
+              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
+                Audience bets on colors, and every dice roll costs 15 coins.
+              </Text>
+
+              <TouchableOpacity onPress={() => setLudoCreateModalVisible(false)} style={{ padding: 10 }}>
+                <Text style={{ color: '#8B7A6A', fontWeight: 'bold' }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
+        <CreateCharadesModal
+          visible={showCreateCharades}
+          onClose={() => setShowCreateCharades(false)}
+          onCreate={handleCreateCharades}
+        />
 
         <BottomNav active="Chill" navigate={navigate} />
       </View>
-
-      <CreateCharadesModal
-        visible={showCreateCharades}
-        onClose={() => setShowCreateCharades(false)}
-        onCreate={handleCreateCharades}
-      />
     </ScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 24 },
+  scroll: { paddingBottom: 110 },
   heroPanel: {
     marginHorizontal: 14,
     marginTop: 14,
@@ -740,7 +832,6 @@ const styles = StyleSheet.create({
     borderColor: skeuo.border,
     boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
   },
-  emptyEmoji: { fontSize: 42 },
   emptyTitle: { color: skeuo.plum, fontSize: 18, fontWeight: '900', fontFamily: 'serif' },
   emptyText: { color: '#8E8072', fontSize: 12, fontWeight: '700', textAlign: 'center' },
   emptyBtn: {

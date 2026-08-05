@@ -1,5 +1,6 @@
 import { db } from '../config/firebase';
-import { doc, getDoc, setDoc, updateDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, onSnapshot } from 'firebase/firestore';
+import { authedGet, authedPost } from './authService';
 
 export interface GlobalSettings {
   voiceCallRatePerMin: number;
@@ -15,47 +16,50 @@ export interface GlobalSettings {
 
 const SETTINGS_DOC_ID = 'pricing';
 
-/**
- * Ensures the global settings document exists with default values.
- */
-export const initializeGlobalSettings = async () => {
-  const settingsRef = doc(db, 'settings', SETTINGS_DOC_ID);
-  const snap = await getDoc(settingsRef);
-  if (!snap.exists()) {
-    await setDoc(settingsRef, {
-      voiceCallRatePerMin: 15,
-      videoCallRatePerMin: 30,
-      creatorSharePercentage: 70,
-      femaleExpertHeartsThreshold: 50,
-      maleExpertRespectThreshold: 30,
-      callDurationForHeart: 3,
-      heartToInrRate: 3,
-      minRechargeAmount: 49,
-      inrToCoinRechargeRate: 1.12
-    });
-  }
+export const DEFAULT_SETTINGS: GlobalSettings = {
+  voiceCallRatePerMin: 15,
+  videoCallRatePerMin: 30,
+  creatorSharePercentage: 70,
+  femaleExpertHeartsThreshold: 50,
+  maleExpertRespectThreshold: 30,
+  callDurationForHeart: 3,
+  heartToInrRate: 3,
+  minRechargeAmount: 49,
+  inrToCoinRechargeRate: 1.12,
 };
 
 /**
- * Fetches the current global settings once.
+ * Fetches the current global settings once. Clients read /settings directly;
+ * writes are server-only (see updateGlobalSettings).
  */
 export const getGlobalSettings = async (): Promise<GlobalSettings> => {
-  const settingsRef = doc(db, 'settings', SETTINGS_DOC_ID);
-  const snap = await getDoc(settingsRef);
-  if (snap.exists()) {
-    return snap.data() as GlobalSettings;
+  try {
+    const snap = await getDoc(doc(db, 'settings', SETTINGS_DOC_ID));
+    if (snap.exists()) {
+      return { ...DEFAULT_SETTINGS, ...(snap.data() as GlobalSettings) };
+    }
+  } catch (e) {
+    console.warn('Could not read global settings, using defaults:', e);
   }
-  return {
-    voiceCallRatePerMin: 15,
-    videoCallRatePerMin: 30,
-    creatorSharePercentage: 70,
-    femaleExpertHeartsThreshold: 50,
-    maleExpertRespectThreshold: 30,
-    callDurationForHeart: 3,
-    heartToInrRate: 3,
-    minRechargeAmount: 49,
-    inrToCoinRechargeRate: 1.12
-  };
+  return DEFAULT_SETTINGS;
+};
+
+/**
+ * Whether the signed-in user is on the backend's administrator allowlist. The
+ * client cannot assert this itself.
+ */
+export const checkIsAdmin = async (): Promise<boolean> => {
+  try {
+    const { isAdmin } = await authedGet<{ isAdmin: boolean }>('/api/v1/admin/is-admin');
+    return isAdmin;
+  } catch {
+    return false;
+  }
+};
+
+export const getAdminSettings = async (): Promise<GlobalSettings> => {
+  const { settings } = await authedGet<{ settings: GlobalSettings }>('/api/v1/admin/settings');
+  return { ...DEFAULT_SETTINGS, ...settings };
 };
 
 /**
@@ -65,27 +69,21 @@ export const subscribeToGlobalSettings = (callback: (settings: GlobalSettings) =
   const settingsRef = doc(db, 'settings', SETTINGS_DOC_ID);
   return onSnapshot(settingsRef, (snap) => {
     if (snap.exists()) {
-      callback(snap.data() as GlobalSettings);
+      callback({ ...DEFAULT_SETTINGS, ...(snap.data() as GlobalSettings) });
     } else {
-      callback({
-        voiceCallRatePerMin: 15,
-        videoCallRatePerMin: 30,
-        creatorSharePercentage: 70,
-        femaleExpertHeartsThreshold: 50,
-        maleExpertRespectThreshold: 30,
-        callDurationForHeart: 3,
-        heartToInrRate: 3,
-        minRechargeAmount: 49,
-        inrToCoinRechargeRate: 1.12
-      });
+      callback(DEFAULT_SETTINGS);
     }
+  }, (error) => {
+    console.warn('Error subscribing to global settings:', error);
+    callback(DEFAULT_SETTINGS);
   });
 };
 
 /**
- * Updates the global settings. Requires admin privileges via security rules.
+ * Updates the global settings through the backend, which enforces the admin
+ * allowlist and validates each value. Firestore rules deny all client writes to
+ * /settings, so this cannot be done from the app directly.
  */
 export const updateGlobalSettings = async (newSettings: Partial<GlobalSettings>) => {
-  const settingsRef = doc(db, 'settings', SETTINGS_DOC_ID);
-  await updateDoc(settingsRef, newSettings);
+  await authedPost('/api/v1/admin/settings', { settings: newSettings });
 };

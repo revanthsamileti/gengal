@@ -20,7 +20,7 @@ export function UserProvider({ children }: { children: React.ReactNode }) {
       }
       if (user) {
         unsub = subscribeToUserProfile(user.uid, (data) => {
-          setProfile(data);
+          setProfile(data ? { ...data, uid: user.uid } : null);
         });
       } else {
         setProfile(null);

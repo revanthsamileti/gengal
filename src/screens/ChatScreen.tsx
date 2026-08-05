@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { tap34, tap38, tap40, tap42 } from '../theme/touch';
 import {
   Image,
   KeyboardAvoidingView,
@@ -12,12 +13,13 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
-import { skeuo } from '../theme/skeuomorphic';
 
 import CallPriceTag from '../components/CallPriceTag';
 import ScreenShell from '../components/ScreenShell';
 import { getChatId, sendMessage, subscribeToMessages } from '../services/chatService';
 import { auth } from '../config/firebase';
+import { useActionLock } from '../hooks/useActionLock';
+import { Alert } from '../components/CustomAlert';
 
 type ChatScreenProps = {
   profileName?: string;
@@ -36,9 +38,19 @@ type Message = {
 export default function ChatScreen({ profileName, navigate, goBack, route }: ChatScreenProps) {
   const matchData = route?.params?.matchData;
   const profile = matchData ? {
+    uid: matchData.uid,
     name: matchData.nickname || matchData.name,
     uri: matchData.uri || matchData.avatarUrl || '',
-  } : { name: profileName || 'User', uri: '' };
+  } : { uid: undefined as string | undefined, name: profileName || 'User', uri: '' };
+  const { locked: callLocked, run: runCall } = useActionLock();
+  // Without a uid CallScreen cannot create an offer, so the button must not
+  // pretend to work — it used to navigate and immediately bounce back.
+  const canCall = !!profile.uid;
+
+  const startCall = (mode: 'call' | 'video') =>
+    runCall(() => {
+      navigate('Call', { profileName: profile.name, mode, isCaller: true, matchData });
+    });
   const [draft, setDraft] = useState('');
   const [messages, setMessages] = useState<Message[]>([]);
   const quickReplies = useMemo(
@@ -70,23 +82,38 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
   const handleSend = async (text = draft) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+
+    // Validate before clearing. The guard used to sit after `setDraft('')`, so
+    // a missing chat id wiped what the user typed and sent nothing.
+    if (!chatId || !currentUid) {
+      Alert.alert('Cannot send', 'This conversation is not ready yet. Please try again.', [{ text: 'OK' }]);
+      return;
+    }
+
+    const previousDraft = draft;
     setDraft('');
-    if (!chatId || !currentUid) return;
     try {
       await sendMessage(chatId, currentUid, trimmed);
-    } catch (e) {
-      console.error('Failed to send message', e);
+    } catch (e: any) {
+      // Put the text back rather than destroying it — the send is optimistic,
+      // so a failure has to be recoverable.
+      setDraft(previousDraft);
+      Alert.alert('Message not sent', e?.message || 'Check your connection and try again.', [{ text: 'OK' }]);
     }
   };
 
   return (
     <ScreenShell tone="light">
+      {/* Android needs 'height' here; leaving behavior undefined let the soft
+          keyboard cover the composer entirely. */}
       <KeyboardAvoidingView
         style={styles.phone}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       >
         <View style={styles.header}>
-          <TouchableOpacity style={styles.headerButton} activeOpacity={0.78} onPress={() => goBack ? goBack() : navigate('Home')}>
+          <TouchableOpacity hitSlop={tap40} style={styles.headerButton} activeOpacity={0.78} onPress={() => goBack ? goBack() : navigate('Home')}
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={22} color="#5A075F" />
           </TouchableOpacity>
           <View style={styles.headerProfile}>
@@ -101,17 +128,27 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
           </View>
           <View style={styles.headerActions}>
             <TouchableOpacity
-              style={styles.headerAction}
+              style={[styles.headerAction, (!canCall || callLocked) && { opacity: 0.5 }]}
+              hitSlop={tap38}
               activeOpacity={0.8}
-              onPress={() => navigate('Call', { profileName: profile.name, mode: 'call', isCaller: true })}
+              disabled={!canCall || callLocked}
+              accessibilityRole="button"
+              accessibilityLabel={`Call ${profile.name}`}
+              accessibilityState={{ disabled: !canCall || callLocked }}
+              onPress={() => startCall('call')}
             >
               <MaterialIcons name="phone" size={16} color="#FFF" />
               <CallPriceTag mode="call" />
             </TouchableOpacity>
             <TouchableOpacity
-              style={[styles.headerAction, styles.headerActionDark]}
+              style={[styles.headerAction, styles.headerActionDark, (!canCall || callLocked) && { opacity: 0.5 }]}
+              hitSlop={tap38}
               activeOpacity={0.8}
-              onPress={() => navigate('Call', { profileName: profile.name, mode: 'video', isCaller: true })}
+              disabled={!canCall || callLocked}
+              accessibilityRole="button"
+              accessibilityLabel={`Video call ${profile.name}`}
+              accessibilityState={{ disabled: !canCall || callLocked }}
+              onPress={() => startCall('video')}
             >
               <MaterialIcons name="videocam" size={16} color="#FFF7FF" />
               <CallPriceTag mode="video" />
@@ -156,16 +193,13 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
 
         <View style={styles.quickRow}>
           {quickReplies.map((reply) => (
-            <TouchableOpacity key={reply} style={styles.quickPill} onPress={() => handleSend(reply)}>
+            <TouchableOpacity hitSlop={tap34} key={reply} style={styles.quickPill} onPress={() => handleSend(reply)}>
               <Text style={styles.quickText}>{reply}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
         <View style={styles.composer}>
-          <TouchableOpacity style={styles.composerIcon} activeOpacity={0.8}>
-            <MaterialIcons name="add" size={20} color="#8C7A70" />
-          </TouchableOpacity>
           <TextInput
             value={draft}
             onChangeText={setDraft}
@@ -176,9 +210,12 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
           />
           <TouchableOpacity
             style={[styles.sendButton, draft.trim() ? styles.sendButtonActive : null]}
+            hitSlop={tap42}
             activeOpacity={0.84}
             onPress={() => handleSend(draft)}
-          >
+          
+            accessibilityRole="button"
+            accessibilityLabel="Send message">
             <MaterialIcons name="send" size={18} color="#FFF7FF" />
           </TouchableOpacity>
         </View>
@@ -377,14 +414,6 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: '#F0E7DA',
     backgroundColor: '#FFFCF7',
-  },
-  composerIcon: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#F5EEE5',
   },
   input: {
     flex: 1,

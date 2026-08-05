@@ -1,17 +1,19 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useState, useEffect } from 'react';
 import {
   Platform, View, Text, StyleSheet, ScrollView,
-  TouchableOpacity, TextInput, ActivityIndicator, Alert,
-} from 'react-native';
+  TouchableOpacity, TextInput, ActivityIndicator } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import ScreenShell from '../components/ScreenShell';
 import {
-  initializeGlobalSettings,
-  getGlobalSettings,
+  getAdminSettings,
   updateGlobalSettings,
+  checkIsAdmin,
   GlobalSettings,
 } from '../services/adminService';
+import { useActionLock } from '../hooks/useActionLock';
+import { tap40 } from '../theme/touch';
 
 type Props = { navigate: (s: string, p?: any) => void; goBack?: () => void };
 
@@ -35,31 +37,52 @@ const FIELDS: FieldDef[] = [
 ];
 
 export default function AdminPanelScreen({ navigate, goBack }: Props) {
-  const [settings, setSettings] = useState<Partial<GlobalSettings>>({});
   const [editValues, setEditValues] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // The backend already rejects non-admin writes, but the screen used to render
+  // the full pricing form to anyone who reached it. `navigate('AdminPanel')` is
+  // callable from anywhere, so the gate belongs here too.
+  const [access, setAccess] = useState<'checking' | 'granted' | 'denied'>('checking');
+  const { locked: confirming, run: runSave } = useActionLock();
 
   useEffect(() => {
-    initializeGlobalSettings().then(() =>
-      getGlobalSettings().then((s) => {
-        setSettings(s);
+    let active = true;
+    checkIsAdmin()
+      .then((ok) => { if (active) setAccess(ok ? 'granted' : 'denied'); })
+      .catch(() => { if (active) setAccess('denied'); });
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    if (access !== 'granted') return;
+    // Always resolves: previously an unhandled rejection here left the screen
+    // stuck on the loading spinner forever.
+    getAdminSettings()
+      .then((s) => {
         const vals: Record<string, string> = {};
         FIELDS.forEach(f => { vals[f.key] = String((s as any)[f.key] ?? ''); });
         setEditValues(vals);
-        setLoading(false);
       })
-    );
-  }, []);
+      .catch((e: any) => {
+        setLoadError(e?.message || 'Could not load settings.');
+      })
+      .finally(() => setLoading(false));
+  }, [access]);
 
-  const handleSave = async () => {
+  const collectUpdates = () => {
+    const updates: Partial<GlobalSettings> = {};
+    FIELDS.forEach(f => {
+      const val = parseFloat(editValues[f.key]);
+      if (!isNaN(val)) (updates as any)[f.key] = val;
+    });
+    return updates;
+  };
+
+  const applyUpdates = async (updates: Partial<GlobalSettings>) => {
     setSaving(true);
     try {
-      const updates: Partial<GlobalSettings> = {};
-      FIELDS.forEach(f => {
-        const val = parseFloat(editValues[f.key]);
-        if (!isNaN(val)) (updates as any)[f.key] = val;
-      });
       await updateGlobalSettings(updates);
       Alert.alert('Deployed', 'Global settings updated successfully.');
     } catch (e: any) {
@@ -69,12 +92,40 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
     }
   };
 
+  /**
+   * These rates apply to every user immediately and there is no undo, so the
+   * change is spelled out field by field before it goes live.
+   */
+  const handleSave = () =>
+    runSave(() => {
+      const updates = collectUpdates();
+      const changed = FIELDS
+        .filter(f => (updates as any)[f.key] !== undefined)
+        .map(f => `• ${f.label}: ${f.prefix ?? ''}${(updates as any)[f.key]}${f.suffix ? ' ' + f.suffix : ''}`);
+
+      if (changed.length === 0) {
+        Alert.alert('Nothing to deploy', 'No valid values to save.', [{ text: 'OK' }]);
+        return;
+      }
+
+      Alert.alert(
+        'Deploy to all users?',
+        `This changes pricing for everyone immediately and cannot be undone.\n\n${changed.join('\n')}`,
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Deploy', style: 'destructive', onPress: () => { void applyUpdates(updates); } },
+        ]
+      );
+    });
+
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
         {/* Header */}
         <LinearGradient colors={['#1A0020', '#3B0044']} style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => goBack ? goBack() : navigate('Settings')}>
+          <TouchableOpacity style={styles.backBtn} hitSlop={tap40} onPress={() => goBack ? goBack() : navigate('Settings')}
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={22} color="#FFFDF8" />
           </TouchableOpacity>
           <View style={styles.headerCenter}>
@@ -84,10 +135,27 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
           <View style={{ width: 40 }} />
         </LinearGradient>
 
-        {loading ? (
+        {access === 'checking' ? (
+          <View style={styles.loader}>
+            <ActivityIndicator size="large" color="#4B0054" />
+            <Text style={styles.loaderText}>Verifying access…</Text>
+          </View>
+        ) : access === 'denied' ? (
+          <View style={styles.loader}>
+            <MaterialIcons name="lock" size={32} color="#B45309" />
+            <Text style={styles.loaderText}>
+              This area is restricted to administrators.
+            </Text>
+          </View>
+        ) : loading ? (
           <View style={styles.loader}>
             <ActivityIndicator size="large" color="#4B0054" />
             <Text style={styles.loaderText}>Loading settings…</Text>
+          </View>
+        ) : loadError ? (
+          <View style={styles.loader}>
+            <MaterialIcons name="lock" size={32} color="#B45309" />
+            <Text style={styles.loaderText}>{loadError}</Text>
           </View>
         ) : (
           <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -124,7 +192,15 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
               </View>
             ))}
 
-            <TouchableOpacity style={styles.saveBtn} activeOpacity={0.85} onPress={handleSave} disabled={saving}>
+            <TouchableOpacity
+              style={styles.saveBtn}
+              activeOpacity={0.85}
+              onPress={handleSave}
+              disabled={saving || confirming}
+              accessibilityRole="button"
+              accessibilityLabel="Deploy pricing changes to all users"
+              accessibilityState={{ disabled: saving || confirming }}
+            >
               <LinearGradient colors={['#4B0054', '#7B0085']} style={styles.saveBtnInner}>
                 {saving
                   ? <ActivityIndicator color="#FFF" />

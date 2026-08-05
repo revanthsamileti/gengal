@@ -1,15 +1,20 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useEffect, useRef, useState } from 'react';
-import { Platform, View, Text, StyleSheet, TouchableOpacity, ScrollView, Alert, Animated } from 'react-native';
+import { Platform, View, Text, StyleSheet, TouchableOpacity, ScrollView, Animated } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import ScreenShell from '../components/ScreenShell';
 import { auth, db } from '../config/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
+import { requestWithdrawal } from '../services/withdrawalService';
+import { useActionLock } from '../hooks/useActionLock';
+import { tap40 } from '../theme/touch';
 
 export default function EarningsScreen({ navigate, goBack }: any) {
   const [profile, setProfile] = useState<any>(null);
   const [settings, setSettings] = useState<GlobalSettings | null>(null);
+  const { locked: isSubmitting, run } = useActionLock();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
 
@@ -38,20 +43,32 @@ export default function EarningsScreen({ navigate, goBack }: any) {
   const canWithdraw = hearts >= 33;
   const minWithdraw = 33 * rate;
 
-  const handleWithdraw = () => {
-    Alert.alert(
-      'Withdrawal Requested',
-      `Your withdrawal of ₹${earnings.toFixed(2)} has been submitted. Processing within 24 hours.`,
-      [{ text: 'OK' }]
-    );
-  };
+  const handleWithdraw = () =>
+    run(async () => {
+      try {
+        await requestWithdrawal(hearts, earnings);
+        Alert.alert(
+          'Request submitted',
+          `Your withdrawal request for ₹${earnings.toFixed(2)} has been recorded and is pending review. You'll be notified once it's processed.`,
+          [{ text: 'OK' }]
+        );
+      } catch (e: any) {
+        Alert.alert(
+          'Could not submit request',
+          e?.message || 'Something went wrong. Please try again.',
+          [{ text: 'OK' }]
+        );
+      }
+    });
 
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
         {/* Header */}
         <View style={styles.header}>
-          <TouchableOpacity style={styles.backBtn} onPress={() => goBack ? goBack() : navigate('Home')}>
+          <TouchableOpacity style={styles.backBtn} hitSlop={tap40} onPress={() => goBack ? goBack() : navigate('Home')}
+            accessibilityRole="button"
+            accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={22} color="#4B0054" />
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Earnings</Text>
@@ -136,14 +153,17 @@ export default function EarningsScreen({ navigate, goBack }: any) {
                   : `Need ${33 - hearts} more hearts to reach minimum (₹${minWithdraw.toFixed(0)})`}
               </Text>
               <TouchableOpacity
-                style={[styles.withdrawBtn, !canWithdraw && styles.withdrawBtnOff]}
+                style={[styles.withdrawBtn, (!canWithdraw || isSubmitting) && styles.withdrawBtnOff]}
                 activeOpacity={0.82}
                 onPress={handleWithdraw}
-                disabled={!canWithdraw}
+                disabled={!canWithdraw || isSubmitting}
+                accessibilityRole="button"
+                accessibilityLabel={`Withdraw ${earnings.toFixed(2)} rupees`}
+                accessibilityState={{ disabled: !canWithdraw || isSubmitting }}
               >
-                <MaterialIcons name="payments" size={18} color={canWithdraw ? '#FFFDF8' : '#C0B0C4'} />
-                <Text style={[styles.withdrawBtnText, !canWithdraw && { color: '#C0B0C4' }]}>
-                  Withdraw ₹{earnings.toFixed(2)}
+                <MaterialIcons name="payments" size={18} color={canWithdraw && !isSubmitting ? '#FFFDF8' : '#C0B0C4'} />
+                <Text style={[styles.withdrawBtnText, (!canWithdraw || isSubmitting) && { color: '#C0B0C4' }]}>
+                  {isSubmitting ? 'Submitting…' : `Withdraw ₹${earnings.toFixed(2)}`}
                 </Text>
               </TouchableOpacity>
             </View>

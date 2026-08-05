@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { tap42 } from '../theme/touch';
 import { Platform, Image,
   StyleSheet,
   Text,
@@ -8,7 +9,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import GengalAvatar from '../components/GengalAvatar';
-
+import { RtcSurfaceView } from '../hooks/AgoraViews';
 import { skeuo } from '../theme/skeuomorphic';
 import { useGengalVoice, FreeProvider } from '../hooks/useGengalVoice';
 import { auth, db } from '../config/firebase';
@@ -16,8 +17,34 @@ import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { transferCoins, processCallBilling } from '../services/coinService';
 import { subscribeToGlobalSettings, GlobalSettings } from '../services/adminService';
 import ConnectingOverlay from '../components/ConnectingOverlay';
+import { createCallOffer, acceptCallOffer, rejectCallOffer, subscribeToOutboundCallStatus, clearCallOffer, openCallRecord, closeCallRecord } from '../services/liveRoomService';
+import IncomingCallOverlay from '../components/IncomingCallOverlay';
+import { authedPost } from '../services/authService';
+import { generateRoomId } from '../utils/ids';
+import { Alert } from '../components/CustomAlert';
+import { useActionLock } from '../hooks/useActionLock';
 
-const WATERFALL: FreeProvider[] = ['agora', 'zegocloud'];
+// A call that is never answered must not ring forever: the caller path leaves
+// `isConnecting` true, so neither the peer-timeout nor the heartbeat watchdog
+// can fire. This is the only thing that ends an unanswered outbound call.
+const RING_TIMEOUT_MS = 45000;
+
+/**
+ * Providers the app can actually carry a call on, in preference order.
+ *
+ * Only Agora is implemented — `useGengalVoice.connectSeat` throws for anything
+ * else. Listing `zegocloud` here was worse than useless: on a video call the
+ * hop off Agora fired "Switched to voice — you are being charged the lower
+ * voice rate", which was false, because zego then failed too (no adapter, and
+ * the backend returns 503 without credentials) and the call was dropped a
+ * moment later. One honest "Connection failed" beats a reassuring lie followed
+ * by the same failure.
+ *
+ * Adding a provider back means implementing its adapter first. Keep the
+ * `losesVideo` downgrade below when you do — without it the server keeps
+ * charging the video rate for a call that has gone audio-only.
+ */
+const WATERFALL: FreeProvider[] = ['agora'];
 
 type CallScreenProps = {
   profileName?: string;
@@ -25,27 +52,89 @@ type CallScreenProps = {
   roomId?: string;
   matchData?: any;
   isCaller?: boolean;
-  navigate: (screen: string, params?: { profileName?: string; mode?: 'call' | 'video'; roomId?: string; matchData?: any; isCaller?: boolean }) => void;
+  isIncomingPending?: boolean;
+  navigate: (screen: string, params?: { profileName?: string; mode?: 'call' | 'video'; roomId?: string; matchData?: any; isCaller?: boolean; isIncomingPending?: boolean }) => void;
   goBack: () => void;
 };
 
-export default function CallScreen({ profileName, mode = 'call', roomId, matchData, isCaller, navigate, goBack }: CallScreenProps) {
+export default function CallScreen({ profileName, mode = 'call', roomId: initialRoomId, matchData, isCaller, isIncomingPending = false, navigate, goBack }: CallScreenProps) {
+  const [roomId] = useState(initialRoomId || generateRoomId());
+  // Age is shown only when the peer actually has one. It previously defaulted
+  // to '24', which displayed a fabricated age for every user missing the field.
   const profile = matchData ? {
     name: matchData.nickname || matchData.name,
     uri: matchData.uri || matchData.avatarUrl || '',
-    age: matchData.age || '24', // Default for now
+    age: matchData.age || null,
     avatarData: matchData.avatarData
-  } : { name: profileName || 'User', uri: '', age: '24' };
+  } : { name: profileName || 'User', uri: '', age: null as string | null };
 
-  const isVideo = mode === 'video';
-  const [areCamerasOn, setAreCamerasOn] = useState(true);
+  // Only Agora can render remote video here. If the waterfall falls through to
+  // any other provider the call is audio-only, so it must stop being treated —
+  // and billed — as video.
+  const [videoDowngraded, setVideoDowngraded] = useState(false);
+  const isVideo = mode === 'video' && !videoDowngraded;
   const [isGifting, setIsGifting] = useState(false);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<any>(null);
-  const [isConnecting, setIsConnecting] = useState(true);
+  const [isConnecting, setIsConnecting] = useState(!isIncomingPending);
+  const [isPending, setIsPending] = useState(isIncomingPending);
+  const [callerStatus, setCallerStatus] = useState<'calling' | 'accepted' | 'rejected' | null>(null);
+  const [callStep, setCallStep] = useState<'connecting' | 'ringing' | 'talking'>('connecting');
+  const overlayStatus = (isCaller && callStep === 'ringing') ? 'ringing' : 'connecting';
 
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [callerLiveCoins, setCallerLiveCoins] = useState(0);
+  const [isPeerUnstable, setIsPeerUnstable] = useState(false);
+  const isCallActive = isCaller ? (callerStatus === 'accepted') : (!isPending);
+
+  const lastObservedCallerHeartbeatRef = React.useRef<number | null>(null);
+  const lastObservedReceiverHeartbeatRef = React.useRef<number | null>(null);
+  const lastObservedCallerTimeRef = React.useRef<number>(Date.now());
+  const lastObservedReceiverTimeRef = React.useRef<number>(Date.now());
+
+  const endCall = async () => {
+    disconnectSeat();
+    const user = auth.currentUser;
+    if (isCaller && roomId) {
+      closeCallRecord(roomId);
+    }
+    const incomingCallDocId = isCaller ? matchData?.uid : user?.uid;
+    if (incomingCallDocId) {
+      try {
+        await clearCallOffer(incomingCallDocId);
+      } catch (e) {
+        console.warn("Failed to clear call offer on end call", e);
+      }
+    }
+    goBack();
+  };
+
+  // Guarded so a double-tap on End (or Back) cannot fire two teardowns.
+  const { locked: isEnding, run: runEndCall } = useActionLock();
+  const handleEndCall = () => runEndCall(endCall);
+
+  // An unanswered outbound call otherwise rings indefinitely: the caller path
+  // keeps `isConnecting` true, which disables both the peer timeout and the
+  // heartbeat watchdog below.
+  React.useEffect(() => {
+    if (!isCaller || callStep !== 'ringing') return;
+
+    const timer = setTimeout(() => {
+      Alert.alert('No answer', `${profile.name} did not pick up.`, [{ text: 'OK' }]);
+      void endCall();
+    }, RING_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [isCaller, callStep]);
+
+  // A call needs a resolvable peer uid: without it no offer can be created and
+  // the screen would otherwise sit on the connecting overlay forever.
+  React.useEffect(() => {
+    if (isCaller && !matchData?.uid) {
+      Alert.alert('Unavailable', 'This profile cannot be called right now.', [{ text: 'OK' }]);
+      goBack();
+    }
+  }, [isCaller, matchData?.uid]);
 
   // 0. Fetch current user profile to determine gender/role
   React.useEffect(() => {
@@ -62,60 +151,98 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
 
   // 1. Initialize the 40K Multi-Adapter
   const initialProvider = (matchData?.audioProvider || 'agora') as FreeProvider;
-  const audioToken = matchData?.audioTokenOrUrl || 'TEST_TOKEN';
+  const audioToken = matchData?.audioTokenOrUrl || '';
   const [currentProvider, setCurrentProvider] = useState<FreeProvider>(initialProvider);
-  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn } = useGengalVoice(currentProvider);
+  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn, toggleCamera, cameraOn, flipCamera, localUid, remoteUids } = useGengalVoice(currentProvider);
 
-  // Firestore listener for room provider updates (so both users stay in sync on fallbacks)
+  // Firestore listener for room provider updates (so both users stay in sync on
+  // fallbacks). This lives on the `calls` record rather than `rooms`, because
+  // direct (non-matchmade) calls never create a `rooms` document.
   React.useEffect(() => {
     if (!roomId) return;
-    const unsub = onSnapshot(doc(db, 'rooms', roomId), (snap) => {
+    const unsub = onSnapshot(doc(db, 'calls', roomId), (snap) => {
       if (snap.exists()) {
         const data = snap.data();
         if (data.audioProvider && data.audioProvider !== currentProvider) {
           console.log(`[Waterfall] Room provider changed by peer to ${data.audioProvider}. Connecting...`);
           setCurrentProvider(data.audioProvider as FreeProvider);
         }
+        // The server bills from this field, so it is the authority on what the
+        // call has actually become after a fallback — not the `mode` prop.
+        if (data.mode === 'call' && mode === 'video') {
+          setVideoDowngraded(true);
+        }
       }
     });
     return unsub;
   }, [roomId, currentProvider]);
 
+  // Listen for the incoming_calls document being deleted, which means the call ended.
+  React.useEffect(() => {
+    if (isCaller) return;
+    const user = auth.currentUser;
+    if (!user) return;
+
+    const unsub = onSnapshot(doc(db, 'incoming_calls', user.uid), (snap) => {
+      if (!snap.exists()) {
+        console.log("[CallScreen] Call offer document deleted. Ending call.");
+        disconnectSeat();
+        goBack();
+      } else {
+        const data = snap.data();
+        if (data.status === 'rejected') {
+          console.log("[CallScreen] Call rejected by caller. Ending call.");
+          disconnectSeat();
+          goBack();
+        }
+        
+        // Receiver records caller heartbeat updates (immune to clock drift)
+        if ((data.status === 'accepted' || !isPending) && data.callerHeartbeat) {
+          if (lastObservedCallerHeartbeatRef.current === null || data.callerHeartbeat !== lastObservedCallerHeartbeatRef.current) {
+            lastObservedCallerHeartbeatRef.current = data.callerHeartbeat;
+            lastObservedCallerTimeRef.current = Date.now();
+          }
+        }
+      }
+    });
+    return unsub;
+  }, [isCaller, isPending]);
+
   // 2. Automatically connect to the voice room when the screen mounts or provider changes
   React.useEffect(() => {
     let isMounted = true;
     
+    if (isPending) return; // Wait until accepted!
+    if (isCaller && callerStatus !== 'accepted') return; // Wait for receiver to accept!
+
     const establishSecureCall = async () => {
       if (!roomId) return;
+      if (isMounted) setIsConnecting(true);
       
       let connectionToken = audioToken;
       let extraParam = auth.currentUser?.uid || '';
       const user = auth.currentUser;
 
       const connectionPromise = async () => {
-        // Pre-fetch secure ephemeral key from Flask backend authority if Agora
+        // Ephemeral RTC keys are minted by the backend, which derives the uid
+        // from the bearer token rather than trusting the request body.
         if (currentProvider === 'agora' && user) {
           console.log("[CallScreen] Requesting secure ephemeral key from token authority...");
-          const response = await fetch('https://batboy-glider-sanitary.ngrok-free.dev/api/v1/agora/generate-token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ roomId: roomId, uid: user.uid })
-          });
-          if (!response.ok) throw new Error("Failed to authenticate with token engine");
-          const credentials = await response.json();
+          const credentials = await authedPost<{ token: string; uid?: number }>(
+            '/api/v1/agora/generate-token',
+            { roomId }
+          );
           connectionToken = credentials.token;
+          if (credentials.uid) extraParam = String(credentials.uid);
         } else if (currentProvider === 'zegocloud' && user) {
           console.log("[CallScreen] Resolving crypto credentials from Zego Token Authority...");
-          const response = await fetch('https://batboy-glider-sanitary.ngrok-free.dev/api/v1/zego/generate-token', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ roomId: roomId, uid: user.uid })
-          });
-          if (!response.ok) throw new Error("Zego Authority server rejected proxy call.");
-          const tokenPayload = await response.json();
+          const tokenPayload = await authedPost<{ token: string }>(
+            '/api/v1/zego/generate-token',
+            { roomId }
+          );
           connectionToken = tokenPayload.token;
         }
-        
+
         if (isMounted) {
           await connectSeat(roomId, connectionToken, extraParam);
           if (isMounted) setIsConnecting(false);
@@ -129,19 +256,45 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
       } catch (error) {
         console.error(`[Waterfall] Provider ${currentProvider} failed:`, error);
         
-        // Trigger Waterfall Fallback
+        // Trigger Waterfall Fallback. Only the caller publishes the switch — it
+        // owns the `calls` record, and the receiver picks the change up through
+        // the listener above.
         const currentIndex = WATERFALL.indexOf(currentProvider);
         if (currentIndex !== -1 && currentIndex + 1 < WATERFALL.length) {
           const nextProvider = WATERFALL[currentIndex + 1];
           console.warn(`[Waterfall] Falling back to next adapter: ${nextProvider}`);
-          try {
-            await updateDoc(doc(db, 'rooms', roomId), { audioProvider: nextProvider });
-            // The onSnapshot listener will detect this and update currentProvider automatically
-          } catch (e) {
-            console.error("[Waterfall] Failed to update room with new provider", e);
+          // Falling off Agora means remote video can no longer be rendered.
+          // Downgrade the record to a voice call so the backend stops charging
+          // the video rate for what is now an audio-only call.
+          const losesVideo = mode === 'video' && nextProvider !== 'agora';
+
+          if (isCaller) {
+            try {
+              await updateDoc(doc(db, 'calls', roomId), {
+                audioProvider: nextProvider,
+                ...(losesVideo ? { mode: 'call' } : {}),
+              });
+            } catch (e) {
+              console.error("[Waterfall] Failed to update call record with new provider", e);
+            }
+          } else {
+            setCurrentProvider(nextProvider);
+          }
+
+          if (losesVideo) {
+            setVideoDowngraded(true);
+            Alert.alert(
+              'Switched to voice',
+              'Video was unavailable on this connection, so the call continued as voice — you are being charged the lower voice rate.',
+              [{ text: 'OK' }]
+            );
           }
         } else {
-          alert("All secure video connection routes failed. Please try again later.");
+          Alert.alert(
+            'Connection failed',
+            'We could not establish a secure connection. Please try again later.',
+            [{ text: 'OK' }]
+          );
           goBack();
         }
       }
@@ -153,7 +306,116 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
       isMounted = false;
       disconnectSeat();
     };
-  }, [roomId, currentProvider]);
+  }, [roomId, currentProvider, isPending, isCaller, callerStatus]);
+
+  // 2b. Initiate call if Caller (runs once on mount)
+  React.useEffect(() => {
+    if (!isCaller || !roomId || !matchData?.uid || !currentUserProfile) return;
+    
+    const callerName = currentUserProfile.name || currentUserProfile.nickname || 'Someone';
+    const callerAvatarUrl = currentUserProfile.avatarUrl || currentUserProfile.uri || null;
+
+    import('../services/debugLogger').then(({ logDebugEvent }) => {
+      logDebugEvent('call.createOffer.start', { targetUid: matchData.uid, roomId });
+
+      // Open the history record first so both sides have a document to sync the
+      // active provider through.
+      openCallRecord(
+        roomId,
+        { uid: auth.currentUser!.uid, name: callerName, avatarUrl: callerAvatarUrl, avatarData: currentUserProfile.avatarData },
+        { uid: matchData.uid, name: profile.name, avatarUrl: matchData.avatarUrl || matchData.uri, avatarData: matchData.avatarData },
+        mode
+      ).catch(e => console.warn('Failed to open call record', e));
+
+      createCallOffer(
+        auth.currentUser!.uid,
+        matchData.uid,
+        callerName,
+        callerAvatarUrl,
+        currentUserProfile.avatarData || null,
+        mode,
+        roomId
+      ).then(() => {
+        logDebugEvent('call.createOffer.success', { targetUid: matchData.uid });
+        setCallStep('ringing');
+      }).catch(e => {
+        console.warn('Failed to send call offer', e);
+        logDebugEvent('call.createOffer.failed', { error: String(e), targetUid: matchData.uid }, 'error');
+        Alert.alert('Could not connect', 'Could not reach that user. Please try again.', [{ text: 'OK' }]);
+        goBack();
+      });
+    });
+
+    return () => {
+      if (isCaller && matchData?.uid) {
+        clearCallOffer(matchData.uid).catch(() => {});
+      }
+    };
+  }, [isCaller, roomId, matchData?.uid, currentUserProfile]);
+
+  // 2c. Listen for status changes on the outbound call offer
+  React.useEffect(() => {
+    if (!isCaller || !matchData?.uid) return;
+
+    const unsubStatus = subscribeToOutboundCallStatus(matchData.uid, (status, data) => {
+      setCallerStatus(status);
+      if (status === 'accepted') {
+        setCallStep('talking');
+      } else if (status === 'rejected') {
+        Alert.alert('Call declined', `${profile.name} declined the call.`, [{ text: 'OK' }]);
+        disconnectSeat();
+        goBack();
+      } else if (status === null && callStep === 'talking') {
+        // Only disconnect if the call was already active (talking) and is now cleared
+        disconnectSeat();
+        goBack();
+      }
+
+      // Caller records receiver heartbeat updates (immune to clock drift)
+      const callData = data as any;
+      if (status === 'accepted' && callData?.receiverHeartbeat) {
+        if (lastObservedReceiverHeartbeatRef.current === null || callData.receiverHeartbeat !== lastObservedReceiverHeartbeatRef.current) {
+          lastObservedReceiverHeartbeatRef.current = callData.receiverHeartbeat;
+          lastObservedReceiverTimeRef.current = Date.now();
+        }
+      }
+    });
+
+    return () => {
+      unsubStatus();
+    };
+  }, [isCaller, matchData?.uid, callStep]);
+
+  // 2c. Send periodic local heartbeat to keep the call signaling document alive
+  React.useEffect(() => {
+    if (!isCallActive || !roomId) return;
+    const callDocId = isCaller ? matchData?.uid : auth.currentUser?.uid;
+    if (!callDocId) return;
+
+    const sendHeartbeat = () => {
+      import('../services/liveRoomService').then(({ updateCallHeartbeat }) => {
+        updateCallHeartbeat(callDocId, isCaller ? 'caller' : 'receiver');
+      });
+    };
+
+    sendHeartbeat();
+    const interval = setInterval(sendHeartbeat, 5000);
+    return () => clearInterval(interval);
+  }, [isCallActive, isCaller, roomId, matchData?.uid]);
+
+  // 2d. Auto-hangup if peer is offline on Agora for more than 10 seconds
+  React.useEffect(() => {
+    if (isPending || isConnecting || remoteUids.length > 0) return;
+
+    const timeout = setTimeout(() => {
+      console.log("[CallScreen] Peer connection timeout. Terminating call.");
+      Alert.alert('Call ended', 'The connection to the other person was lost.', [{ text: 'OK' }]);
+      disconnectSeat();
+      goBack();
+    }, 10000);
+
+    return () => clearTimeout(timeout);
+  }, [isPending, isConnecting, remoteUids.length]);
 
   // 3. Fetch global billing settings
   React.useEffect(() => {
@@ -163,96 +425,134 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
     return unsub;
   }, []);
 
-  // 4. Background Billing Loop (Per-Second Batched)
-  const accumulatedCostRef = React.useRef(0);
+  // 4. Background Billing Loop (ticks the server every 15s)
   const syncIntervalRef = React.useRef(0);
 
+  // Periodic check for heartbeat timeout (immune to clock drift)
   React.useEffect(() => {
-    if (!roomId || !matchData?.uid || !globalSettings || !currentUserProfile) return;
+    if (!isCallActive) return;
 
-    // Caller-pays billing logic
-    // We do NOT halt here if they aren't the caller, because both users need to track their cumulative time for rewards.
+    // Reset the baseline timestamps NOW so the watchdog does not fire immediately
+    // on the first tick due to stale component-mount timestamps.
+    lastObservedCallerTimeRef.current = Date.now();
+    lastObservedReceiverTimeRef.current = Date.now();
+    // Also clear any stale heartbeat values so the first snapshot update is counted
+    lastObservedCallerHeartbeatRef.current = null;
+    lastObservedReceiverHeartbeatRef.current = null;
 
-    const billingRatePerMin = isVideo ? globalSettings.videoCallRatePerMin : globalSettings.voiceCallRatePerMin;
-    const sharePercentage = globalSettings.creatorSharePercentage;
-    const billingRatePerSec = billingRatePerMin / 60;
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const lastTime = isCaller ? lastObservedReceiverTimeRef.current : lastObservedCallerTimeRef.current;
+      const elapsed = now - lastTime;
+
+      if (elapsed > 20000) {
+        setIsPeerUnstable(true);
+      } else {
+        setIsPeerUnstable(false);
+      }
+
+      if (elapsed > 45000) {
+        console.log(`[CallScreen] Heartbeat timed out after ${elapsed}ms. Ending call.`);
+        Alert.alert(
+          'Call ended',
+          isCaller ? `${profile.name}'s connection was lost.` : "The caller's connection was lost.",
+          [{ text: 'OK' }]
+        );
+        disconnectSeat();
+        goBack();
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isCallActive, isCaller]);
+
+  React.useEffect(() => {
+    if (!roomId || !matchData?.uid || !globalSettings || !currentUserProfile || !isCallActive) return;
+
+    // Billing is server-authoritative: the backend measures elapsed time from
+    // its own clock and applies the configured rate. Both participants tick the
+    // same endpoint, so the payer cannot ride for free by patching its client.
+    // The local figure below is a display estimate only.
+    const billingRatePerSec =
+      (isVideo ? globalSettings.videoCallRatePerMin : globalSettings.voiceCallRatePerMin) / 60;
 
     const billingInterval = setInterval(async () => {
       const user = auth.currentUser;
       if (!user) return;
 
-      // Accumulate local cost only for the caller
+      // Pause ticks while the peer link is down so neither side pays for dead air.
+      if (isPeerUnstable) {
+        console.log("[CallScreen] Peer connection is unstable. Pausing billing ticks.");
+        return;
+      }
+
       if (isCaller) {
-        accumulatedCostRef.current += billingRatePerSec;
         setCallerLiveCoins(prev => Math.max(0, prev - billingRatePerSec));
       }
-      
+
       syncIntervalRef.current += 1;
       setCallDurationSeconds(prev => prev + 1);
 
-      // Sync to Firestore every 15 seconds
       if (syncIntervalRef.current >= 15) {
+        const secondsInThisBatch = syncIntervalRef.current;
         syncIntervalRef.current = 0;
 
-        if (isCaller) {
-          const costToSync = accumulatedCostRef.current;
-          accumulatedCostRef.current = 0; // Reset immediately to prevent double-charging on next tick
-
-          try {
-            const result = await processCallBilling(user.uid, matchData.uid, costToSync, sharePercentage);
-            console.log(`[Billing Engine] Synced ${costToSync.toFixed(2)}G to Firestore.`);
-            
-            if (result.hasInsufficientFunds) {
-              console.warn(`[Billing Engine] Call disconnected: User ran out of coins.`);
-              alert("You have run out of coins. 💎");
-              disconnectSeat();
-              goBack();
-            }
-          } catch (error: any) {
-            console.warn(`[Billing Engine] Error syncing billing: ${error.message}`);
-            // If transaction completely fails, restore the accumulated cost
-            accumulatedCostRef.current += costToSync;
-          }
-        }
-
-        // Sync Cumulative Time & Rewards for BOTH users
         try {
-          const { updateCallRewards } = await import('../services/coinService');
-          await updateCallRewards(user.uid, 15, globalSettings.callDurationForHeart, !isCaller);
-          console.log(`[Rewards Engine] Synced 15 seconds of call time for rewards.`);
-        } catch (e) {
-          console.warn("[Rewards Engine] Failed to update call rewards", e);
+          const result = await processCallBilling(roomId);
+
+          // Keep the on-screen balance aligned with the authoritative figure.
+          if (isCaller && typeof result.payerNewBalance === 'number') {
+            setCallerLiveCoins(result.payerNewBalance);
+          }
+
+          if (result.hasInsufficientFunds) {
+            console.warn(`[Billing Engine] Call disconnected: User ran out of coins.`);
+            Alert.alert(
+              'Call ended',
+              isCaller
+                ? 'You have run out of coins. Top up to keep talking.'
+                : 'The caller has run out of coins.',
+              [{ text: 'OK' }]
+            );
+            disconnectSeat();
+            goBack();
+            return;
+          }
+        } catch (error: any) {
+          console.warn(`[Billing Engine] Error syncing billing: ${error.message}`);
         }
+
+        // Rewards are staggered so they do not contend with the billing
+        // transaction on the same user document.
+        setTimeout(async () => {
+          try {
+            const { updateCallRewards } = await import('../services/coinService');
+            await updateCallRewards(user.uid, secondsInThisBatch, globalSettings.callDurationForHeart, !isCaller);
+          } catch (e) {
+            console.warn("[Rewards Engine] Failed to update call rewards", e);
+          }
+        }, isCaller ? 3000 : 6000);
       }
-    }, 1000); // Execute every 1 second
+    }, 1000);
 
     return () => {
       clearInterval(billingInterval);
-      
-      // Flush any remaining unbilled seconds to Firestore when the component unmounts (call ends)
-      const remainingSeconds = syncIntervalRef.current;
-      
-      if (isCaller && accumulatedCostRef.current > 0) {
-        const user = auth.currentUser;
-        if (user) {
-          const finalCost = accumulatedCostRef.current;
-          processCallBilling(user.uid, matchData.uid, finalCost, sharePercentage)
-             .then(() => console.log(`[Billing Engine] Flushed final ${finalCost.toFixed(2)}G to Firestore.`))
-             .catch((e) => console.warn(`[Billing Engine] Final flush failed:`, e));
-        }
-      }
 
-      if (remainingSeconds > 0) {
-        const user = auth.currentUser;
-        if (user) {
-          import('../services/coinService').then(({ updateCallRewards }) => {
-            updateCallRewards(user.uid, remainingSeconds, globalSettings.callDurationForHeart, !isCaller)
-              .catch(e => console.warn("[Rewards Engine] Final flush failed", e));
-          });
-        }
+      const remainingSeconds = syncIntervalRef.current;
+      const user = auth.currentUser;
+
+      // Final tick so the last partial interval is charged from the server clock.
+      processCallBilling(roomId)
+        .catch(e => console.warn('[Billing Engine] Final flush failed:', e));
+
+      if (remainingSeconds > 0 && user) {
+        import('../services/coinService').then(({ updateCallRewards }) => {
+          updateCallRewards(user.uid, remainingSeconds, globalSettings.callDurationForHeart, !isCaller)
+            .catch(e => console.warn("[Rewards Engine] Final flush failed", e));
+        });
       }
     };
-  }, [roomId, matchData?.uid, globalSettings, currentUserProfile, isCaller, isVideo]);
+  }, [roomId, matchData?.uid, globalSettings, currentUserProfile, isCaller, isVideo, isCallActive]);
 
   const formatTimer = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -260,19 +560,68 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
-  const handleGift = async (amount: number) => {
+  const sendGift = async (amount: number) => {
     const user = auth.currentUser;
     if (!user || !matchData?.uid) return;
-    
+
     setIsGifting(true);
     try {
       await transferCoins(user.uid, matchData.uid, amount);
-      alert(`Sent a ${amount}G gift! 🎉`);
+      Alert.alert('Gift sent', `You sent a ${amount}G gift to ${profile.name}.`, [{ text: 'OK' }]);
     } catch (error: any) {
-      alert(error.message);
+      Alert.alert('Gift failed', error?.message || 'Could not send the gift.', [{ text: 'OK' }]);
     }
     setIsGifting(false);
   };
+
+  // Confirm before moving coins — this used to fire on a single tap with no
+  // way back, so a mis-tap during a call cost the user real balance.
+  const handleGift = (amount: number) => {
+    if (isGifting) return;
+    Alert.alert(
+      'Send gift?',
+      `This will send ${amount}G to ${profile.name}.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: `Send ${amount}G`, onPress: () => { void sendGift(amount); } },
+      ]
+    );
+  };
+
+  if (isPending) {
+    return (
+      <ScreenShell tone="dark">
+        <IncomingCallOverlay
+          call={{
+            callerUid: matchData?.uid || '',
+            callerName: profile.name,
+            callerAvatarUrl: profile.uri,
+            roomId: roomId || '',
+            mode: mode,
+            status: 'calling',
+            timestamp: null,
+          }}
+          onAccept={() => {
+            if (auth.currentUser) {
+              acceptCallOffer(auth.currentUser.uid).catch(e =>
+                console.warn('Failed to accept call:', e)
+              );
+            }
+            setIsPending(false);
+            setIsConnecting(true);
+          }}
+          onReject={() => {
+            if (auth.currentUser) {
+              rejectCallOffer(auth.currentUser.uid).catch(e =>
+                console.warn('Failed to reject call:', e)
+              );
+            }
+            goBack();
+          }}
+        />
+      </ScreenShell>
+    );
+  }
 
   if (!isVideo) {
     return (
@@ -281,10 +630,8 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
           <ConnectingOverlay 
             mode="private" 
             targetName={profile.name}
-            onCancel={() => {
-              disconnectSeat();
-              goBack();
-            }} 
+            onCancel={handleEndCall} 
+            status={overlayStatus}
           />
         )}
         <View style={styles.voicePhone}>
@@ -306,18 +653,18 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
               </LinearGradient>
             </View>
 
-            <Text style={styles.voiceName}>{profile.name}, {profile.age}</Text>
-            <Text style={styles.voiceStatus}>Talking...</Text>
+            <Text style={styles.voiceName}>{profile.age ? `${profile.name}, ${profile.age}` : profile.name}</Text>
+            <Text style={[styles.voiceStatus, isPeerUnstable && { color: '#B30005', fontWeight: '800' }]}>
+              {isPeerUnstable ? 'Reconnecting peer...' : 'Talking...'}
+            </Text>
             <Text style={{ fontSize: 24, fontWeight: '700', color: '#4B0054', marginTop: 12 }}>{formatTimer(callDurationSeconds)}</Text>
             
-            {isCaller && (
-              <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 16, backgroundColor: '#FFFDF8', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, boxShadow: Platform.OS === 'web' ? '0 4px 12px rgba(68, 44, 21, 0.05)' : undefined }}>
-                <MaterialIcons name="account-balance-wallet" size={20} color="#D49A0B" />
-                <Text style={{ fontSize: 16, fontWeight: '800', color: '#4B0054', marginLeft: 6 }}>
-                  {Math.floor(callerLiveCoins)} G
-                </Text>
-              </View>
-            )}
+            <View style={{ flexDirection: 'row', alignItems: 'center', marginTop: 16, backgroundColor: '#FFFDF8', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, boxShadow: Platform.OS === 'web' ? '0 4px 12px rgba(68, 44, 21, 0.05)' : undefined }}>
+              <MaterialIcons name="account-balance-wallet" size={20} color="#D49A0B" />
+              <Text style={{ fontSize: 16, fontWeight: '800', color: '#4B0054', marginLeft: 6 }}>
+                {Math.floor(callerLiveCoins)} G
+              </Text>
+            </View>
           </View>
 
           <View style={styles.voiceControlsBar}>
@@ -351,10 +698,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
               <TouchableOpacity
                 style={styles.voiceControlItem}
                 activeOpacity={0.82}
-                onPress={() => {
-                  disconnectSeat();
-                  goBack();
-                }}
+                onPress={handleEndCall}
+                disabled={isEnding}
+                accessibilityRole="button"
+                accessibilityLabel="End call"
               >
                 <View style={styles.voiceEndButton}>
                   <MaterialIcons name="call-end" size={23} color="#FFFFFF" />
@@ -374,15 +721,33 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
         <ConnectingOverlay 
           mode="private" 
           targetName={profile.name}
-          onCancel={() => {
-            disconnectSeat();
-            goBack();
-          }} 
+          onCancel={handleEndCall} 
+          status={overlayStatus}
         />
       )}
       <View style={styles.videoPhone}>
-        {areCamerasOn ? (
-          <Image source={{ uri: profile.uri }} style={styles.videoRemoteImage} />
+        {isPeerUnstable && (
+          <View style={{
+            position: 'absolute',
+            top: 100,
+            left: 20,
+            right: 20,
+            backgroundColor: 'rgba(180, 0, 5, 0.9)',
+            padding: 12,
+            borderRadius: 12,
+            flexDirection: 'row',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 9999,
+          }}>
+            <MaterialIcons name="wifi-off" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={{ color: '#FFFFFF', fontWeight: 'bold', fontSize: 15 }}>
+              Connection unstable. Reconnecting...
+            </Text>
+          </View>
+        )}
+        {(currentProvider === 'agora' && RtcSurfaceView && remoteUids.length > 0) ? (
+          <RtcSurfaceView canvas={{ uid: remoteUids[0] }} style={styles.videoRemoteImage} />
         ) : (
           <LinearGradient
             colors={['#1B0718', '#4B0054', '#11040F']}
@@ -396,19 +761,23 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
                 style={styles.videoOffAvatarRing}
               >
                 <View style={styles.videoOffAvatarInner}>
-                  <Image source={{ uri: profile.uri }} style={styles.videoOffAvatar} />
+                  {profile.avatarData ? (
+                    <GengalAvatar data={profile.avatarData} size={110} />
+                  ) : (
+                    <Image source={{ uri: profile.uri }} style={styles.videoOffAvatar} />
+                  )}
                 </View>
               </LinearGradient>
               <View style={styles.videoOffIcon}>
                 <MaterialIcons name="videocam-off" size={25} color="#4B0054" />
               </View>
             </View>
-            <Text style={styles.videoOffName}>{profile.name}, {profile.age}</Text>
-            <Text style={styles.videoOffStatus}>Both cameras are off</Text>
+            <Text style={styles.videoOffName}>{profile.age ? `${profile.name}, ${profile.age}` : profile.name}</Text>
+            <Text style={styles.videoOffStatus}>Connecting to video...</Text>
           </LinearGradient>
         )}
         <LinearGradient
-          colors={areCamerasOn
+          colors={cameraOn
             ? ['rgba(18, 6, 12, 0.62)', 'rgba(18, 6, 12, 0.04)', 'rgba(18, 6, 12, 0.32)']
             : ['rgba(18, 6, 12, 0.34)', 'rgba(18, 6, 12, 0.02)', 'rgba(18, 6, 12, 0.22)']}
           locations={[0, 0.42, 1]}
@@ -416,35 +785,45 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
         />
 
         <View style={styles.videoTopBar}>
-          <TouchableOpacity style={styles.videoCircleButton} activeOpacity={0.82} onPress={() => goBack()}>
+          <TouchableOpacity
+            style={styles.videoCircleButton}
+            hitSlop={tap42}
+            activeOpacity={0.82}
+            onPress={handleEndCall}
+            disabled={isEnding}
+            accessibilityRole="button"
+            accessibilityLabel="End call and go back"
+          >
             <MaterialIcons name="arrow-back" size={23} color="#4B0054" />
           </TouchableOpacity>
           <View style={styles.videoTitleBlock}>
-            <Text style={styles.videoName}>{profile.name}</Text>
-            <Text style={styles.videoSubtitle}>PREMIUM CONNECTION</Text>
+            <Text style={styles.videoName} numberOfLines={1}>{profile.name}</Text>
           </View>
           <View style={styles.videoTimerPill}>
             <Text style={styles.videoTimer}>{formatTimer(callDurationSeconds)}</Text>
           </View>
-          {isCaller && (
-            <View style={{ marginLeft: 8, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16 }}>
-              <MaterialIcons name="account-balance-wallet" size={16} color="#D49A0B" />
-              <Text style={{ fontSize: 14, fontWeight: '800', color: '#FFF', marginLeft: 4 }}>
-                {Math.floor(callerLiveCoins)} G
-              </Text>
-            </View>
-          )}
-          <TouchableOpacity style={styles.videoCircleButton} activeOpacity={0.82}>
-            <MaterialIcons name="more-vert" size={23} color="#4B0054" />
-          </TouchableOpacity>
+          <View style={{ marginLeft: 6, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 16 }}>
+            <MaterialIcons name="account-balance-wallet" size={14} color="#D49A0B" />
+            <Text style={{ fontSize: 13, fontWeight: '800', color: '#FFF', marginLeft: 3 }}>
+              {Math.floor(callerLiveCoins)} G
+            </Text>
+          </View>
         </View>
 
-        <View style={[styles.selfPreview, !areCamerasOn && styles.selfPreviewOff]}>
-          {areCamerasOn ? (
-            <Image source={{ uri: currentUserProfile?.avatarUrl || ''  }} style={styles.selfPreviewImage} />
+        <View style={styles.selfPreview}>
+          {cameraOn ? (
+            (currentProvider === 'agora' && RtcSurfaceView && localUid !== null) ? (
+              <RtcSurfaceView canvas={{ uid: 0 }} style={StyleSheet.absoluteFill} />
+            ) : (
+              <Image source={{ uri: currentUserProfile?.avatarUrl || ''  }} style={StyleSheet.absoluteFill} />
+            )
           ) : (
             <View style={styles.selfPreviewOffContent}>
-              <Image source={{ uri: currentUserProfile?.avatarUrl || ''  }} style={styles.selfPreviewAvatar} />
+              {currentUserProfile?.avatarData ? (
+                <GengalAvatar data={currentUserProfile.avatarData} size={50} />
+              ) : (
+                <Image source={{ uri: currentUserProfile?.avatarUrl || ''  }} style={styles.selfPreviewAvatar} />
+              )}
               <View style={styles.selfPreviewOffBadge}>
                 <MaterialIcons name="videocam-off" size={15} color="#FFFDF8" />
               </View>
@@ -455,23 +834,23 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
         <View style={styles.videoControlsTray}>
           <TouchableOpacity style={styles.videoControlItem} activeOpacity={0.82} onPress={toggleMic}>
             <View style={[styles.videoControlButton, micMuted && styles.videoControlButtonActive]}>
-              <MaterialIcons name={micMuted ? "mic" : "mic-off"} size={22} color={micMuted ? "#4B0054" : "#756A62"} />
+              <MaterialIcons name={micMuted ? "mic-off" : "mic"} size={22} color={micMuted ? "#B30005" : "#756A62"} />
             </View>
-            <Text style={styles.videoControlLabel}>Mute</Text>
+            <Text style={styles.videoControlLabel}>{micMuted ? "Muted" : "Mute"}</Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.videoControlItem}
             activeOpacity={0.82}
-            onPress={() => setAreCamerasOn((current) => !current)}
+            onPress={toggleCamera}
           >
-            <View style={[styles.videoControlButton, !areCamerasOn && styles.videoControlButtonActive]}>
-              <MaterialIcons name={areCamerasOn ? 'videocam-off' : 'videocam'} size={22} color={areCamerasOn ? '#756A62' : '#4B0054'} />
+            <View style={[styles.videoControlButton, !cameraOn && styles.videoControlButtonActive]}>
+              <MaterialIcons name={cameraOn ? 'videocam' : 'videocam-off'} size={22} color={cameraOn ? '#756A62' : '#B30005'} />
             </View>
-            <Text style={styles.videoControlLabel}>Camera</Text>
+            <Text style={styles.videoControlLabel}>{cameraOn ? "Camera" : "Cam Off"}</Text>
           </TouchableOpacity>
 
-          <TouchableOpacity style={styles.videoControlItem} activeOpacity={0.82}>
+          <TouchableOpacity style={styles.videoControlItem} activeOpacity={0.82} onPress={flipCamera}>
             <View style={styles.videoControlButton}>
               <MaterialIcons name="flip-camera-ios" size={22} color="#756A62" />
             </View>
@@ -481,7 +860,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId, matchDa
           <TouchableOpacity
             style={styles.videoControlItem}
             activeOpacity={0.82}
-            onPress={() => goBack()}
+            onPress={handleEndCall}
+            disabled={isEnding}
+            accessibilityRole="button"
+            accessibilityLabel="End call"
           >
             <View style={styles.videoEndButton}>
               <MaterialIcons name="call-end" size={25} color="#FFFFFF" />
@@ -719,6 +1101,7 @@ const styles = StyleSheet.create({
   videoTitleBlock: {
     flex: 1,
     justifyContent: 'center',
+    marginHorizontal: 8,
   },
   videoName: {
     color: '#FFF7EA',
@@ -730,13 +1113,6 @@ const styles = StyleSheet.create({
       textShadowOffset: { width: 0, height: 2 },
       textShadowRadius: 8,
     }) as any,
-  },
-  videoSubtitle: {
-    marginTop: -1,
-    color: '#FFF7EA',
-    fontSize: 10,
-    fontWeight: '900',
-    letterSpacing: 0,
   },
   videoTimerPill: {
     minWidth: 62,
@@ -756,24 +1132,15 @@ const styles = StyleSheet.create({
   selfPreview: {
     position: 'absolute',
     top: 106,
-    right: 26,
-    width: 128,
-    height: 162,
-    borderRadius: 9,
-    padding: 2,
-    backgroundColor: 'rgba(255, 252, 247, 0.82)',
-    boxShadow: Platform.OS === 'web' ? '0 12px 24px rgba(18, 6, 15, 0.36)' : undefined,
-  },
-  selfPreviewImage: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 7,
-    resizeMode: 'cover',
-  },
-  selfPreviewOff: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255, 252, 247, 0.88)',
+    right: 16,
+    width: 120,
+    height: 160,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#1a1a1a',
+    borderWidth: 2,
+    borderColor: 'rgba(255,255,255,0.35)',
+    elevation: 8,
   },
   selfPreviewOffContent: {
     width: '100%',
@@ -863,121 +1230,5 @@ const styles = StyleSheet.create({
     color: '#B30005',
     fontSize: 13,
     fontWeight: '900',
-  },
-  phone: {
-    flex: 1,
-    alignSelf: 'center',
-    width: '100%',
-    maxWidth: 430,
-    paddingHorizontal: 24,
-    paddingTop: 18,
-    paddingBottom: 34,
-  },
-  header: {
-    height: 54,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  headerButton: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255, 253, 248, 0.2)',
-  },
-  headerButtonGhost: {
-    width: 42,
-    height: 42,
-  },
-  headerText: {
-    color: '#5A075F',
-    fontSize: 15,
-    fontWeight: '900',
-  },
-  headerTextLight: {
-    color: '#FFF7FF',
-  },
-  content: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarRing: {
-    width: 174,
-    height: 174,
-    borderRadius: 87,
-    padding: 4,
-    boxShadow: Platform.OS === 'web' ? '0 18px 36px rgba(76, 0, 84, 0.18)' : undefined,
-  },
-  avatarRingVideo: {
-    boxShadow: Platform.OS === 'web' ? '0 18px 42px rgba(255, 220, 130, 0.28)' : undefined,
-  },
-  avatarInner: {
-    flex: 1,
-    borderRadius: 83,
-    padding: 3,
-    overflow: 'hidden',
-    backgroundColor: '#FFFDF8',
-  },
-  avatar: {
-    width: '100%',
-    height: '100%',
-    borderRadius: 80,
-  },
-  name: {
-    marginTop: 26,
-    color: '#4B0054',
-    fontFamily: 'serif',
-    fontSize: 36,
-    fontWeight: '900',
-  },
-  nameLight: {
-    color: '#FFF7FF',
-  },
-  status: {
-    marginTop: 8,
-    color: '#927F74',
-    fontSize: 14,
-    fontWeight: '800',
-  },
-  statusLight: {
-    color: '#E4D2E7',
-  },
-  pulse: {
-    marginTop: 34,
-    width: 62,
-    height: 62,
-    borderRadius: 31,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255, 253, 248, 0.18)',
-    borderWidth: 1,
-    borderColor: 'rgba(217, 185, 86, 0.6)',
-  },
-  controls: {
-    height: 86,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 28,
-  },
-  controlButton: {
-    width: 58,
-    height: 58,
-    borderRadius: 29,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#FFFDF8',
-  },
-  endButton: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#D83749',
-    boxShadow: Platform.OS === 'web' ? '0 12px 22px rgba(216, 55, 73, 0.28)' : undefined,
   },
 });

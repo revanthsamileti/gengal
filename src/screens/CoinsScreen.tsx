@@ -1,9 +1,12 @@
+import { Alert } from '../components/CustomAlert';
 import React, { useEffect, useState } from 'react';
-import { Platform, ActivityIndicator, Alert, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Platform, ActivityIndicator, KeyboardAvoidingView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { auth } from '../config/firebase';
-import { getUserProfile, saveUserProfile } from '../services/userService';
+import { getUserProfile } from '../services/userService';
+import { createCoinOrder, purchaseCoins, RazorpayResult } from '../services/coinService';
+import CheckoutModal from '../components/CheckoutModal';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 import { TextInput } from 'react-native';
@@ -13,11 +16,19 @@ type CoinsScreenProps = {
   navigate?: (screen: string, params?: any) => void;
 };
 
+/**
+ * Price points only. The coin yield is computed from the server's
+ * `inrToCoinRechargeRate` rather than baked in, for two reasons: the packages
+ * used to quote a better rate than the custom-amount box for the same money
+ * (₹89 promised 100 coins, custom gave 99), and changing the rate needed an app
+ * release, so an admin edit in the pricing panel silently applied to custom
+ * top-ups only.
+ */
 const COIN_PACKAGES = [
-  { id: '1', coins: 100, price: '₹89', name: 'Handful of Coins', icon: 'monetization-on' },
-  { id: '2', coins: 500, price: '₹449', name: 'Pouch of Coins', icon: 'account-balance-wallet' },
-  { id: '3', coins: 1200, price: '₹899', name: 'Chest of Coins', icon: 'cases' },
-  { id: '4', coins: 3000, price: '₹1799', name: 'Vault of Coins', icon: 'account-balance' },
+  { id: '1', priceInr: 89, name: 'Handful of Coins', icon: 'monetization-on' },
+  { id: '2', priceInr: 449, name: 'Pouch of Coins', icon: 'account-balance-wallet' },
+  { id: '3', priceInr: 899, name: 'Chest of Coins', icon: 'cases' },
+  { id: '4', priceInr: 1799, name: 'Vault of Coins', icon: 'account-balance' },
 ];
 
 export default function CoinsScreen({ navigation, navigate: directNavigate, goBack }: CoinsScreenProps & { goBack?: () => void }) {
@@ -29,6 +40,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
   const [isPurchasing, setIsPurchasing] = useState<string | null>(null);
   const [customAmount, setCustomAmount] = useState<string>('');
   const [settings, setSettings] = useState<GlobalSettings | null>(null);
+  const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
 
   useEffect(() => {
     fetchBalance();
@@ -49,71 +61,97 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
     }
   };
 
-  const handlePurchase = async (pkg: typeof COIN_PACKAGES[0]) => {
+  /**
+   * Opens an order, runs Razorpay checkout in a WebView, then asks the backend
+   * to verify the result. Coins are credited by the server against the order it
+   * opened — the previous flow wrote the new balance straight from the client
+   * with no payment step at all.
+   */
+  const runPurchase = async (key: string, packageId: string, amountInr: number) => {
     if (!auth.currentUser) return;
-    setIsPurchasing(pkg.id);
-    
-    // Simulate network delay for purchase processing
-    setTimeout(async () => {
-      try {
-        const profile = await getUserProfile(auth.currentUser!.uid);
-        const currentBalance = profile?.coins || 0;
-        const newBalance = currentBalance + pkg.coins;
-        
-        await saveUserProfile(auth.currentUser!.uid, { coins: newBalance });
-        setBalance(newBalance);
-        Alert.alert('Purchase Successful!', `You have received ${pkg.coins} coins.`);
-      } catch (e) {
-        Alert.alert('Purchase Failed', 'There was an error processing your transaction.');
-      } finally {
-        setIsPurchasing(null);
+    setIsPurchasing(key);
+    try {
+      const order = await createCoinOrder(packageId, amountInr);
+      setCheckoutUrl(order.checkoutUrl);
+    } catch (e: any) {
+      setIsPurchasing(null);
+      if (e?.code === 'payments_not_configured' || e?.code === 'payments_not_implemented') {
+        Alert.alert(
+          'Coming Soon',
+          'Coin purchases are not available yet. Payments are still being set up.'
+        );
+      } else {
+        Alert.alert('Purchase Failed', e?.message || 'There was an error starting your payment.');
       }
-    }, 1200);
+    }
   };
+
+  /**
+   * Runs after checkout succeeds. A failure here means money moved but the
+   * balance did not, so it says so plainly rather than a generic error — the
+   * order is already paid server-side and re-confirming it credits once, not
+   * twice, which is why retrying is safe advice.
+   */
+  const handleCheckoutSuccess = async (result: RazorpayResult) => {
+    setCheckoutUrl(null);
+    try {
+      const confirmed = await purchaseCoins(result);
+      setBalance(confirmed.newBalance);
+      setCustomAmount('');
+      Alert.alert('Purchase Successful!', `${confirmed.coinsCredited} coins have been added.`);
+    } catch (e: any) {
+      Alert.alert(
+        'Payment received, coins pending',
+        `${e?.message || 'We could not confirm your payment.'}\n\nYour money is safe. Reopen the Store in a moment and the coins will be added — you will not be charged again.`
+      );
+    } finally {
+      setIsPurchasing(null);
+    }
+  };
+
+  const coinsFor = (priceInr: number) =>
+    Math.floor(priceInr * (settings?.inrToCoinRechargeRate ?? 0));
+
+  const handlePurchase = (pkg: typeof COIN_PACKAGES[0]) =>
+    runPurchase(pkg.id, pkg.id, pkg.priceInr);
 
   const handleCustomPurchase = async () => {
     if (!auth.currentUser || !settings) return;
-    
+
     const amountInr = Number(customAmount);
     const minAmount = settings.minRechargeAmount || 49;
-    
+
     if (isNaN(amountInr) || amountInr < minAmount) {
       Alert.alert('Invalid Amount', `The minimum recharge amount is ₹${minAmount}.`);
       return;
     }
 
-    setIsPurchasing('custom');
-    const coinsToReceive = Math.floor(amountInr * (settings.inrToCoinRechargeRate || 1.12));
-
-    setTimeout(async () => {
-      try {
-        const profile = await getUserProfile(auth.currentUser!.uid);
-        const currentBalance = profile?.coins || 0;
-        const newBalance = currentBalance + coinsToReceive;
-        
-        await saveUserProfile(auth.currentUser!.uid, { coins: newBalance });
-        setBalance(newBalance);
-        setCustomAmount('');
-        Alert.alert('Purchase Successful!', `You have received ${coinsToReceive} coins.`);
-      } catch (e) {
-        Alert.alert('Purchase Failed', 'There was an error processing your transaction.');
-      } finally {
-        setIsPurchasing(null);
-      }
-    }, 1200);
+    await runPurchase('custom', 'custom', amountInr);
   };
 
   return (
     <View style={styles.container}>
       <View style={[styles.header, { paddingTop: 50 }]}>
-        <TouchableOpacity style={styles.backButton} onPress={() => goBack ? goBack() : navigate('Home')}>
+        <TouchableOpacity style={styles.backButton} onPress={() => goBack ? goBack() : navigate('Home')}
+          accessibilityRole="button"
+          accessibilityLabel="Go back">
           <MaterialIcons name="arrow-back" size={24} color={skeuo.plum} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Store</Text>
         <View style={{ width: 44 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scrollContent} showsVerticalScrollIndicator={false}>
+      {/* The custom-amount field sits low on this screen; without this the
+          keyboard covered it and the Recharge button entirely. */}
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      >
+      <ScrollView
+        contentContainerStyle={styles.scrollContent}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+      >
         
         {/* Balance Display */}
         <View style={styles.balanceCard}>
@@ -130,10 +168,17 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
               <Text style={styles.balanceAmount}>{balance.toLocaleString()}</Text>
             )}
           </View>
-          <View style={styles.conversionBadge}>
-            <MaterialIcons name="favorite" size={14} color="#D45D79" />
-            <Text style={styles.conversionText}>1 Heart = 45 Coins</Text>
-          </View>
+          {/* Was "1 Heart = 45 Coins" — a rate that exists nowhere in the app
+              or the backend. Replaced with the recharge rate the server
+              actually applies. */}
+          {settings ? (
+            <View style={styles.conversionBadge}>
+              <MaterialIcons name="star" size={14} color="#D9A404" />
+              <Text style={styles.conversionText}>
+                ₹1 = {settings.inrToCoinRechargeRate} Coins
+              </Text>
+            </View>
+          ) : null}
         </View>
 
         {settings && (
@@ -182,26 +227,45 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
               style={styles.packageCard} 
               activeOpacity={0.8}
               onPress={() => handlePurchase(pkg)}
-              disabled={isPurchasing !== null}
+              disabled={isPurchasing !== null || !settings}
+              accessibilityRole="button"
+              accessibilityLabel={`Buy ${pkg.name} for ${pkg.priceInr} rupees`}
             >
               <View style={styles.packageIconFrame}>
                 <MaterialIcons name={pkg.icon as any} size={32} color={skeuo.gold} />
               </View>
               <View style={styles.packageInfo}>
-                <Text style={styles.packageCoins}>{pkg.coins.toLocaleString()} Coins</Text>
+                <Text style={styles.packageCoins}>
+                  {settings ? `${coinsFor(pkg.priceInr).toLocaleString()} Coins` : '—'}
+                </Text>
                 <Text style={styles.packageName}>{pkg.name}</Text>
               </View>
               <View style={styles.priceButton}>
                 {isPurchasing === pkg.id ? (
                   <ActivityIndicator color={skeuo.plum} size="small" />
                 ) : (
-                  <Text style={styles.priceText}>{pkg.price}</Text>
+                  <Text style={styles.priceText}>{`₹${pkg.priceInr}`}</Text>
                 )}
               </View>
             </TouchableOpacity>
           ))}
         </View>
       </ScrollView>
+      </KeyboardAvoidingView>
+
+      <CheckoutModal
+        url={checkoutUrl}
+        onSuccess={handleCheckoutSuccess}
+        onCancel={() => {
+          setCheckoutUrl(null);
+          setIsPurchasing(null);
+        }}
+        onFailure={(message) => {
+          setCheckoutUrl(null);
+          setIsPurchasing(null);
+          Alert.alert('Payment Failed', `${message}\n\nYou have not been charged.`);
+        }}
+      />
     </View>
   );
 }
