@@ -107,6 +107,14 @@ export const subscribeToIncomingCalls = (uid: string, onUpdate: (call: IncomingC
     } else {
       onUpdate(null);
     }
+  }, (error) => {
+    // Without this the SDK reports "Uncaught Error in snapshot listener" and
+    // the rejection surfaces as a redbox on whatever screen happens to be
+    // mounted. Worse, the listener is torn down: this is how the app learns it
+    // is being called, so losing it silently means the account looks online and
+    // simply never rings.
+    console.error('[liveRoomService] Incoming-call listener stopped:', error);
+    onUpdate(null);
   });
 };
 
@@ -119,6 +127,15 @@ export const subscribeToOutboundCallStatus = (receiverUid: string, onUpdate: (st
     } else {
       onUpdate(null);
     }
+  }, (error) => {
+    // The caller watches the *receiver's* document, so the rule's
+    // `request.auth.uid == receiverId` arm is false and it falls through to
+    // `resource.data.callerUid`. On a document that does not exist -- before
+    // the offer is written, or right after either side deletes it -- there is
+    // no `resource`, so that evaluates to permission-denied rather than "not
+    // found". Treating it as "no active call" matches the not-exists branch.
+    console.warn('[liveRoomService] Outbound-call listener stopped:', error);
+    onUpdate(null);
   });
 };
 
