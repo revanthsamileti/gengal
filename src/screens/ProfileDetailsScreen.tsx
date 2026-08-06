@@ -253,7 +253,12 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
           navigate(returnTo);
         }
       } else {
-        navigate('Avatar', {
+        // The full builder, same one Settings and Profile open for editing.
+        // Signup used to route to the older 'Avatar' screen, which exposes five
+        // hair styles and no facial hair, eyes, eyebrows or clothing colour --
+        // so a new account got a visibly poorer editor than the one it would
+        // see the moment it went to change its avatar afterwards.
+        navigate('FinalizeInvite', {
           phone: route?.params?.phone,
           token: route?.params?.token,
           name: cleanUsername,
