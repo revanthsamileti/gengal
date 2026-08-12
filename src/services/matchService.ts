@@ -13,6 +13,7 @@ import {
   getDoc
 } from 'firebase/firestore';
 import { UserProfile } from './userService';
+import { snapshotError, SubscriptionErrorHandler } from './subscriptionError';
 
 export interface MatchRoom {
   id?: string;
@@ -40,7 +41,14 @@ const normalizeMatchGender = (gender?: string | null): 'male' | 'female' | null 
 export const findMatch = async (
   currentUser: UserProfile,
   preferredMode: 'video' | 'call',
-  onMatchFound: (roomId: string, matchData: any) => void
+  onMatchFound: (roomId: string, matchData: any) => void,
+  /**
+   * Called if the waiting listener dies. Without it a failed subscription is
+   * indistinguishable from "nobody has matched yet", and the user watches a
+   * spinner forever — including in the case where somebody *did* match with
+   * them and the write simply never reached this device.
+   */
+  onError?: SubscriptionErrorHandler,
 ) => {
   const poolRef = collection(db, 'matchmaking_pool');
   const roomsRef = collection(db, 'rooms');
@@ -151,7 +159,7 @@ export const findMatch = async (
           // Clean up our pool entry since we are now in a room
           await updateDoc(myPoolRef, { status: 'in_room' });
         }
-      });
+      }, snapshotError('match:waitingForPartner', onError));
 
       // Return a cleanup function in case the user cancels searching early
       return () => {

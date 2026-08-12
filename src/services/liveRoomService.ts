@@ -17,6 +17,10 @@ export interface IncomingCall {
   mode: 'call' | 'video';
   status: 'calling' | 'accepted' | 'rejected';
   timestamp: any;
+  /** Set by acceptCallOffer; the shared moment both sides base their on-screen
+   *  timer on, so the two devices' timers start from the same instant instead
+   *  of each starting from 0 whenever *its own* accept-confirmation arrives. */
+  acceptedAt?: any;
 }
 
 export const createCallOffer = async (
@@ -84,28 +88,51 @@ export const updateCallHeartbeat = async (receiverUid: string, role: 'caller' | 
   }
 };
 
+/** How long an un-answered offer stays ringable if the caller vanishes without clearing it. */
+const OFFER_EXPIRY_MS = 60000;
+
 export const subscribeToIncomingCalls = (uid: string, onUpdate: (call: IncomingCall | null) => void) => {
   const callRef = doc(db, 'incoming_calls', uid);
+
+  /**
+   * Offer age is measured from when *this* device first saw it, deliberately
+   * not by subtracting the document's serverTimestamp from a local Date.now().
+   * Those are two different clocks, and the comparison failed closed: a handset
+   * running even a minute fast judged every freshly-written offer to be already
+   * expired, so it never rang and logged nothing to say why. This is the same
+   * clock-mixing mistake that was already fixed once for the in-call timer.
+   */
+  let firstSeenAt: number | null = null;
+  let firstSeenKey: string | null = null;
+
   return onSnapshot(callRef, (docSnap) => {
-    if (docSnap.exists()) {
-      const data = docSnap.data() as IncomingCall;
-      
-      // Only show overlay if actively calling
-      if (data.status !== 'calling') {
-        onUpdate(null);
-        return;
-      }
-      
-      // Auto-expire after 60 seconds (in case caller disconnects abruptly without deleting)
-      const now = Date.now();
-      const callTime = data.timestamp?.toMillis?.() || now;
-      if (now - callTime > 60000) {
-        onUpdate(null);
-      } else {
-        onUpdate(data);
-      }
-    } else {
+    if (!docSnap.exists()) {
+      firstSeenAt = null;
+      firstSeenKey = null;
       onUpdate(null);
+      return;
+    }
+
+    const data = docSnap.data() as IncomingCall;
+
+    // Only show the overlay while actively calling.
+    if (data.status !== 'calling') {
+      onUpdate(null);
+      return;
+    }
+
+    // A genuinely new offer restarts the window; repeat writes to the same one
+    // (heartbeats, status churn) must not keep extending it.
+    const offerKey = `${data.callerUid}:${data.roomId}`;
+    if (firstSeenKey !== offerKey) {
+      firstSeenKey = offerKey;
+      firstSeenAt = Date.now();
+    }
+
+    if (Date.now() - (firstSeenAt ?? Date.now()) > OFFER_EXPIRY_MS) {
+      onUpdate(null);
+    } else {
+      onUpdate(data);
     }
   }, (error) => {
     // Without this the SDK reports "Uncaught Error in snapshot listener" and
@@ -141,7 +168,7 @@ export const subscribeToOutboundCallStatus = (receiverUid: string, onUpdate: (st
 
 export const acceptCallOffer = async (receiverUid: string) => {
   const callRef = doc(db, 'incoming_calls', receiverUid);
-  await setDoc(callRef, { status: 'accepted' }, { merge: true });
+  await setDoc(callRef, { status: 'accepted', acceptedAt: serverTimestamp() }, { merge: true });
 };
 
 export const rejectCallOffer = async (receiverUid: string) => {

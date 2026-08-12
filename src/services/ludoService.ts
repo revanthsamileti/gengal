@@ -1,5 +1,6 @@
 import { db } from '../config/firebase';
 import { RosterPreviewEntry } from './presenceService';
+import { snapshotError, SubscriptionErrorHandler } from './subscriptionError';
 import {
   collection,
   doc,
@@ -322,32 +323,55 @@ export const closeLudoRoom = async (roomId: string) => {
   await updateDoc(doc(db, 'ludo_rooms', roomId), { status: 'closed', phase: 'finished' });
 };
 
-export const subscribeToLudoRooms = (callback: (rooms: LudoRoom[]) => void) => {
+export const subscribeToLudoRooms = (
+  callback: (rooms: LudoRoom[]) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
   const q = query(
     collection(db, 'ludo_rooms'),
     where('status', '==', 'live'),
     orderBy('activeMemberCount', 'desc'),
   );
+  // An errored lobby and an empty lobby both render as "no games". The screen
+  // gets the error so it can tell the user which of the two actually happened.
   return onSnapshot(q, snap => {
     callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as LudoRoom)));
-  });
+  }, snapshotError('ludo:lobby', onError));
 };
 
-export const subscribeToLudoRoom = (roomId: string, callback: (room: LudoRoom | null) => void) => {
-  return onSnapshot(doc(db, 'ludo_rooms', roomId), snap => {
-    callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as LudoRoom) : null);
-  });
+export const subscribeToLudoRoom = (
+  roomId: string,
+  callback: (room: LudoRoom | null) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
+  return onSnapshot(
+    doc(db, 'ludo_rooms', roomId),
+    snap => {
+      callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as LudoRoom) : null);
+    },
+    // This document *is* the board — turn order, token positions, whose roll it
+    // is. A dead listener freezes the game with no indication, and because coins
+    // are staked on the result the player is left watching a turn that will
+    // never arrive. Null is the "room is gone" value the screen already handles,
+    // so they land somewhere real instead of on a board that stopped moving.
+    snapshotError('ludo:room', onError, () => callback(null)),
+  );
 };
 
-export const subscribeToLudoEvents = (roomId: string, callback: (events: LudoEvent[]) => void) => {
+export const subscribeToLudoEvents = (
+  roomId: string,
+  callback: (events: LudoEvent[]) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
   const q = query(
     collection(db, 'ludo_rooms', roomId, 'events'),
     orderBy('timestamp', 'desc'),
     limit(60),
   );
+  // No fallback: the last few events staying put beats blanking the feed.
   return onSnapshot(q, snap => {
     callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as LudoEvent)));
-  });
+  }, snapshotError('ludo:events', onError));
 };
 
 // ── Join / Leave ──────────────────────────────────────────────────────────────

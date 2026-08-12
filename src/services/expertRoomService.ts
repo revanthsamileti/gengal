@@ -1,5 +1,6 @@
 import { db } from '../config/firebase';
 import { RosterPreviewEntry } from './presenceService';
+import { snapshotError, SubscriptionErrorHandler } from './subscriptionError';
 import {
   collection,
   doc,
@@ -93,10 +94,20 @@ export interface HandRequest {
   gender: 'boy' | 'girl';
 }
 
-export const subscribeToHandRequests = (roomId: string, callback: (reqs: HandRequest[]) => void) => {
-  return onSnapshot(collection(db, 'expert_rooms', roomId, 'hand_requests'), (snap) => {
-    callback(snap.docs.map(d => ({ uid: d.id, ...d.data() } as HandRequest)));
-  });
+export const subscribeToHandRequests = (
+  roomId: string,
+  callback: (reqs: HandRequest[]) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
+  return onSnapshot(
+    collection(db, 'expert_rooms', roomId, 'hand_requests'),
+    (snap) => {
+      callback(snap.docs.map(d => ({ uid: d.id, ...d.data() } as HandRequest)));
+    },
+    // Emptying the queue on failure is the safe direction: a host acting on a
+    // frozen list would be promoting people who have already given up and left.
+    snapshotError('expertRoom:handRequests', onError, () => callback([])),
+  );
 };
 
 export const GIFTS = [
@@ -182,10 +193,24 @@ export const subscribeToActiveRooms = (
   );
 };
 
-export const subscribeToRoom = (roomId: string, callback: (room: ExpertRoom | null) => void) => {
-  return onSnapshot(doc(db, 'expert_rooms', roomId), (snap) => {
-    callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as ExpertRoom) : null);
-  });
+export const subscribeToRoom = (
+  roomId: string,
+  callback: (room: ExpertRoom | null) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
+  return onSnapshot(
+    doc(db, 'expert_rooms', roomId),
+    (snap) => {
+      callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as ExpertRoom) : null);
+    },
+    // The most consequential listener in the room: this document carries the
+    // speaker slots, the mute flags and `status`. Losing it silently leaves the
+    // user sitting in a room that may already have closed, with their mic still
+    // open and a paid room still billing against the server clock. Null is the
+    // same value the screen already handles for "this room is gone", so it exits
+    // down a path that exists rather than freezing on the last good copy.
+    snapshotError('expertRoom:room', onError, () => callback(null)),
+  );
 };
 
 export const closeExpertRoom = async (roomId: string) => {
@@ -206,15 +231,22 @@ const logEvent = async (roomId: string, event: Omit<RoomEvent, 'id'>) => {
   });
 };
 
-export const subscribeToRoomEvents = (roomId: string, callback: (events: RoomEvent[]) => void) => {
+export const subscribeToRoomEvents = (
+  roomId: string,
+  callback: (events: RoomEvent[]) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
   const q = query(
     collection(db, 'expert_rooms', roomId, 'events'),
     orderBy('timestamp', 'desc'),
     limit(60),
   );
+  // Deliberately no fallback: the last few messages staying on screen is far
+  // better than the chat blanking itself, and unlike the room document a stale
+  // transcript cannot mislead anyone into thinking the room is still live.
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as RoomEvent)));
-  });
+  }, snapshotError('expertRoom:events', onError));
 };
 
 export const sendChatMessage = async (
@@ -473,13 +505,18 @@ export const sendGiftInRoom = async (
   return gift;
 };
 
-export const subscribeToTopGifters = (roomId: string, callback: (gifters: TopGifter[]) => void) => {
+export const subscribeToTopGifters = (
+  roomId: string,
+  callback: (gifters: TopGifter[]) => void,
+  onError?: SubscriptionErrorHandler,
+) => {
   const q = query(
     collection(db, 'expert_rooms', roomId, 'gifters'),
     orderBy('totalCoins', 'desc'),
     limit(5),
   );
+  // A leaderboard is decoration; keeping the last standings beats blanking it.
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map((d) => d.data() as TopGifter));
-  });
+  }, snapshotError('expertRoom:topGifters', onError));
 };

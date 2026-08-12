@@ -162,7 +162,15 @@ export default function ActivityScreen({ navigate }: Props) {
         };
       });
       processCalls();
-    }, () => setLoading(false));
+    }, (e) => {
+      // Previously this only called setLoading(false), so a permission error or
+      // missing Firestore index on the callerUid query silently left the screen
+      // showing an empty list — indistinguishable from "no calls yet".
+      // The receiver listener already set loadError correctly; now both do.
+      console.warn('[Activity] Caller history subscription failed:', e?.message ?? e);
+      setLoadError(true);
+      setLoading(false);
+    });
 
     const unsubReceiver = onSnapshot(receiverQ, snap => {
       snap.docs.forEach(d => {

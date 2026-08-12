@@ -1,5 +1,6 @@
 import { db } from '../config/firebase';
 import { RosterPreviewEntry } from './presenceService';
+import { snapshotError, SubscriptionErrorHandler } from './subscriptionError';
 import {
   collection,
   doc,
@@ -176,37 +177,51 @@ export const closeChillRoom = async (roomId: string) => {
 export const subscribeToChillRooms = (
   callback: (rooms: ChillRoom[]) => void,
   language?: string,
+  onError?: SubscriptionErrorHandler,
 ) => {
   const base = collection(db, 'chill_rooms');
   const q = language
     ? query(base, where('status', '==', 'live'), where('language', '==', language), orderBy('activeMemberCount', 'desc'))
     : query(base, where('status', '==', 'live'), orderBy('activeMemberCount', 'desc'));
+  // A lobby that failed to load and a lobby with genuinely no rooms in it look
+  // identical once the list is empty, so the screen is handed the error too and
+  // can say which one happened instead of claiming nobody is online.
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChillRoom)));
-  });
+  }, snapshotError('chill:lobby', onError));
 };
 
 export const subscribeToChillRoom = (
   roomId: string,
   callback: (room: ChillRoom | null) => void,
+  onError?: SubscriptionErrorHandler,
 ) => {
-  return onSnapshot(doc(db, 'chill_rooms', roomId), (snap) => {
-    callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as ChillRoom) : null);
-  });
+  return onSnapshot(
+    doc(db, 'chill_rooms', roomId),
+    (snap) => {
+      callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as ChillRoom) : null);
+    },
+    // Same reasoning as the expert room document: a frozen copy keeps the user
+    // in a room that may already be closed, mic still open. Null routes them
+    // down the "room is gone" path the screen already implements.
+    snapshotError('chill:room', onError, () => callback(null)),
+  );
 };
 
 export const subscribeToChillEvents = (
   roomId: string,
   callback: (events: ChillEvent[]) => void,
+  onError?: SubscriptionErrorHandler,
 ) => {
   const q = query(
     collection(db, 'chill_rooms', roomId, 'events'),
     orderBy('timestamp', 'desc'),
     limit(80),
   );
+  // No fallback: keeping the last messages on screen beats blanking the chat.
   return onSnapshot(q, (snap) => {
     callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as ChillEvent)));
-  });
+  }, snapshotError('chill:events', onError));
 };
 
 // ── Member join / leave ───────────────────────────────────────────────────────
