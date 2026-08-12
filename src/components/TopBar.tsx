@@ -61,7 +61,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingTop: 48,
+    // The screen is already wrapped in a SafeAreaView (ScreenShell), which
+    // reserves the real status-bar/notch inset. A hardcoded 48 here used to
+    // stack on top of that inset instead of replacing it, leaving a large
+    // dead gap above the header on any phone with a tall status bar.
+    paddingTop: 14,
     paddingBottom: 14,
     backgroundColor: '#FFFDF8',
     borderBottomWidth: 1,

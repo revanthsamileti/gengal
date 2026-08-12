@@ -23,6 +23,7 @@ import { authedPost } from '../services/authService';
 import { generateRoomId } from '../utils/ids';
 import { Alert } from '../components/CustomAlert';
 import { useActionLock } from '../hooks/useActionLock';
+import { startRingtone, stopRingtone } from '../services/ringtoneService';
 
 // A call that is never answered must not ring forever: the caller path leaves
 // `isConnecting` true, so neither the peer-timeout nor the heartbeat watchdog
@@ -87,6 +88,27 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [isPeerUnstable, setIsPeerUnstable] = useState(false);
   const isCallActive = isCaller ? (callerStatus === 'accepted') : (!isPending);
 
+  /**
+   * The instant both sides treat as "call started," in epoch ms -- always
+   * read from `acceptedAt`, a Firestore serverTimestamp(), never from either
+   * device's own clock.
+   *
+   * Two problems compounded here. First, each side used to start its own
+   * 0-based counter the moment *its own* `isCallActive` flipped true, and the
+   * receiver's flips instantly on tapping Accept while the caller's only
+   * flips once that acceptance round-trips back through Firestore -- so the
+   * caller was always a beat behind. Anchoring both to a shared start instant
+   * fixed that. But the first version anchored the receiver to its own
+   * `Date.now()` at tap-time and the caller to the resolved server
+   * timestamp -- two different clocks. Two real phones are rarely in sync,
+   * so the timers still didn't agree, just by a fixed offset instead of a
+   * shrinking one. Both sides now wait for the resolved `acceptedAt` value
+   * (never the transient local null a serverTimestamp() write shows before
+   * the server acknowledges it), so both are reading the same instant off
+   * the same clock.
+   */
+  const callStartRef = React.useRef<number | null>(null);
+
   const lastObservedCallerHeartbeatRef = React.useRef<number | null>(null);
   const lastObservedReceiverHeartbeatRef = React.useRef<number | null>(null);
   const lastObservedCallerTimeRef = React.useRef<number>(Date.now());
@@ -100,11 +122,17 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     }
     const incomingCallDocId = isCaller ? matchData?.uid : user?.uid;
     if (incomingCallDocId) {
-      try {
-        await clearCallOffer(incomingCallDocId);
-      } catch (e) {
-        console.warn("Failed to clear call offer on end call", e);
-      }
+      // Deliberately not awaited before goBack(). This is a network round-trip,
+      // and awaiting it meant a stalled or offline Firestore write pinned the
+      // user on the call screen -- with useActionLock still held, so every
+      // further tap on End/Cancel was swallowed and the screen became a dead
+      // end with no way out but killing the app. Leaving the call must never
+      // depend on the network. The write still runs to completion because it is
+      // a plain service call rather than component state, so the peer is still
+      // told the call is over.
+      void clearCallOffer(incomingCallDocId).catch((e) =>
+        console.warn('Failed to clear call offer on end call', e)
+      );
     }
     goBack();
   };
@@ -126,6 +154,23 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
     return () => clearTimeout(timer);
   }, [isCaller, callStep]);
+
+  // Audible ring. Until this existed an inbound call arrived in complete
+  // silence whenever the app was already open, because the push notification —
+  // the only thing that made a sound — is not delivered to a foregrounded app.
+  React.useEffect(() => {
+    if (isPending) {
+      void startRingtone('incoming');
+    } else if (isCaller && callStep === 'ringing' && callerStatus !== 'accepted') {
+      // Ringback for the caller: no vibration, they are already holding the phone.
+      void startRingtone('outgoing', false);
+    } else {
+      stopRingtone();
+    }
+  }, [isPending, isCaller, callStep, callerStatus]);
+
+  // Belt and braces: leaving the screen by any route must silence the ring.
+  React.useEffect(() => stopRingtone, []);
 
   // A call needs a resolvable peer uid: without it no offer can be created and
   // the screen would otherwise sit on the connecting overlay forever.
@@ -155,6 +200,33 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [currentProvider, setCurrentProvider] = useState<FreeProvider>(initialProvider);
   const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn, toggleCamera, cameraOn, flipCamera, localUid, remoteUids } = useGengalVoice(currentProvider);
 
+  /**
+   * The RTC token round-trip used to start only *after* the call was answered,
+   * so every answer paid for a full backend request before any audio could
+   * flow. The token depends only on the room and the signed-in uid, both known
+   * while the phone is still ringing — so fetch it during the ring and have it
+   * in hand the moment someone taps Accept.
+   */
+  const tokenPrefetchRef = React.useRef<Promise<{ token: string; uid?: number } | null> | null>(null);
+
+  React.useEffect(() => {
+    if (currentProvider !== 'agora' || !roomId || !auth.currentUser) return;
+    if (tokenPrefetchRef.current) return;
+
+    const ringing = isPending || (isCaller && callerStatus !== 'accepted');
+    if (!ringing) return;
+
+    // Resolves to null rather than rejecting on failure: a flaky prefetch must
+    // degrade to the old behaviour (fetch on answer), never fail the call.
+    tokenPrefetchRef.current = authedPost<{ token: string; uid?: number }>(
+      '/api/v1/agora/generate-token',
+      { roomId }
+    ).catch((e) => {
+      console.warn('[CallScreen] Token prefetch failed; will fetch on answer.', e);
+      return null;
+    });
+  }, [currentProvider, roomId, isPending, isCaller, callerStatus]);
+
   // Firestore listener for room provider updates (so both users stay in sync on
   // fallbacks). This lives on the `calls` record rather than `rooms`, because
   // direct (non-matchmade) calls never create a `rooms` document.
@@ -173,6 +245,15 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           setVideoDowngraded(true);
         }
       }
+    }, (error) => {
+      // The rules on /calls read `resource.data`, so this listener is denied
+      // outright whenever the record does not exist yet — which is the normal
+      // state on the receiver, who subscribes as soon as the offer arrives
+      // while the caller is still writing the record. Without a handler the SDK
+      // reported it as an uncaught snapshot error and tore the listener down,
+      // so a provider fallback published later in the call never reached the
+      // receiver. Provider sync is best-effort; the call itself is unaffected.
+      console.warn('[CallScreen] Call record listener unavailable:', error?.message);
     });
     return unsub;
   }, [roomId, currentProvider]);
@@ -203,7 +284,31 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             lastObservedCallerTimeRef.current = Date.now();
           }
         }
+
+        // Anchor the timer to the resolved server timestamp, not this
+        // device's own clock. `acceptCallOffer` writes this doc from this
+        // same device, so a local `Date.now()` at tap-time felt "instant" but
+        // was reading a different clock than the caller's -- two real phones
+        // are rarely in perfect sync, so the two timers drifted by however
+        // far the clocks were apart, not just by network latency. A
+        // serverTimestamp() write reports back as null on the optimistic
+        // local snapshot and resolves to the real value once the server
+        // acknowledges it; only take the resolved one so both sides end up
+        // reading the identical instant.
+        if (callStartRef.current === null && typeof (data as any).acceptedAt?.toMillis === 'function') {
+          callStartRef.current = (data as any).acceptedAt.toMillis();
+        }
       }
+    }, (error) => {
+      // This listener is what ends the receiver's call when the offer is
+      // cleared. Left unhandled it surfaced as an uncaught snapshot error and
+      // the listener was dropped, stranding the receiver on a call screen that
+      // nothing could close.
+      // Clearing the offer rather than just leaving also tells the caller the
+      // call is over — their own listener sees the delete. A bare goBack() left
+      // the caller talking to a screen nobody was on.
+      console.warn('[CallScreen] Offer listener failed; ending call.', error?.message);
+      handleEndCall();
     });
     return unsub;
   }, [isCaller, isPending]);
@@ -227,8 +332,13 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         // Ephemeral RTC keys are minted by the backend, which derives the uid
         // from the bearer token rather than trusting the request body.
         if (currentProvider === 'agora' && user) {
-          console.log("[CallScreen] Requesting secure ephemeral key from token authority...");
-          const credentials = await authedPost<{ token: string; uid?: number }>(
+          // Usually already in flight (or done) from the prefetch above, so this
+          // resolves immediately instead of adding a round-trip after answering.
+          const prefetched = tokenPrefetchRef.current ? await tokenPrefetchRef.current : null;
+          if (!prefetched) {
+            console.log("[CallScreen] Requesting secure ephemeral key from token authority...");
+          }
+          const credentials = prefetched ?? await authedPost<{ token: string; uid?: number }>(
             '/api/v1/agora/generate-token',
             { roomId }
           );
@@ -253,9 +363,27 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         // Enforce a strict 7-second timeout for the provider to connect
         const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Connection Timeout")), 7000));
         await Promise.race([connectionPromise(), timeoutPromise]);
-      } catch (error) {
+      } catch (error: any) {
+        // A denied microphone is not a connection failure to route around —
+        // there is no provider that makes a call work without one. Previously
+        // this fell into the same waterfall path as a network error, and with
+        // only 'agora' in WATERFALL that path already ended the call, but via
+        // a generic "Connection failed" message that gave no indication the
+        // fix was to grant the permission and try again.
+        if (error?.code === 'PERMISSION_DENIED') {
+          console.warn('[CallScreen] Microphone permission denied; not proceeding with call.');
+          Alert.alert(
+            'Microphone access needed',
+            'GenGal needs microphone access to make and receive calls. Please allow it in your device settings and try again.',
+            [{ text: 'OK' }]
+          );
+          if (isMounted) setIsConnecting(false);
+          void endCall();
+          return;
+        }
+
         console.error(`[Waterfall] Provider ${currentProvider} failed:`, error);
-        
+
         // Trigger Waterfall Fallback. Only the caller publishes the switch — it
         // owns the `calls` record, and the receiver picks the change up through
         // the listener above.
@@ -361,14 +489,25 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       setCallerStatus(status);
       if (status === 'accepted') {
         setCallStep('talking');
+        if (callStartRef.current === null) {
+          const acceptedAt = (data as any)?.acceptedAt;
+          // A serverTimestamp() write is briefly null locally (pending server
+          // round-trip) before resolving, so fall back to "now" rather than
+          // treating that transient null as a valid start time.
+          callStartRef.current = typeof acceptedAt?.toMillis === 'function'
+            ? acceptedAt.toMillis()
+            : Date.now();
+        }
       } else if (status === 'rejected') {
         Alert.alert('Call declined', `${profile.name} declined the call.`, [{ text: 'OK' }]);
-        disconnectSeat();
-        goBack();
+        // Must go through endCall, not a bare disconnect. Declining only sets
+        // status='rejected'; nothing deletes the offer document, so leaving here
+        // without clearing it stranded a stale offer on the receiver and left
+        // the /calls history record stuck at status 'active' forever.
+        handleEndCall();
       } else if (status === null && callStep === 'talking') {
-        // Only disconnect if the call was already active (talking) and is now cleared
-        disconnectSeat();
-        goBack();
+        // Offer already gone, but the history record still needs closing.
+        handleEndCall();
       }
 
       // Caller records receiver heartbeat updates (immune to clock drift)
@@ -410,8 +549,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     const timeout = setTimeout(() => {
       console.log("[CallScreen] Peer connection timeout. Terminating call.");
       Alert.alert('Call ended', 'The connection to the other person was lost.', [{ text: 'OK' }]);
-      disconnectSeat();
-      goBack();
+      handleEndCall();
     }, 10000);
 
     return () => clearTimeout(timeout);
@@ -458,8 +596,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           isCaller ? `${profile.name}'s connection was lost.` : "The caller's connection was lost.",
           [{ text: 'OK' }]
         );
-        disconnectSeat();
-        goBack();
+        handleEndCall();
       }
     }, 1000);
 
@@ -491,7 +628,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       }
 
       syncIntervalRef.current += 1;
-      setCallDurationSeconds(prev => prev + 1);
+      // Computed from the shared start instant rather than incremented, so a
+      // paused/backgrounded tab still snaps to the correct elapsed time on
+      // its next tick instead of resuming a locally-stalled count.
+      if (callStartRef.current !== null) {
+        setCallDurationSeconds(Math.max(0, Math.round((Date.now() - callStartRef.current) / 1000)));
+      }
 
       if (syncIntervalRef.current >= 15) {
         const secondsInThisBatch = syncIntervalRef.current;
@@ -514,8 +656,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                 : 'The caller has run out of coins.',
               [{ text: 'OK' }]
             );
-            disconnectSeat();
-            goBack();
+            handleEndCall();
             return;
           }
         } catch (error: any) {
@@ -589,19 +730,33 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   };
 
   if (isPending) {
+    // Deliberately not wrapped in ScreenShell: the ringing UI paints its own
+    // full-bleed backdrop, and the shell's plum gradient used to show through
+    // behind the status bar and clash with it. Previously this branch rendered
+    // the shell plus a small top banner, which is why answering a call meant
+    // staring at a black screen.
     return (
-      <ScreenShell tone="dark">
+      <View style={styles.ringRoot}>
         <IncomingCallOverlay
           call={{
             callerUid: matchData?.uid || '',
             callerName: profile.name,
             callerAvatarUrl: profile.uri,
+            // Was omitted, so callers who use a built avatar rather than an
+            // uploaded photo rang through as a generic person icon.
+            callerAvatarData: (profile as any).avatarData,
             roomId: roomId || '',
             mode: mode,
             status: 'calling',
             timestamp: null,
           }}
           onAccept={() => {
+            // callStartRef is deliberately NOT set here from Date.now(): this
+            // device's own clock can be skewed from the caller's, which
+            // showed up as the two timers being permanently offset rather
+            // than just briefly out of step. The incoming_calls listener
+            // above sets it once the write's serverTimestamp resolves, so
+            // both sides read the same instant off the same clock.
             if (auth.currentUser) {
               acceptCallOffer(auth.currentUser.uid).catch(e =>
                 console.warn('Failed to accept call:', e)
@@ -619,7 +774,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             goBack();
           }}
         />
-      </ScreenShell>
+      </View>
     );
   }
 
@@ -644,10 +799,16 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                 style={styles.voiceAvatarOuter}
               >
                 <View style={styles.voiceAvatarInner}>
+                  {/* `profile.uri` falls back to '' when the peer has no photo
+                      (avatar-builder accounts store avatarData instead). An
+                      Image with an empty uri warns on every render and draws a
+                      blank box, so fall through to an icon rather than "" . */}
                   {(profile as any).avatarData ? (
                     <GengalAvatar data={(profile as any).avatarData} size={200} />
-                  ) : (
+                  ) : profile.uri ? (
                     <Image source={{ uri: profile.uri }} style={styles.voiceAvatar} />
+                  ) : (
+                    <MaterialIcons name="person" size={120} color="#C9BDB2" />
                   )}
                 </View>
               </LinearGradient>
@@ -763,8 +924,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                 <View style={styles.videoOffAvatarInner}>
                   {profile.avatarData ? (
                     <GengalAvatar data={profile.avatarData} size={110} />
-                  ) : (
+                  ) : profile.uri ? (
                     <Image source={{ uri: profile.uri }} style={styles.videoOffAvatar} />
+                  ) : (
+                    <MaterialIcons name="person" size={70} color="#FFFDF8" />
                   )}
                 </View>
               </LinearGradient>
@@ -813,16 +976,39 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         <View style={styles.selfPreview}>
           {cameraOn ? (
             (currentProvider === 'agora' && RtcSurfaceView && localUid !== null) ? (
-              <RtcSurfaceView canvas={{ uid: 0 }} style={StyleSheet.absoluteFill} />
+              // zOrderMediaOverlay is required, not cosmetic. On Android an
+              // RtcSurfaceView is a native SurfaceView, and two overlapping
+              // SurfaceViews ignore React Native's view order — they composite
+              // at the window level instead. Without this flag the fullscreen
+              // remote view above wins, and the peer's video shows through
+              // inside this box, so the self-preview appeared to be a second
+              // copy of "their" camera. Note it must be zOrderMediaOverlay and
+              // not zOrderOnTop: on-top would also paint over the call
+              // controls and the top bar, which are ordinary RN views.
+              <RtcSurfaceView
+                canvas={{ uid: 0 }}
+                zOrderMediaOverlay
+                style={StyleSheet.absoluteFill}
+              />
+            ) : currentUserProfile?.avatarUrl ? (
+              <Image source={{ uri: currentUserProfile.avatarUrl }} style={StyleSheet.absoluteFill} />
             ) : (
-              <Image source={{ uri: currentUserProfile?.avatarUrl || ''  }} style={StyleSheet.absoluteFill} />
+              <View style={styles.selfPreviewOffContent}>
+                {currentUserProfile?.avatarData ? (
+                  <GengalAvatar data={currentUserProfile.avatarData} size={50} />
+                ) : (
+                  <MaterialIcons name="person" size={34} color="#FFFDF8" />
+                )}
+              </View>
             )
           ) : (
             <View style={styles.selfPreviewOffContent}>
               {currentUserProfile?.avatarData ? (
                 <GengalAvatar data={currentUserProfile.avatarData} size={50} />
+              ) : currentUserProfile?.avatarUrl ? (
+                <Image source={{ uri: currentUserProfile.avatarUrl }} style={styles.selfPreviewAvatar} />
               ) : (
-                <Image source={{ uri: currentUserProfile?.avatarUrl || ''  }} style={styles.selfPreviewAvatar} />
+                <MaterialIcons name="person" size={34} color="#FFFDF8" />
               )}
               <View style={styles.selfPreviewOffBadge}>
                 <MaterialIcons name="videocam-off" size={15} color="#FFFDF8" />
@@ -877,6 +1063,9 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 }
 
 const styles = StyleSheet.create({
+  // The ringing screen is full-bleed; IncomingCallOverlay paints its own
+  // backdrop and handles its own safe-area insets.
+  ringRoot: { flex: 1, backgroundColor: '#1A0714' },
   voicePhone: {
     flex: 1,
     alignSelf: 'center',

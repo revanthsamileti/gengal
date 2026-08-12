@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Platform, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import { Platform, PermissionsAndroid, View, Text, TextInput, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
@@ -73,7 +73,20 @@ export default function CreatePasswordScreen({ navigate, goBack, route }: any) {
       await setAccountPassword(password);
       await saveAuthSession(params.phone, password);
 
-      // 4. Navigate manually since App.tsx is ignoring auth changes during CreatePassword
+      // 4. Prime mic/camera permissions right after account creation, before
+      // the user has any reason to be mid-call: asking here means the first
+      // Call tap doesn't stall on a system dialog, and if they deny it now
+      // there's no call waiting to fail. Best-effort -- CallScreen still
+      // gates on the mic permission itself, so a decline here just means the
+      // prompt appears again at the first call attempt.
+      if (Platform.OS === 'android') {
+        PermissionsAndroid.requestMultiple([
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+          PermissionsAndroid.PERMISSIONS.CAMERA,
+        ]).catch(() => {});
+      }
+
+      // 5. Navigate manually since App.tsx is ignoring auth changes during CreatePassword
       navigate('Home');
     } catch (error: any) {
       setErrorMsg(error.message || 'Failed to create account');

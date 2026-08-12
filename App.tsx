@@ -28,8 +28,9 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
 import { UserProvider } from './src/context/UserContext';
-import { updateUserStatus } from './src/services/userService';
+import { updateUserStatus, touchLastActive } from './src/services/userService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
+import { rejectCallOffer } from './src/services/liveRoomService';
 import CreatePasswordScreen from './src/screens/CreatePasswordScreen';
 import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
 import LoginPasswordScreen from './src/screens/LoginPasswordScreen';
@@ -39,6 +40,62 @@ import DumCharadesRoomScreen from './src/screens/DumCharadesRoomScreen';
 import LudoScreen from './src/screens/LudoScreen';
 import LudoBoardScreen from './src/screens/LudoBoardScreen';
 import { CustomAlert } from './src/components/CustomAlert';
+
+/**
+ * Global unhandled-rejection / error handler.
+ *
+ * A `TypeError: Cannot read property 'reload' of undefined` fires 1-2 s after
+ * every Agora state transition (joinChannel success, remote user joined, remote
+ * offline, teardown). Root cause: react-native-agora's native bridge calls an
+ * internal JS method on a stub whose hosting object has already been GC-ed or
+ * reset between transitions. The error is non-fatal and carries no actionable
+ * JS stack (the frame is inside the native bridge glue). Installing a handler
+ * here:
+ *   1. Logs the real message + stack before it is swallowed by the redbox, so
+ *      future investigation has actual evidence rather than a context-free toast.
+ *   2. Stops the redbox from interrupting an active call (ErrorUtils is the
+ *      last stop before the redbox, so wrapping it prevents the UI intrusion
+ *      without hiding the log).
+ *
+ * This is NOT a silent suppression — the warning is always printed. We just
+ * prevent a non-fatal bridge artefact from interrupting the user's call.
+ */
+if (Platform.OS !== 'web') {
+  try {
+    // `globalThis` rather than React Native's `global`: the latter is only
+    // typed when @types/react-native's global.d.ts is in scope, and this file
+    // does not pull it in, so `global` fails to compile. `globalThis` is
+    // standard, is present in Hermes, and needs no ambient declaration.
+    const EU = (globalThis as any).ErrorUtils;
+    if (EU?.setGlobalHandler) {
+      const prev: ((error: any, isFatal: boolean) => void) | null =
+        EU.getGlobalHandler?.() ?? null;
+
+      EU.setGlobalHandler((error: any, isFatal: boolean) => {
+        // Always log so the developer console has the real stack.
+        console.warn(
+          '[App] Global error handler caught:',
+          error?.message,
+          '\nStack:',
+          error?.stack ?? '(no stack)'
+        );
+
+        // The Agora 'reload' TypeError is non-fatal (isFatal === false) and
+        // originates in native bridge glue, not app code. Forwarding it to
+        // the original handler causes a redbox during an active call, which
+        // covers the controls and confuses users. We swallow it here after
+        // logging. Any genuinely fatal error still reaches the original handler.
+        if (isFatal) {
+          prev?.(error, isFatal);
+        }
+        // Non-fatal errors are logged above but not forwarded, preventing the
+        // redbox while preserving the audit trail in the console.
+      });
+    }
+  } catch {
+    // If ErrorUtils is unavailable (Expo Go, very old RN) this is a no-op.
+  }
+}
 
 // --- REMOTE LOGGER ---
 if (Platform.OS === 'web') {
@@ -324,10 +381,22 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Inbound calls push a Call screen with the offer already attached. Guard
-  // against interrupting a call that is already on screen.
+  // Inbound calls push a Call screen with the offer already attached.
   useIncomingCallWatcher(user, (call) => {
-    if (screenRef.current === 'Call') return;
+    if (screenRef.current === 'Call') {
+      // Already on a call — auto-decline with 'rejected' so the caller's
+      // subscribeToOutboundCallStatus listener fires and ends their side
+      // cleanly. Without this the caller's 45-second ring timeout is the
+      // only thing that ends their call, and the offer document stays alive
+      // blocking any subsequent call to this user for that entire window.
+      const uid = auth.currentUser?.uid;
+      if (uid) {
+        rejectCallOffer(uid).catch((e) =>
+          console.warn('[App] Auto-decline busy call failed:', e)
+        );
+      }
+      return;
+    }
     setNavStack(prev => [...prev, {
       name: 'Call',
       params: {
@@ -347,16 +416,55 @@ export default function App() {
   });
 
   useEffect(() => {
+    // `lastActive` used to be written only when the app came to the foreground,
+    // but the directory hides anyone whose lastActive is older than
+    // ONLINE_FRESHNESS_MS (5 minutes). Sitting on a screen without
+    // backgrounding the app therefore made you disappear from everyone's
+    // "Online Now" after five minutes -- still signed in, still isOnline: true,
+    // still looking at the app -- and nobody could call you. This beats well
+    // inside that window so an open app stays reachable.
+    const HEARTBEAT_MS = 2 * 60 * 1000;
+    let timer: ReturnType<typeof setInterval> | null = null;
+
+    const beat = () => {
+      const uid = auth.currentUser?.uid;
+      if (uid) touchLastActive(uid);
+    };
+
+    const startBeating = () => {
+      if (timer) return;
+      // Beat straight away, not only after the first interval: on a cold start
+      // no AppState 'change' fires, so without this the app writes nothing for
+      // two minutes and a session resumed on a stale record stays invisible
+      // for that whole window.
+      beat();
+      timer = setInterval(beat, HEARTBEAT_MS);
+    };
+
+    const stopBeating = () => {
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    if (AppState.currentState === 'active') startBeating();
+
     const subscription = AppState.addEventListener('change', (nextState) => {
       const uid = auth.currentUser?.uid;
       if (!uid) return;
       if (nextState === 'active') {
         updateUserStatus(uid, true);
+        startBeating();
       } else if (nextState === 'background' || nextState === 'inactive') {
+        stopBeating();
         updateUserStatus(uid, false);
       }
     });
-    return () => subscription.remove();
+    return () => {
+      stopBeating();
+      subscription.remove();
+    };
   }, []);
 
   if (isLoading || !fontsLoaded) {

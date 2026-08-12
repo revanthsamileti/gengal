@@ -16,6 +16,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { useActionLock } from '../hooks/useActionLock';
+import { launchCall } from '../services/callPermissionService';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
@@ -45,9 +46,12 @@ type CelebsScreenProps = {
 function LiveRoomChat({
   room,
   onClose,
+  onEnterRoom,
 }: {
   room: ExpertRoom;
   onClose: () => void;
+  /** Leaves the text-only preview for the real room, where the audio is. */
+  onEnterRoom: (room: ExpertRoom) => void;
 }) {
   const { profile } = useUser();
   const myUid = auth.currentUser?.uid ?? '';
@@ -98,6 +102,18 @@ function LiveRoomChat({
           <Text style={chatStyles.hostName} numberOfLines={1}>{room.hostNickname}</Text>
           <Text style={chatStyles.topic} numberOfLines={1}>{room.topic}</Text>
         </View>
+        {/* Until this existed the panel was a dead end: you could read and type,
+            but there was no way through to the room's audio stage. */}
+        <TouchableOpacity
+          onPress={() => onEnterRoom(room)}
+          style={chatStyles.enterBtn}
+          hitSlop={tap28}
+          accessibilityRole="button"
+          accessibilityLabel={`Join ${room.hostNickname}'s live room`}
+        >
+          <MaterialIcons name="headset-mic" size={13} color="#2A0128" />
+          <Text style={chatStyles.enterBtnText}>Join live</Text>
+        </TouchableOpacity>
         <TouchableOpacity onPress={onClose} style={chatStyles.closeBtn} hitSlop={tap28}
           accessibilityRole="button"
           accessibilityLabel="Close">
@@ -185,6 +201,12 @@ const chatStyles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,253,248,0.1)',
   },
+  enterBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, height: 28, borderRadius: 14,
+    backgroundColor: '#E8CA58',
+  },
+  enterBtnText: { color: '#2A0128', fontSize: 11, fontWeight: '900' },
   messageList: { maxHeight: 180 },
   messageContent: { padding: 12, gap: 6 },
   messageRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end', gap: 4 },
@@ -255,14 +277,14 @@ function CelebCard({
 
   const { locked: callLocked, run: runCall } = useActionLock();
   const startCall = (mode: 'call' | 'video') =>
-    runCall(() => {
-      navigate('Call', {
+    runCall(() =>
+      launchCall(navigate, {
         profileName: profile.name,
         mode,
         isCaller: true,
         matchData: { ...profile, modes: ['call', 'video'] },
-      });
-    });
+      })
+    );
 
   return (
     <Animated.View style={{ opacity: fadeAnim, transform: [{ translateY: slideAnim }] }}>
@@ -416,6 +438,105 @@ const cardStyles = StyleSheet.create({
   liveBtnCount: { color: 'rgba(255,253,248,0.6)', fontSize: 10, fontWeight: '700' },
 });
 
+// ── Live Now strip ───────────────────────────────────────────────────────────
+
+/**
+ * Every room that is live right now, not just the ones hosted by a VIP who
+ * also happens to be in the online list. The per-card Live button only ever
+ * appeared when both of those lined up, which is why the page looked as though
+ * it had no live controls at all.
+ */
+function LiveNowStrip({
+  rooms,
+  activeRoomId,
+  onOpen,
+}: {
+  rooms: ExpertRoom[];
+  activeRoomId?: string;
+  onOpen: (room: ExpertRoom) => void;
+}) {
+  if (rooms.length === 0) return null;
+
+  return (
+    <View style={stripStyles.wrap}>
+      <View style={stripStyles.headingRow}>
+        <View style={stripStyles.dot} />
+        <Text style={stripStyles.heading}>Live now</Text>
+        <Text style={stripStyles.count}>{rooms.length}</Text>
+      </View>
+
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={stripStyles.row}
+      >
+        {rooms.map((room) => {
+          const selected = room.id === activeRoomId;
+          return (
+            <TouchableOpacity
+              key={room.id}
+              activeOpacity={0.85}
+              style={[stripStyles.tile, selected && stripStyles.tileSelected]}
+              onPress={() => onOpen(room)}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${room.hostNickname}'s live room on ${room.topic}`}
+            >
+              <View style={stripStyles.tileAvatarRing}>
+                {room.hostAvatarData ? (
+                  <GengalAvatar data={room.hostAvatarData} size={40} />
+                ) : (
+                  <MaterialIcons name="mic" size={20} color="#E8CA58" />
+                )}
+              </View>
+              <Text style={stripStyles.tileHost} numberOfLines={1}>{room.hostNickname}</Text>
+              <Text style={stripStyles.tileTopic} numberOfLines={1}>{room.topic}</Text>
+              <View style={stripStyles.tileMetaRow}>
+                <MaterialIcons name="people" size={9} color="#B88A2E" />
+                <Text style={stripStyles.tileMeta}>{room.activeMemberCount}</Text>
+                <Text style={stripStyles.tileTier}>{room.tier}</Text>
+              </View>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+const stripStyles = StyleSheet.create({
+  wrap: { marginBottom: 14 },
+  headingRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 16, marginBottom: 8,
+  },
+  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#5EBB62' },
+  heading: { color: '#4B0054', fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
+  count: { color: '#9A856E', fontSize: 11, fontWeight: '700' },
+  row: { paddingHorizontal: 14, gap: 10 },
+  tile: {
+    width: 116,
+    padding: 10,
+    borderRadius: 16,
+    backgroundColor: '#1A0714',
+    borderWidth: 1,
+    borderColor: 'rgba(209,178,59,0.22)',
+    alignItems: 'center',
+    gap: 3,
+  },
+  tileSelected: { borderColor: '#E8CA58' },
+  tileAvatarRing: {
+    width: 46, height: 46, borderRadius: 23,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1.5, borderColor: '#B89628',
+    overflow: 'hidden', marginBottom: 4,
+  },
+  tileHost: { color: '#FFFDF8', fontSize: 12, fontWeight: '900', maxWidth: '100%' },
+  tileTopic: { color: 'rgba(255,253,248,0.55)', fontSize: 10, maxWidth: '100%' },
+  tileMetaRow: { flexDirection: 'row', alignItems: 'center', gap: 3, marginTop: 3 },
+  tileMeta: { color: '#B88A2E', fontSize: 9, fontWeight: '800' },
+  tileTier: { color: 'rgba(255,253,248,0.4)', fontSize: 9, fontWeight: '700', marginLeft: 4 },
+});
+
 // ── Main Screen ──────────────────────────────────────────────────────────────
 
 export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
@@ -449,6 +570,12 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
     setActiveChat(room);
   };
 
+  const handleEnterRoom = (room: ExpertRoom) => {
+    if (!room.id) return;
+    setActiveChat(null);
+    navigate('ExpertRoom', { roomId: room.id });
+  };
+
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
@@ -469,13 +596,32 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
             </View>
             <Text style={styles.heroTitle}>Celebs</Text>
             <Text style={styles.heroSub}>Call · Video · Join their live</Text>
+
+            {/* The page talked about lives but offered no way to start one. */}
+            <TouchableOpacity
+              style={styles.goLiveBtn}
+              activeOpacity={0.85}
+              onPress={() => navigate('Club')}
+              accessibilityRole="button"
+              accessibilityLabel="Go live and host your own room"
+            >
+              <MaterialIcons name="podcasts" size={14} color="#2A0128" />
+              <Text style={styles.goLiveText}>Go live</Text>
+            </TouchableOpacity>
           </LinearGradient>
+
+          <LiveNowStrip
+            rooms={liveRooms}
+            activeRoomId={activeChat?.id}
+            onOpen={handleJoinLive}
+          />
 
           {/* Active live chat panel */}
           {activeChat ? (
             <LiveRoomChat
               room={activeChat}
               onClose={() => setActiveChat(null)}
+              onEnterRoom={handleEnterRoom}
             />
           ) : null}
 
@@ -527,6 +673,18 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     justifyContent: 'space-between', marginBottom: 10,
   },
+  goLiveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 5,
+    marginTop: 12,
+    paddingHorizontal: 14,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#E8CA58',
+  },
+  goLiveText: { color: '#2A0128', fontSize: 12, fontWeight: '900', letterSpacing: 0.4 },
   livePill: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: 'rgba(255,253,248,0.15)',

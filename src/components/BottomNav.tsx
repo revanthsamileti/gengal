@@ -23,7 +23,11 @@ type BottomNavProps = {
 
 export default function BottomNav({ active, navigate }: BottomNavProps) {
   const insets = useSafeAreaInsets();
-  const bottomPadding = insets.bottom > 0 ? insets.bottom : (Platform.OS === 'ios' ? 24 : 16);
+  // Some devices (hardware/capacitive nav keys, no on-screen bar) report
+  // insets.bottom as 0, which used to fall back to a bare 16dp -- tight
+  // enough that the labels sat almost flush against the physical screen
+  // edge. 24dp is what devices *with* a real inset already get comfortably.
+  const bottomPadding = Math.max(insets.bottom, 24);
 
   return (
     <View style={styles.container}>
