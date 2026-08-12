@@ -12,6 +12,7 @@ import ScreenShell from '../components/ScreenShell';
 import GengalAvatar from '../components/GengalAvatar';
 import CallPriceTag from '../components/CallPriceTag';
 import { useActionLock } from '../hooks/useActionLock';
+import { launchCall } from '../services/callPermissionService';
 
 type MatchScreenProps = {
   profileName?: string;
@@ -53,9 +54,9 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
 
   const { locked: callLocked, run: runCall } = useActionLock();
   const startCall = (mode: 'call' | 'video') =>
-    runCall(() => {
-      navigate('Call', { profileName: profile.name, mode, roomId, matchData, isCaller: true });
-    });
+    runCall(() =>
+      launchCall(navigate, { profileName: profile.name, mode, roomId, matchData, isCaller: true })
+    );
 
   return (
     <ScreenShell tone="dark">
@@ -98,9 +99,19 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
                   <MaterialIcons name="favorite" size={15} color="#7E5206" />
                 </View>
                 {(profile as any).avatarData ? (
+                  // App avatar builder — preferred for users who completed
+                  // AvatarScreen; never an empty string.
                   <GengalAvatar data={(profile as any).avatarData} size={220} />
+                ) : (profile as any).uri ? (
+                  // Real avatarUrl; guard is necessary because a match whose
+                  // account has no photo would produce source={{ uri: '' }},
+                  // which warns on every render and draws nothing.
+                  <Image source={{ uri: (profile as any).uri }} style={styles.matchPhoto} />
                 ) : (
-                  <Image source={{ uri: profile.uri }} style={styles.matchPhoto} />
+                  // No avatar, no photo — person icon at full card size.
+                  <View style={[styles.matchPhoto, styles.matchPhotoFallback]}>
+                    <MaterialIcons name="person" size={110} color="#C9BDB2" />
+                  </View>
                 )}
                 <View style={styles.heartSeal}>
                   <MaterialIcons name="favorite" size={28} color="#7E6507" />
@@ -288,6 +299,13 @@ const styles = StyleSheet.create({
     height: 86,
     borderRadius: 43,
     opacity: 1.0,
+  },
+  // Shown when neither avatarData nor a photo URL is available.
+  // Prevents source={{ uri: '' }} warnings and the resulting empty frame.
+  matchPhotoFallback: {
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    backgroundColor: '#F5ECE1',
   },
   heartSeal: {
     position: 'absolute',

@@ -15,6 +15,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import BottomNav from '../components/BottomNav';
 import { useActionLock } from '../hooks/useActionLock';
+import { launchCall } from '../services/callPermissionService';
 
 import { useUser } from '../context/UserContext';
 import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, getFollowerCount, UserProfile as FirebaseUser } from '../services/userService';
@@ -41,10 +42,11 @@ function ModeButton({
   const isVideo = mode === 'video';
   const { locked, run } = useActionLock();
   const peerName = (profile as any).name || (profile as any).nickname || (profile as any).username;
-  // Seeded demo profiles carry a uid ('ref_elena', …) so CallScreen's uid guard
-  // would let them through and bill for a call to an account that never existed.
-  // They have to be excluded here explicitly.
-  const canCall = !!(profile as any)?.uid && (profile as any)?.isSampleProfile !== true;
+  // A uid is what CallScreen bills against, so anything without one must not
+  // offer a call button. The extra `isSampleProfile` exclusion that used to sit
+  // here is gone with the seeded profiles themselves — every profile reaching
+  // this screen now comes from a real Firestore account.
+  const canCall = !!(profile as any)?.uid;
 
   return (
     <TouchableOpacity
@@ -55,11 +57,11 @@ function ModeButton({
       accessibilityLabel={isVideo ? `Video call ${peerName}` : `Call ${peerName}`}
       accessibilityState={{ disabled: !canCall || locked }}
       onPress={() =>
-        run(() => {
+        run(() =>
           // matchData carries the uid CallScreen needs to create the offer.
           // Omitting it previously made every call from this screen fail.
-          navigate('Call', { profileName: peerName, mode, isCaller: true, matchData: profile });
-        })
+          launchCall(navigate, { profileName: peerName, mode, isCaller: true, matchData: profile })
+        )
       }
     >
       <MaterialIcons

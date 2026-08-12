@@ -17,7 +17,71 @@ import {
   arrayRemove
 } from 'firebase/firestore';
 
-const ONLINE_FRESHNESS_MS = 5 * 60 * 1000;
+/**
+ * How long a lastActive timestamp stays fresh enough to count as "online".
+ *
+ * Exported so App.tsx (the heartbeat driver) and any screen that renders
+ * availability status use the same number — previously this was a private
+ * constant, so callers invented their own cutoffs that could drift apart.
+ */
+export const ONLINE_FRESHNESS_MS = 5 * 60 * 1000;
+
+/**
+ * How often the App-level heartbeat should call touchLastActive.
+ *
+ * Must be comfortably shorter than ONLINE_FRESHNESS_MS (at least 2 heartbeat
+ * intervals fit inside the TTL window), so one dropped write doesn't
+ * blink a user out of the "Online Now" feed mid-session.
+ *
+ * Distinct from presenceService.HEARTBEAT_MS: room presence is ephemeral and
+ * high-frequency (20 s), user presence is persistent and cheaper (2 min).
+ */
+export const USER_HEARTBEAT_MS = 2 * 60 * 1000;
+
+/**
+ * How long an `inCallSince` stamp keeps someone reading as mid-call.
+ *
+ * The server re-stamps both participants on every billing tick, which runs
+ * every 15 s, so three ticks of slack absorbs a dropped write or a slow network
+ * without flickering someone back to "available" while they are still talking.
+ *
+ * The expiry is what makes this safe: a call that ends by force-quit, crash or
+ * dead network is never explicitly cleared, and a boolean flag would strand
+ * that user as permanently busy — invisible to callers, earning nothing. Here
+ * the stamp simply stops being refreshed and ages out on its own.
+ */
+export const CALL_BUSY_TTL_MS = 45 * 1000;
+
+/**
+ * Whether this user is on a call right now.
+ *
+ * Server-written (see the billing tick), so it cannot be spoofed by a client
+ * wanting to look unavailable — or to hide that it is already talking to
+ * someone else.
+ */
+export const isUserInCall = (user: UserProfile, now: number = Date.now()): boolean => {
+  const since = toMillis((user as any).inCallSince);
+  return since > 0 && now - since <= CALL_BUSY_TTL_MS;
+};
+
+/**
+ * Whether touchLastActive should write on the next tick.
+ *
+ * Driven by setHeartbeatEnabled, which UserContext calls whenever the user's
+ * isActiveMode changes. Avoids a Firestore read on every heartbeat tick just
+ * to check whether the user turned off "Show Active" — the read would cost
+ * more than the write it is trying to prevent.
+ *
+ * Reset to true on every auth-state sign-in (via UserContext) so a sign-out
+ * / sign-in cycle with a different account does not carry the previous
+ * session's preference.
+ */
+let _heartbeatEnabled = true;
+
+/** Called by UserContext to sync the heartbeat gate with isActiveMode. */
+export const setHeartbeatEnabled = (enabled: boolean) => {
+  _heartbeatEnabled = enabled;
+};
 
 /** Any signed-in user can read /users, so the listings are capped. */
 const DIRECTORY_PAGE_SIZE = 50;
@@ -60,6 +124,8 @@ export interface UserProfile {
   isOnline?: boolean;
   isActiveMode?: boolean;
   isSessionActive?: boolean;
+  /** Server-stamped on every billing tick while on a call. See isUserInCall. */
+  inCallSince?: any;
   isDeleted?: boolean;
   deletedAt?: any;
   tier?: 'VIP' | 'Advance' | 'Standard';
@@ -170,6 +236,10 @@ export const isUserAvailableNow = (user: UserProfile): boolean => {
   if (user.isOnline !== true) return false;
   if (user.isActiveMode === false) return false;
   if ((user as any).isSessionActive === false) return false;
+  // Someone mid-call is online but not reachable. Showing them as "Available
+  // now" invites a call that cannot be answered, and the caller pays the full
+  // ring timeout to discover it.
+  if (isUserInCall(user)) return false;
   const lastActiveMs = toMillis(user.lastActive);
   return lastActiveMs > 0 && Date.now() - lastActiveMs <= ONLINE_FRESHNESS_MS;
 };
@@ -394,11 +464,42 @@ export const toggleActiveMode = async (uid: string, isActiveMode: boolean) => {
   }
 };
 
+/**
+ * Refreshes only `lastActive`, to keep an open app inside ONLINE_FRESHNESS_MS.
+ *
+ * Deliberately does not touch isOnline or isSessionActive: a heartbeat should
+ * report that the session is alive, not re-assert a state the user may have
+ * changed from the Active Mode toggle in between beats.
+ */
+export const touchLastActive = async (uid: string) => {
+  // The user has turned off "Show Active". Stop writing lastActive so we don't
+  // accidentally keep them visible in freshness-filtered feeds. isOnline is
+  // already false (set by toggleActiveMode), so the query filter would exclude
+  // them anyway — but halting the write here is cheap and explicit.
+  if (!_heartbeatEnabled) return;
+  try {
+    const userRef = doc(db, 'users', uid);
+    // Rules read `resource.data` for an update, so a write against a document
+    // that doesn't exist yet fails permission-denied rather than not-found.
+    // The app's foreground/heartbeat effects can fire the instant sign-in
+    // completes, before a brand-new account's profile doc has been created by
+    // the onboarding flow — this is that race, not an authorization problem.
+    const userSnap = await getDoc(userRef);
+    if (!userSnap.exists()) return;
+    await updateDoc(userRef, { lastActive: serverTimestamp() });
+  } catch (error) {
+    console.warn('Error refreshing lastActive:', error);
+  }
+};
+
 export const updateUserStatus = async (uid: string, isOnline: boolean) => {
   try {
     const userRef = doc(db, 'users', uid);
     const userSnap = await getDoc(userRef);
-    const isActiveMode = userSnap.exists() ? userSnap.data().isActiveMode !== false : true;
+    // Same race as touchLastActive: nothing to mark online/offline before the
+    // profile document exists.
+    if (!userSnap.exists()) return;
+    const isActiveMode = userSnap.data().isActiveMode !== false;
     await updateDoc(userRef, {
       isOnline: isOnline && isActiveMode,
       isSessionActive: isOnline,

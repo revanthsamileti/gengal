@@ -13,6 +13,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { useActionLock } from '../hooks/useActionLock';
+import { launchCall } from '../services/callPermissionService';
 import BottomNav from '../components/BottomNav';
 import TopBar from '../components/TopBar';
 import GengalAvatar from '../components/GengalAvatar';
@@ -47,9 +48,9 @@ function ModeButton({
       accessibilityRole="button"
       accessibilityLabel={isVideo ? `Video call ${profile.name}` : `Call ${profile.name}`}
       onPress={() =>
-        run(() => {
-          navigate('Call', { profileName: profile.name, mode, isCaller: true, matchData: profile });
-        })
+        run(() =>
+          launchCall(navigate, { profileName: profile.name, mode, isCaller: true, matchData: profile })
+        )
       }
     >
       <MaterialIcons
@@ -60,7 +61,7 @@ function ModeButton({
       <Text style={[styles.modeText, isVideo && styles.modeTextVideo]}>
         {isVideo ? 'Video' : 'Call'}
       </Text>
-      <CallPriceTag mode={mode} />
+      <CallPriceTag mode={mode} textColor="#FFFFFF" />
     </TouchableOpacity>
   );
 }
@@ -184,7 +185,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
 
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
-          contentContainerStyle={[styles.scroll, isSmall && styles.scrollSmall]}
+          contentContainerStyle={styles.scroll}
           showsVerticalScrollIndicator={false}
         >
           <TouchableOpacity
@@ -388,13 +389,17 @@ const styles = StyleSheet.create({
     maxWidth: 430,
     backgroundColor: 'transparent',
   },
+  // BottomNav is position:'absolute', so nothing pushes it out of the
+  // ScrollView's way -- the content itself has to reserve enough bottom
+  // clearance. A height-based threshold used to pick between 90/130 here,
+  // but real devices land on both sides of any cutoff (an 875dp-tall phone
+  // fell just above a "isSmall < 850" line and still clipped its last row
+  // behind BottomNav). Always reserving the larger amount costs nothing on
+  // tall screens and guarantees clearance on short ones.
   scroll: {
     paddingHorizontal: 26,
     paddingTop: 20,
-    paddingBottom: 110,
-  },
-  scrollSmall: {
-    paddingBottom: 90,
+    paddingBottom: 130,
   },
   heroShell: {
     borderRadius: 24,

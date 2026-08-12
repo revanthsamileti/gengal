@@ -20,14 +20,14 @@ import ScreenShell from '../components/ScreenShell';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
-import { subscribeToOnlineUsers, toggleActiveMode, UserProfile as FirebaseUser } from '../services/userService';
+import { subscribeToOnlineUsers, toggleActiveMode, isUserInCall, UserProfile as FirebaseUser } from '../services/userService';
 import { findMatch } from '../services/matchService';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import ConnectingOverlay from '../components/ConnectingOverlay';
 import { Alert } from '../components/CustomAlert';
 import { useActionLock } from '../hooks/useActionLock';
-import { SAMPLE_PROFILES } from '../data/sampleProfiles';
+import { launchCall as launchCallWithPermissions } from '../services/callPermissionService';
 import { subscribeToGlobalSettings } from '../services/adminService';
 
 type MatchNode = {
@@ -44,12 +44,6 @@ type MatchNode = {
   popularityScore?: number;
   isBusy?: boolean;
   waitlistPriorityActive?: boolean;
-  /**
-   * Seeded demo profile, not a real account. These keep the grid from looking
-   * empty but have no uid behind them, so they must never be callable — a call
-   * placed against one would ring a user that does not exist.
-   */
-  isSampleProfile?: boolean;
 };
 
 type PersonalScreenProps = {
@@ -87,38 +81,6 @@ function ActionButtonsBar({
   waitlistStatus?: 'none' | 'waiting' | 'ready';
   rates: { call: number; video: number };
 }) {
-  // Seeded demo profiles have no real account behind them. Keep the same two
-  // controls so the row still reads as a profile, but mute them and let the tap
-  // fall through to launchCall, which explains why it cannot connect. A full
-  // width grey pill here made every card in the list look broken.
-  if (node.isSampleProfile) {
-    return (
-      <View style={styles.buttonsRow}>
-        <TouchableOpacity
-          activeOpacity={0.85}
-          style={[styles.callPillBtn, styles.pillMuted]}
-          onPress={() => onCallPress(node, 'call')}
-          accessibilityRole="button"
-          accessibilityLabel={`Call ${node.name} — sample profile, not connectable`}
-        >
-          <MaterialIcons name="phone" size={18} color="#A99A86" />
-          <PriceStars amount={rates.call} tone="muted" />
-        </TouchableOpacity>
-        <TouchableOpacity
-          activeOpacity={0.85}
-          style={[styles.videoPillBtn, styles.pillMuted]}
-          hitSlop={tap38}
-          onPress={() => onCallPress(node, 'video')}
-          accessibilityRole="button"
-          accessibilityLabel={`Video call ${node.name} — sample profile, not connectable`}
-        >
-          <MaterialIcons name="videocam" size={19} color="#A99A86" />
-          <PriceStars amount={rates.video} tone="muted" />
-        </TouchableOpacity>
-      </View>
-    );
-  }
-
   if (node.isBusy) {
     const isWaiting = waitlistStatus === 'waiting';
     return (
@@ -230,9 +192,18 @@ function FloatingProfileRow({
         accessibilityLabel="Open this profile">
         <View style={styles.avatarCircleInner}>
           {node.avatarData ? (
+            // Prefer the app's avatar builder; it is always present for users
+            // who completed onboarding via AvatarScreen.
             <GengalAvatar data={node.avatarData} size={102} />
-          ) : (
+          ) : node.image ? (
+            // Real photo URL or the sample profile's Unsplash image.
             <Image source={{ uri: node.image }} style={styles.avatarImage} />
+          ) : (
+            // No avatar and no photo URL. A blank Image with uri='' warns on
+            // every render and draws nothing. Render a person icon instead.
+            <View style={[styles.avatarImage, styles.avatarFallback]}>
+              <MaterialIcons name="person" size={50} color="#C9BDB2" />
+            </View>
           )}
         </View>
       </TouchableOpacity>
@@ -271,7 +242,11 @@ function FloatingProfileRow({
           <Text style={styles.nameTypography} numberOfLines={1}>
             {node.name}
           </Text>
-          <Text style={styles.ageTypography}>{node.age}</Text>
+          {/* Age 0 is the sentinel for "user hasn't set their age yet". Don't
+              show it — printing "0" next to a name is worse than nothing. */}
+          {node.age > 0 && (
+            <Text style={styles.ageTypography}>{node.age}</Text>
+          )}
         </View>
 
         {/* Busy or Priority status badges */}
@@ -426,6 +401,11 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
   const [selectedMode, setSelectedMode] = useState<'ALL' | 'call' | 'video'>('ALL');
   const [isModePickerOpen, setIsModePickerOpen] = useState(false);
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
+  // Distinguishes "Firestore has not answered yet" from "nobody is online".
+  // Both leave the list empty, and while seeded profiles padded the grid the
+  // difference did not show. With a live-only feed it is the whole message:
+  // one is a spinner, the other is "no one is available right now".
+  const [usersLoaded, setUsersLoaded] = useState(false);
   const { profile: myProfile } = useUser();
   const [isSearching, setIsSearching] = useState(false);
   const { run: runCall } = useActionLock();
@@ -489,27 +469,20 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
 
   /**
    * The single door to CallScreen. Every entry point (cards, hold modal,
-   * waitlist modal) goes through here so the sample-profile block and the
-   * double-tap lock cannot be bypassed by adding a new button later.
+   * waitlist modal) goes through here so the double-tap lock cannot be
+   * bypassed by adding a new button later.
    */
   const launchCall = (node: MatchNode, mode: 'call' | 'video') =>
     runCall(() => {
-      if (node.isSampleProfile) {
-        Alert.alert(
-          'Sample profile',
-          `${node.name} is a sample profile used to preview the app and cannot be called.`,
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-      navigate('Call', { profileName: node.name, mode, isCaller: true, matchData: node });
+      return launchCallWithPermissions(navigate, {
+        profileName: node.name,
+        mode,
+        isCaller: true,
+        matchData: node,
+      });
     });
 
   const handleCallPress = (node: MatchNode, mode: 'call' | 'video') => {
-    if (node.isSampleProfile) {
-      void launchCall(node, mode);
-      return;
-    }
     const key = node.uid || '';
     const wasOnWaitlist = waitlistMap[key] === 'ready' || waitlistMap[key] === 'waiting';
     const isPriorityWindowActive = node.waitlistPriorityActive || (freedMatchIds[key] && !wasOnWaitlist);
@@ -543,55 +516,67 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
   useEffect(() => {
     const unsubscribe = subscribeToOnlineUsers((users) => {
       setFirebaseUsers(users);
+      setUsersLoaded(true);
     }, auth.currentUser?.uid, false);
     return () => unsubscribe();
   }, []);
 
   const MATCHES: MatchNode[] = useMemo(() => {
-    // Base data lives in src/data/sampleProfiles so the More Connects directory
-    // renders the same people. Only the busy/waitlist state is layered on here,
-    // because it depends on this screen's runtime freedMatchIds.
-    const defaultReferenceProfiles: MatchNode[] = SAMPLE_PROFILES.map((p) => {
-      if (p.uid === 'ref_aanya') {
-        return { ...p, isBusy: false, waitlistPriorityActive: true };
-      }
-      if (p.uid === 'ref_chloe' || p.uid === 'ref_valeria') {
-        return {
-          ...p,
-          isBusy: !freedMatchIds[p.uid],
-          waitlistPriorityActive: !!freedMatchIds[p.uid],
-        };
-      }
-      return { ...p };
-    });
-
-    if (!firebaseUsers || firebaseUsers.length === 0) {
-      return defaultReferenceProfiles.filter((p) => p.isOnline !== false);
-    }
+    // Live users only. There is no seeded fallback here by design: a feed that
+    // looks live but contains people who do not exist is the one failure a
+    // calling app cannot afford, because the whole product is the promise that
+    // tapping a face reaches a person. An empty grid is honest; a populated
+    // fake one is not, and it costs the caller coins to find out.
+    if (!firebaseUsers || firebaseUsers.length === 0) return [];
 
     const convertedFirebase: MatchNode[] = firebaseUsers.map((u, index) => {
-      const fallback = defaultReferenceProfiles[index % defaultReferenceProfiles.length];
-      const isOnline = u.isOnline ?? fallback.isOnline;
-      const popularityScore = (u.hearts || 0) * 10 + (u.totalReceivedCallSeconds || 0) + (isOnline ? 5000 : 0) + (fallback.popularityScore || 500);
+      const isOnline = u.isOnline ?? false;
+      // Popularity is derived entirely from the user's own Firestore fields;
+      // previously it borrowed from whichever sample profile shared the same
+      // array index, which inflated scores with fictional numbers.
+      const popularityScore =
+        (u.hearts || 0) * 10 +
+        (u.totalReceivedCallSeconds || 0) +
+        (isOnline ? 5_000 : 0);
       const uid = u.uid || `fb_${index}`;
       return {
         uid,
-        name: u.nickname || u.username || fallback.name,
-        age: Number(u.age) || fallback.age,
-        language: u.language || fallback.language,
+        // Fall back to generic labels, not sample-profile names or ages — a
+        // user named "Elena" in the feed who is actually "Priya Sharma" in real
+        // life would be a fabrication. Show nothing rather than a fake value.
+        name: u.nickname || u.username || 'User',
+        age: (typeof u.age === 'number'
+          ? u.age
+          : (u.age ? parseInt(String(u.age), 10) : 0)),
+        language: u.language || 'EN',
         tier: u.tier === 'VIP' ? 'VIP' : 'STANDARD',
-        image: u.avatarUrl || fallback.image,
+        // Empty string rather than a sample profile's Unsplash photo: showing
+        // a fictional person's face next to a real user's name is deceptive.
+        // The avatar rendering in FloatingProfileRow falls back to a person icon
+        // when both avatarData and image are absent.
+        image: u.avatarUrl || '',
         avatarData: u.avatarData,
         modes: ['call', 'video'],
-        city: u.state || u.city || fallback.city,
+        city: u.state || u.city || '',
         isOnline,
         popularityScore,
-        isBusy: fallback.isBusy && !freedMatchIds[uid],
-        waitlistPriorityActive: fallback.waitlistPriorityActive || !!freedMatchIds[uid],
+        // Nothing here may be inferred from a neighbouring row: an earlier
+        // version read busy/waitlist state off whichever seeded profile shared
+        // this array index, which left real users stuck showing "Busy in Call"
+        // — and therefore uncallable — because a fictional one had been.
+        //
+        // Correcting that left it hardcoded `false`, which was the opposite
+        // error: nobody was ever busy, so the busy pill, the waitlist flow and
+        // the availability filters below could not trigger for a real user at
+        // all, and callers kept ringing people already mid-call — paying the
+        // full 45 s ring timeout to find out. It now comes from the server's
+        // per-tick stamp, so the feed reflects who is genuinely reachable.
+        isBusy: isUserInCall(u),
+        waitlistPriorityActive: !!freedMatchIds[uid],
       };
     });
 
-    return [...defaultReferenceProfiles, ...convertedFirebase].filter((p) => p.isOnline !== false);
+    return convertedFirebase.filter((p) => p.isOnline !== false);
   }, [firebaseUsers, freedMatchIds]);
 
   const LANGUAGES = useMemo(() => ['ALL', 'ENGLISH', 'HINDI', 'SPANISH', 'FRENCH'], []);
@@ -689,6 +674,16 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
     return sorted;
   }, [selectedLanguage, selectedState, selectedMode, selectedStatus, sortBy, MATCHES, waitlistMap]);
 
+  // Drives the empty state's wording. "Nobody is online" and "nobody matches
+  // what you asked for" call for different actions from the user, and telling
+  // them the wrong one sends them away from a feed that would have filled up
+  // the moment they widened a filter.
+  const hasActiveFilters =
+    selectedLanguage !== 'ALL' ||
+    selectedState !== 'ALL' ||
+    selectedMode !== 'ALL' ||
+    selectedStatus !== 'ALL';
+
   const handleRandomMatch = async () => {
     if (!myProfile) return;
     if (isSearching) {
@@ -699,11 +694,27 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
     }
     setIsSearching(true);
     try {
-      const cleanup = await findMatch(myProfile, 'call', (roomId: string, matchData: any) => {
-        setIsSearching(false);
-        setSearchCleanup(null);
-        navigate('Match', { profileName: matchData.nickname, matchData, roomId } as any);
-      });
+      const cleanup = await findMatch(
+        myProfile,
+        'call',
+        (roomId: string, matchData: any) => {
+          setIsSearching(false);
+          setSearchCleanup(null);
+          navigate('Match', { profileName: matchData.nickname, matchData, roomId } as any);
+        },
+        // The waiting listener is the only thing that can report a match once we
+        // are in the pool. If it dies, staying on the spinner would promise a
+        // match that can no longer arrive, so drop out of searching and say so.
+        () => {
+          setIsSearching(false);
+          setSearchCleanup(null);
+          Alert.alert(
+            'Search stopped',
+            'We lost the connection while looking for a match. Please try again.',
+            [{ text: 'OK' }]
+          );
+        },
+      );
       setSearchCleanup(() => cleanup);
     } catch {
       setIsSearching(false);
@@ -726,7 +737,13 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
         <TopBar navigate={navigate} />
 
         <FlatList
-          data={sortedMatches.length > 0 ? sortedMatches : MATCHES}
+          // `sortedMatches.length > 0 ? sortedMatches : MATCHES` used to sit
+          // here, which meant filters that matched nobody silently fell back to
+          // the unfiltered list — so narrowing to a language with no one online
+          // showed every user instead of saying so, and the filter looked
+          // broken. Seeded profiles hid this by making an empty result nearly
+          // impossible; on a live-only feed it happens constantly.
+          data={sortedMatches}
           keyExtractor={(item, idx) => item.uid || `perf-${idx}`}
           showsVerticalScrollIndicator={false}
           contentContainerStyle={styles.listContent}
@@ -999,11 +1016,34 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
               </Modal>
             </View>
           }
+          ListEmptyComponent={
+            <View style={styles.feedEmpty}>
+              <MaterialIcons
+                name={!usersLoaded ? 'hourglass-empty' : hasActiveFilters ? 'filter-alt-off' : 'person-search'}
+                size={34}
+                color="#C9BDB2"
+              />
+              <Text style={styles.feedEmptyTitle}>
+                {!usersLoaded
+                  ? 'Finding people…'
+                  : hasActiveFilters
+                    ? 'No one matches these filters'
+                    : 'No one is online right now'}
+              </Text>
+              <Text style={styles.feedEmptySub}>
+                {!usersLoaded
+                  ? 'Checking who is available.'
+                  : hasActiveFilters
+                    ? 'Try widening the language, state or status filters.'
+                    : 'People appear here the moment they come online. Try Random Match, or check back shortly.'}
+              </Text>
+            </View>
+          }
           renderItem={({ item, index }) => (
             <FloatingProfileRow
               node={item}
               index={index}
-              isLast={index === (sortedMatches.length > 0 ? sortedMatches.length - 1 : MATCHES.length - 1)}
+              isLast={index === sortedMatches.length - 1}
               navigate={navigate}
               onCallPress={handleCallPress}
               onJoinWaitlist={handleJoinWaitlist}
@@ -1116,6 +1156,25 @@ const styles = StyleSheet.create({
   listContent: {
     paddingTop: 8,
     paddingBottom: 140,
+  },
+  feedEmpty: {
+    alignItems: 'center',
+    paddingHorizontal: 40,
+    paddingTop: 48,
+    gap: 8,
+  },
+  feedEmptyTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#7A6A5C',
+    textAlign: 'center',
+  },
+  feedEmptySub: {
+    fontSize: 12.5,
+    fontWeight: '500',
+    color: '#A99A86',
+    textAlign: 'center',
+    lineHeight: 18,
   },
   headerArea: {
     paddingHorizontal: 16,
@@ -1343,6 +1402,13 @@ const styles = StyleSheet.create({
     height: '100%',
     resizeMode: 'cover',
   },
+  // Shown when both avatarData and image are absent (new users, no avatarUrl).
+  // Prevents source={{ uri: '' }} warnings and the resulting blank box.
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F5ECE1',
+  },
   rimHeartBadge: {
     position: 'absolute',
     bottom: 3,
@@ -1429,11 +1495,6 @@ const styles = StyleSheet.create({
   // Applied over callPillBtn / videoPillBtn for seeded demo profiles. These must
   // stay visibly inert: without them the demo rows are indistinguishable from a
   // real, callable profile.
-  pillMuted: {
-    backgroundColor: '#F2F0EC',
-    borderColor: '#DFD9CF',
-    opacity: 0.75,
-  },
   callPillBtn: {
     flex: 1,
     height: 38,

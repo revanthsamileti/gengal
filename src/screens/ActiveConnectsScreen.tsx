@@ -6,12 +6,12 @@ import {
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { useActionLock } from '../hooks/useActionLock';
+import { launchCall } from '../services/callPermissionService';
 import TopBar from '../components/TopBar';
 import GengalAvatar from '../components/GengalAvatar';
 import BottomNav from '../components/BottomNav';
 import { tap36, tap38 } from '../theme/touch';
 import { subscribeToAllUsers, isUserAvailableNow, UserProfile as FirebaseUser } from '../services/userService';
-import { SAMPLE_PROFILES } from '../data/sampleProfiles';
 import { subscribeToGlobalSettings } from '../services/adminService';
 import { useUser } from '../context/UserContext';
 
@@ -60,9 +60,9 @@ function UserCard({
   const isActive = profile.isActiveMode === true;
   const { locked: callLocked, run: runCall } = useActionLock();
   const startCall = (mode: 'call' | 'video') =>
-    runCall(() => {
-      navigate('Call', { profileName: profile.name, mode, matchData: profile, isCaller: true });
-    });
+    runCall(() =>
+      launchCall(navigate, { profileName: profile.name, mode, matchData: profile, isCaller: true })
+    );
 
   useEffect(() => {
     Animated.parallel([
@@ -81,9 +81,18 @@ function UserCard({
         {/* Avatar */}
         <View style={[styles.avatarRing, { borderColor: tierColor }]}>
           {profile.avatarData ? (
+            // App avatar builder — preferred; always present for users who
+            // completed AvatarScreen during onboarding.
             <GengalAvatar data={profile.avatarData} size={52} />
-          ) : (
+          ) : profile.uri ? (
+            // Real avatarUrl or the sample profile's Unsplash image.
             <Image source={{ uri: profile.uri }} style={styles.avatarImg} />
+          ) : (
+            // No avatar and no URL. source={{ uri: '' }} warns on every render
+            // and draws a blank box — show a person icon instead.
+            <View style={[styles.avatarImg, styles.avatarFallback]}>
+              <MaterialIcons name="person" size={28} color="#C9BDB2" />
+            </View>
           )}
           <View style={[styles.onlineDot, !isActive && styles.inactiveDot]} />
         </View>
@@ -106,7 +115,7 @@ function UserCard({
               numberOfLines={1}
               style={[styles.metaText, { color: isActive ? '#10B981' : '#8A7C70', flexShrink: 1 }]}
             >
-              {profile.isSampleProfile ? 'Sample profile' : isActive ? 'Available now' : 'Inactive'}
+              {isActive ? 'Available now' : 'Inactive'}
             </Text>
           </View>
         </View>
@@ -195,30 +204,16 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
     lang: (u.language || 'EN').toUpperCase(),
     state: u.state || u.city || '',
     isActiveMode: isUserAvailableNow(u),
-    isSampleProfile: false,
     lastActive: u.lastActive,
     joinedAt: toMs((u as any).createdAt) || toMs(u.lastActive),
   }));
 
-  // Seeded demo people, so the directory is not blank before real signups.
-  // isActiveMode is forced false: the card disables calling for anyone inactive,
-  // which is exactly the behaviour these need.
-  const sampleProfiles = SAMPLE_PROFILES.map(p => ({
-    uid: p.uid,
-    name: p.name,
-    age: p.age,
-    uri: p.image,
-    avatarUrl: p.image,
-    avatarData: undefined,
-    lang: p.language.toUpperCase(),
-    state: p.city,
-    isActiveMode: false,
-    isSampleProfile: true,
-    lastActive: 0,
-    joinedAt: 0,
-  }));
-
-  const displayProfiles = [...realProfiles, ...sampleProfiles];
+  // Real accounts only. The directory used to be padded with seeded demo people
+  // so it was never blank before real signups; they are gone because a browsable
+  // list of people who do not exist misrepresents how busy the app is, and the
+  // filters below derive their options from whatever is on screen — so fake
+  // rows also invented languages and states nobody could actually be found in.
+  const displayProfiles = realProfiles;
 
   // Option lists come from the data actually on screen, so a filter can never
   // offer a value that matches nothing.
@@ -574,6 +569,12 @@ const styles = StyleSheet.create({
     borderWidth: 2, overflow: 'hidden', position: 'relative', flexShrink: 0,
   },
   avatarImg: { width: '100%', height: '100%', borderRadius: 28 },
+  // Shown when both avatarData and uri are absent (source={{ uri: '' }} warns).
+  avatarFallback: {
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    backgroundColor: '#F5ECE1',
+  },
   onlineDot: {
     position: 'absolute', bottom: 2, right: 2,
     width: 12, height: 12, borderRadius: 6,
