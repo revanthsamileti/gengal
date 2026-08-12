@@ -84,9 +84,27 @@ service cloud.firestore {
       return !changedKeys().hasAny(privilegedFields());
     }
 
+    // A chat id is `uidA_uidB` with the two uids sorted (see getChatId), and
+    // Firebase uids never contain an underscore, so splitting the id recovers
+    // the pair exactly. Checking it first is both cheaper and stricter than the
+    // stored array: it needs no `get()` — which bills as a document read on
+    // every message query — and it is derived from the path rather than from a
+    // `participants` field that a client wrote.
+    //
+    // It is also what makes a brand-new conversation work at all. The old
+    // version went straight to `get()`, and on a chat whose parent document did
+    // not exist yet that returned null, so `.data.participants` dereferenced
+    // null and denied. Reading gave "Could not load messages. Check your
+    // connection." on every first-time chat, and writing was worse: the parent
+    // was created in the same atomic batch as the first message, so the denied
+    // message write rolled back the very document that would have allowed it.
+    //
+    // The `get()` arm is kept for group or renamed conversations, whose members
+    // cannot be derived from a two-uid id.
     function participantInChat(chatId) {
       return signedIn()
-        && get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]);
+        && (chatId.split('_').hasAny([request.auth.uid])
+            || get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]));
     }
 
     // Ownership and pricing fields on a room may only ever be set by its host.
@@ -145,11 +163,54 @@ service cloud.firestore {
     }
 
     match /incoming_calls/{receiverId} {
-      allow read, update, delete: if signedIn()
-        && (request.auth.uid == receiverId || resource.data.callerUid == request.auth.uid);
+      // The `resource == null` arm is what makes the caller's status listener
+      // work at all. The caller subscribes to the *receiver's* document to learn
+      // when its offer is answered, so `request.auth.uid == receiverId` is false
+      // for it and evaluation falls through to `resource.data.callerUid`. On a
+      // document that does not exist -- the normal state both before
+      // createCallOffer's write lands and again the instant either side clears
+      // the offer -- there is no `resource`, so that dereference denied the read
+      // and the SDK tore the listener down permanently. The caller then never
+      // learned the call had been accepted and sat on "Ringing..." until the
+      // ring timeout fired. Reading a document that does not exist discloses
+      // nothing, and the ownership arms below still apply the moment it exists.
+      allow read: if signedIn()
+        && (request.auth.uid == receiverId
+            || resource == null
+            || resource.data.callerUid == request.auth.uid);
+      // `resource == null` matters here for the same reason it does on read, and
+      // its absence was observed in the wild: both sides run clearCallOffer when
+      // a call ends, so whichever one lands second is deleting a document that
+      // no longer exists. That dereferenced a null `resource`, Firestore denied
+      // it, and the caller logged "Failed to clear call offer on end call" --
+      // leaving exactly the orphaned offers this rule set is meant to prevent.
+      // Deleting something that is already gone is a no-op, not a privilege.
+      allow delete: if signedIn()
+        && (request.auth.uid == receiverId
+            || resource == null
+            || resource.data.callerUid == request.auth.uid);
       allow create: if signedIn()
         && request.resource.data.callerUid == request.auth.uid
         && request.resource.data.receiverUid == receiverId;
+      // acceptCallOffer/rejectCallOffer are merge writes by the *receiver*, and
+      // for a merge write `request.resource.data` is the full post-merge
+      // document -- so callerUid there is still the original caller's uid, not
+      // the receiver's. The receiver-or-original-caller clause is what makes
+      // those writes (and heartbeats) legal.
+      //
+      // The second clause lets a *new* caller overwrite an existing document,
+      // mirroring `create`'s own condition ("last call wins"). Without it, any
+      // offer left uncleared -- a crash before cleanup, a swallowed
+      // clearCallOffer failure, both real and already documented elsewhere in
+      // this codebase -- permanently blocked every other caller from ever
+      // reaching that receiver again, since neither of them was the stale
+      // document's caller.
+      allow update: if signedIn()
+        && (
+          request.auth.uid == receiverId || resource.data.callerUid == request.auth.uid
+          || (request.resource.data.callerUid == request.auth.uid
+              && request.resource.data.receiverUid == receiverId)
+        );
     }
 
     match /chats/{chatId} {
@@ -165,12 +226,28 @@ service cloud.firestore {
           && request.resource.data.senderId == request.auth.uid;
         allow update, delete: if false;
       }
+
+      // Typing indicators. One document per participant, keyed by uid, so a
+      // participant can only ever assert that *they* are typing — never put
+      // words in the other person's mouth. The document holds a timestamp and
+      // nothing else; readers expire it, so a sender who vanishes mid-word
+      // cannot leave the indicator stuck on.
+      match /typing/{typerUid} {
+        allow read: if participantInChat(chatId);
+        allow write: if participantInChat(chatId) && request.auth.uid == typerUid;
+      }
     }
 
     // Call history. Opened by the caller, readable and closable by either party.
     match /calls/{callId} {
+      // Same not-exists arm as /incoming_calls above, for the same reason: both
+      // sides subscribe to this record to stay in sync on provider fallbacks,
+      // and the receiver reliably subscribes before the caller's openCallRecord
+      // write has landed. Without it that listener was denied on its first
+      // evaluation and dropped, so a mid-call fallback never reached the peer.
       allow read: if signedIn()
-        && (resource.data.callerUid == request.auth.uid
+        && (resource == null
+            || resource.data.callerUid == request.auth.uid
             || resource.data.receiverUid == request.auth.uid);
       allow create: if signedIn()
         && request.resource.data.callerUid == request.auth.uid;
@@ -199,15 +276,18 @@ service cloud.firestore {
     // create and the client cannot update or delete afterwards.
     match /withdrawalRequests/{requestId} {
       allow read: if signedIn() && resource.data.uid == request.auth.uid;
-      allow create: if signedIn()
-                    && request.resource.data.uid == request.auth.uid
-                    && request.resource.data.status == 'pending'
-                    && request.resource.data.keys().hasOnly(
-                         ['uid', 'hearts', 'amountInr', 'status', 'createdAt'])
-                    && request.resource.data.hearts is number
-                    && request.resource.data.amountInr is number
-                    && request.resource.data.hearts > 0
-                    && request.resource.data.amountInr > 0;
+      // Created only by /api/v1/withdrawals/request, which runs on the Admin SDK
+      // and so bypasses these rules entirely.
+      //
+      // This used to permit a direct client create, validating that `hearts` was
+      // a number greater than zero — and nothing else. It never compared that
+      // number to what the user had actually earned, so a patched client could
+      // claim any payout it wanted, and nothing stopped a second request being
+      // opened beside the first. Hearts convert to rupees via `heartToInrRate`,
+      // so those were live revenue leaks rather than cosmetic gaps. The server
+      // now reads the real balance in a transaction, prices the payout itself,
+      // and deducts the hearts as it stakes the claim.
+      allow create: if false;
       allow update, delete: if false;
     }
 
