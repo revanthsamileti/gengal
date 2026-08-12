@@ -1,5 +1,6 @@
 import { auth, db } from '../config/firebase';
-import { addDoc, collection, onSnapshot, orderBy, query, serverTimestamp, where } from 'firebase/firestore';
+import { collection, onSnapshot, orderBy, query, where } from 'firebase/firestore';
+import { authedPost } from './authService';
 
 export type WithdrawalRequest = {
   id: string;
@@ -11,24 +12,29 @@ export type WithdrawalRequest = {
 };
 
 /**
- * Records a withdrawal request for manual review.
+ * Opens a payout request.
  *
- * There is no payout endpoint yet, so this is deliberately a request record
- * rather than a transfer: the screen must never claim money is on its way
- * without something durable existing on the server.
+ * This used to `addDoc` straight into /withdrawalRequests with a hearts figure
+ * and a rupee amount the client had worked out for itself. Firestore checked
+ * only that both were numbers above zero, so the amount a user asked to be paid
+ * was, in the end, whatever their device claimed it was — and nothing stopped a
+ * second request being opened next to the first, or the same hearts being paid
+ * out more than once.
+ *
+ * The server now owns all of it: it reads the real balance in a transaction,
+ * prices the payout from `heartToInrRate`, and deducts the hearts as it records
+ * the claim. Deliberately takes no arguments — there is nothing left for the
+ * caller to state that the server would be willing to believe.
  */
-export async function requestWithdrawal(hearts: number, amountInr: number): Promise<void> {
+export async function requestWithdrawal(): Promise<{ hearts: number; amountInr: number }> {
   const user = auth.currentUser;
   if (!user) throw new Error('You must be logged in to withdraw.');
-  if (!(hearts > 0) || !(amountInr > 0)) throw new Error('Nothing to withdraw yet.');
 
-  await addDoc(collection(db, 'withdrawalRequests'), {
-    uid: user.uid,
-    hearts,
-    amountInr,
-    status: 'pending',
-    createdAt: serverTimestamp(),
-  });
+  const { hearts, amountInr } = await authedPost<{ hearts: number; amountInr: number }>(
+    '/api/v1/withdrawals/request',
+    {},
+  );
+  return { hearts, amountInr };
 }
 
 /** Streams the signed-in user's own withdrawal requests, newest first. */
@@ -47,6 +53,12 @@ export function subscribeToMyWithdrawals(
   return onSnapshot(
     q,
     (snap) => callback(snap.docs.map((d) => ({ id: d.id, ...d.data() } as WithdrawalRequest))),
-    () => callback([])
+    // Without a named error callback the SDK logs nothing and the listener
+    // tears down silently, leaving the earnings screen stuck on whatever it
+    // last displayed. Log the cause so it shows up in crash reports.
+    (error) => {
+      console.warn('[withdrawalService] Withdrawal request listener failed:', error?.message ?? error);
+      callback([]);
+    }
   );
 }

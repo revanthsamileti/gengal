@@ -4,7 +4,8 @@ import { Platform, ActivityIndicator, KeyboardAvoidingView, ScrollView, StyleShe
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { auth } from '../config/firebase';
-import { getUserProfile } from '../services/userService';
+import { useUser } from '../context/UserContext';
+import { useActionLock } from '../hooks/useActionLock';
 import { createCoinOrder, purchaseCoins, RazorpayResult } from '../services/coinService';
 import CheckoutModal from '../components/CheckoutModal';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
@@ -34,32 +35,34 @@ const COIN_PACKAGES = [
 export default function CoinsScreen({ navigation, navigate: directNavigate, goBack }: CoinsScreenProps & { goBack?: () => void }) {
   const navigate = directNavigate || navigation?.navigate || (() => {});
   // Use a fallback inset if safe-area-context is missing
-  const insets = { top: 40 }; 
-  const [balance, setBalance] = useState<number>(0);
-  const [isLoading, setIsLoading] = useState(true);
+  const insets = { top: 40 };
+
+  // Live balance from the app-wide UserContext snapshot. The server debits
+  // the caller every 15 s during a call, so a one-shot getUserProfile() call
+  // here would show a stale (too-high) balance while coins drain underneath
+  // it. UserContext already holds an onSnapshot on the same document, so
+  // reading from it costs no extra listener.
+  const { profile } = useUser();
+  const balance = profile?.coins ?? 0;
+  // Show a spinner until the first snapshot arrives (profile is null while
+  // Firebase initialises). Once set it is always live; no further fetches.
+  const isLoading = profile === null;
+
   const [isPurchasing, setIsPurchasing] = useState<string | null>(null);
   const [customAmount, setCustomAmount] = useState<string>('');
   const [settings, setSettings] = useState<GlobalSettings | null>(null);
   const [checkoutUrl, setCheckoutUrl] = useState<string | null>(null);
 
+  // Synchronous double-tap guard. `isPurchasing` (useState) disables buttons
+  // after the first re-render, but two taps landing in the same frame both
+  // see the pre-render state, so both can enter runPurchase and fire two
+  // concurrent createCoinOrder requests. The inFlight ref inside useActionLock
+  // is set synchronously on the first tap, closing that window.
+  const { run: runPurchaseSafe } = useActionLock();
+
   useEffect(() => {
-    fetchBalance();
     getGlobalSettings().then(setSettings);
   }, []);
-
-  const fetchBalance = async () => {
-    if (!auth.currentUser) return;
-    try {
-      const profile = await getUserProfile(auth.currentUser.uid);
-      if (profile && profile.coins !== undefined) {
-        setBalance(profile.coins);
-      }
-    } catch (e) {
-      console.warn('Could not fetch coin balance', e);
-    } finally {
-      setIsLoading(false);
-    }
-  };
 
   /**
    * Opens an order, runs Razorpay checkout in a WebView, then asks the backend
@@ -96,7 +99,10 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
     setCheckoutUrl(null);
     try {
       const confirmed = await purchaseCoins(result);
-      setBalance(confirmed.newBalance);
+      // Do NOT setBalance here — the balance is now driven by the live
+      // UserContext snapshot. The server writes the new value and the snapshot
+      // propagates it automatically, usually within a second. A local override
+      // would create two sources of truth that can diverge on retry.
       setCustomAmount('');
       Alert.alert('Purchase Successful!', `${confirmed.coinsCredited} coins have been added.`);
     } catch (e: any) {
@@ -112,21 +118,28 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
   const coinsFor = (priceInr: number) =>
     Math.floor(priceInr * (settings?.inrToCoinRechargeRate ?? 0));
 
-  const handlePurchase = (pkg: typeof COIN_PACKAGES[0]) =>
-    runPurchase(pkg.id, pkg.id, pkg.priceInr);
+  // Both handlers route through runPurchaseSafe so the synchronous inFlight
+  // ref is set before the first await, which closes the double-tap window that
+  // useState alone cannot close (state is async; a second tap can land before
+  // the first re-render propagates the disabled prop to the button).
+  const handlePurchase = (pkg: typeof COIN_PACKAGES[0]) => {
+    void runPurchaseSafe(() => runPurchase(pkg.id, pkg.id, pkg.priceInr));
+  };
 
-  const handleCustomPurchase = async () => {
+  const handleCustomPurchase = () => {
     if (!auth.currentUser || !settings) return;
 
     const amountInr = Number(customAmount);
     const minAmount = settings.minRechargeAmount || 49;
 
+    // Validate before acquiring the lock so a bad amount does not consume
+    // the cooldown and delay a valid retry.
     if (isNaN(amountInr) || amountInr < minAmount) {
       Alert.alert('Invalid Amount', `The minimum recharge amount is ₹${minAmount}.`);
       return;
     }
 
-    await runPurchase('custom', 'custom', amountInr);
+    void runPurchaseSafe(() => runPurchase('custom', 'custom', amountInr));
   };
 
   return (
@@ -152,7 +165,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
       >
-        
+
         {/* Balance Display */}
         <View style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>CURRENT BALANCE</Text>
@@ -196,7 +209,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
                   onChangeText={setCustomAmount}
                 />
               </View>
-              <TouchableOpacity 
+              <TouchableOpacity
                 style={[styles.customBuyBtn, isPurchasing === 'custom' && { opacity: 0.7 }]}
                 activeOpacity={0.8}
                 onPress={handleCustomPurchase}
@@ -222,9 +235,9 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
         {/* Packages Grid */}
         <View style={styles.packagesContainer}>
           {COIN_PACKAGES.map((pkg) => (
-            <TouchableOpacity 
-              key={pkg.id} 
-              style={styles.packageCard} 
+            <TouchableOpacity
+              key={pkg.id}
+              style={styles.packageCard}
               activeOpacity={0.8}
               onPress={() => handlePurchase(pkg)}
               disabled={isPurchasing !== null || !settings}

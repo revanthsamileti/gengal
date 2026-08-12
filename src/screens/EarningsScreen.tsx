@@ -7,13 +7,17 @@ import ScreenShell from '../components/ScreenShell';
 import { auth, db } from '../config/firebase';
 import { doc, onSnapshot } from 'firebase/firestore';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
-import { requestWithdrawal } from '../services/withdrawalService';
+import { requestWithdrawal, subscribeToMyWithdrawals } from '../services/withdrawalService';
 import { useActionLock } from '../hooks/useActionLock';
 import { tap40 } from '../theme/touch';
 
 export default function EarningsScreen({ navigate, goBack }: any) {
   const [profile, setProfile] = useState<any>(null);
   const [settings, setSettings] = useState<GlobalSettings | null>(null);
+  // Tracks whether there is already a pending or approved withdrawal in the
+  // queue. Without this guard a user could tap Withdraw multiple times and
+  // create several simultaneous requests that the admin must manually dedupe.
+  const [hasPendingWithdrawal, setHasPendingWithdrawal] = useState(false);
   const { locked: isSubmitting, run } = useActionLock();
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(30)).current;
@@ -26,11 +30,31 @@ export default function EarningsScreen({ navigate, goBack }: any) {
 
     const user = auth.currentUser;
     if (!user) return;
-    const unsub = onSnapshot(doc(db, 'users', user.uid), (snap) => {
-      if (snap.exists()) setProfile(snap.data());
+
+    // Without an error callback a failed listener tears itself down silently,
+    // freezing the displayed balance forever at the last known value. The
+    // user could then withdraw against a stale (and wrong) heart count.
+    const unsub = onSnapshot(
+      doc(db, 'users', user.uid),
+      (snap) => { if (snap.exists()) setProfile(snap.data()); },
+      (error) => {
+        console.warn('[EarningsScreen] Profile listener failed:', error?.message ?? error);
+      }
+    );
+
+    // Subscribe to existing withdrawal requests so the UI can block a second
+    // submission while one is still pending or being processed.
+    const unsubWithdrawals = subscribeToMyWithdrawals((requests) => {
+      setHasPendingWithdrawal(
+        requests.some((r) => r.status === 'pending' || r.status === 'approved')
+      );
     });
+
     getGlobalSettings().then(setSettings);
-    return unsub;
+    return () => {
+      unsub();
+      unsubWithdrawals();
+    };
   }, []);
 
   const hearts = profile?.hearts || 0;
@@ -40,16 +64,29 @@ export default function EarningsScreen({ navigate, goBack }: any) {
   const unrewarded = profile?.unrewardedCallSeconds || 0;
   const targetSeconds = (settings?.callDurationForHeart || 3) * 60;
   const progressPercent = Math.min((unrewarded / targetSeconds) * 100, 100);
-  const canWithdraw = hearts >= 33;
-  const minWithdraw = 33 * rate;
+  // Hearts-minimum AND no pending request must both be true to allow a new
+  // submission. The hearts count comes from the live onSnapshot so it reflects
+  // server reality rather than a one-shot read.
+  //
+  // The minimum comes from admin settings rather than the `33` that used to be
+  // written here twice: the server enforces its own floor, and a hardcoded
+  // client copy would silently disagree the moment an admin changed it —
+  // either offering a button the server rejects, or hiding one it would accept.
+  const minHearts = settings?.minWithdrawalHearts ?? 33;
+  const canWithdraw = hearts >= minHearts && !hasPendingWithdrawal;
+  const minWithdraw = minHearts * rate;
 
   const handleWithdraw = () =>
     run(async () => {
       try {
-        await requestWithdrawal(hearts, earnings);
+        // The server decides the payable amount and returns it. Reporting the
+        // locally computed `earnings` here would state a figure nobody has
+        // committed to paying, and the two can differ whenever a call reward
+        // lands between this screen's last snapshot and the request.
+        const { amountInr } = await requestWithdrawal();
         Alert.alert(
           'Request submitted',
-          `Your withdrawal request for ₹${earnings.toFixed(2)} has been recorded and is pending review. You'll be notified once it's processed.`,
+          `Your withdrawal request for ₹${amountInr.toFixed(2)} has been recorded and is pending review. You'll be notified once it's processed.`,
           [{ text: 'OK' }]
         );
       } catch (e: any) {
@@ -148,9 +185,11 @@ export default function EarningsScreen({ navigate, goBack }: any) {
             <View style={styles.withdrawCard}>
               <Text style={styles.withdrawTitle}>Withdraw Funds</Text>
               <Text style={styles.withdrawSub}>
-                {canWithdraw
-                  ? `₹${earnings.toFixed(2)} available to withdraw`
-                  : `Need ${33 - hearts} more hearts to reach minimum (₹${minWithdraw.toFixed(0)})`}
+                {hasPendingWithdrawal
+                  ? 'A withdrawal request is already pending review — you can submit another once this one is settled.'
+                  : canWithdraw
+                    ? `₹${earnings.toFixed(2)} available to withdraw`
+                    : `Need ${33 - hearts} more hearts to reach minimum (₹${minWithdraw.toFixed(0)})`}
               </Text>
               <TouchableOpacity
                 style={[styles.withdrawBtn, (!canWithdraw || isSubmitting) && styles.withdrawBtnOff]}
@@ -163,7 +202,11 @@ export default function EarningsScreen({ navigate, goBack }: any) {
               >
                 <MaterialIcons name="payments" size={18} color={canWithdraw && !isSubmitting ? '#FFFDF8' : '#C0B0C4'} />
                 <Text style={[styles.withdrawBtnText, (!canWithdraw || isSubmitting) && { color: '#C0B0C4' }]}>
-                  {isSubmitting ? 'Submitting…' : `Withdraw ₹${earnings.toFixed(2)}`}
+                  {isSubmitting
+                    ? 'Submitting…'
+                    : hasPendingWithdrawal
+                      ? 'Withdrawal Pending'
+                      : `Withdraw ₹${earnings.toFixed(2)}`}
                 </Text>
               </TouchableOpacity>
             </View>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
@@ -24,6 +24,15 @@ type Props = {
  */
 export default function CheckoutModal({ url, onSuccess, onCancel, onFailure }: Props) {
   const [isLoading, setIsLoading] = useState(true);
+
+  // Each new checkout session needs a fresh loading state. Without this a
+  // second purchase (after cancel) shows the WebView with no spinner while
+  // the page is still fetching, because `isLoading` is already false from
+  // the previous session — `useState` persists across re-renders of the same
+  // component instance, and the modal is never unmounted, only hidden.
+  useEffect(() => {
+    if (url) setIsLoading(true);
+  }, [url]);
 
   const handleMessage = (event: WebViewMessageEvent) => {
     let payload: any;

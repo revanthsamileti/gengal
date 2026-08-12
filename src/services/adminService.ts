@@ -12,6 +12,7 @@ export interface GlobalSettings {
   heartToInrRate: number; // e.g., 3 Rs per Heart
   minRechargeAmount: number; // e.g., 49 Rs
   inrToCoinRechargeRate: number; // e.g., 1.1 Coins per Rs
+  minWithdrawalHearts: number; // hearts a creator must hold to request a payout
 }
 
 const SETTINGS_DOC_ID = 'pricing';
@@ -26,6 +27,7 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   heartToInrRate: 3,
   minRechargeAmount: 49,
   inrToCoinRechargeRate: 1.12,
+  minWithdrawalHearts: 33,
 };
 
 /**

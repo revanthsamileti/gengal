@@ -167,7 +167,32 @@ AGORA_APP_CERTIFICATE = env_value("AGORA_APP_CERTIFICATE")
 ZEGO_APP_ID = int(os.environ.get("ZEGO_APP_ID", "0") or "0")
 ZEGO_SERVER_SECRET = env_value("ZEGO_SERVER_SECRET")
 
-CORS(app)
+# Scope CORS to explicitly configured origins in production.  For a native
+# mobile app the risk of a wide-open policy is lower than for a web app —
+# browsers never call these routes — but admin and debug endpoints still
+# warrant the extra boundary.  Set CORS_ALLOWED_ORIGINS (comma-separated)
+# to lock down; defaults to * (all origins) if unset.
+_cors_origins = [o.strip() for o in env_value("CORS_ALLOWED_ORIGINS").split(",") if o.strip()]
+CORS(app, origins=_cors_origins if _cors_origins else "*")
+
+
+@app.errorhandler(Exception)
+def unhandled_exception(e):
+    """Catch-all: log the full traceback server-side, return a generic message.
+
+    Without this, Flask in production mode returns a text/html 500 that may
+    include internal file paths or partial exception messages.  A JSON body is
+    also easier for the client to handle uniformly.
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        # Standard HTTP errors (404, 405, etc.) go through Flask's normal path.
+        return e
+    import traceback
+    print(f"[SERVER] Unhandled exception: {type(e).__name__}: {e}", flush=True)
+    traceback.print_exc()
+    return jsonify({"error": "An internal server error occurred"}), 500
+
 
 TEMP_DIR = "temp_media"
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -420,8 +445,11 @@ def upload_intro():
 # Optional: Add a simple static file route so the frontend can playback the audio
 from flask import send_from_directory
 
-@app.route('/uploads/<path:filename>')
+@app.route('/uploads/<string:filename>')
 def serve_upload(filename):
+    # <string:filename> does not match '/', so a URL like /uploads/../etc/passwd
+    # is rejected by the router before send_from_directory is ever called.
+    # send_from_directory also uses safe_join internally — this is defence in depth.
     return send_from_directory(os.path.join(os.path.dirname(__file__), 'uploads'), filename)
 
 # ==========================================
@@ -441,9 +469,15 @@ def send_otp():
         
     # Clean phone
     phone = phone.replace(" ", "")
-    
+
+    # OTP delivery costs money (Twilio SMS). Rate-limit per source IP in addition
+    # to the per-phone cooldown below so a single attacker cannot drive cost by
+    # cycling through many different destination numbers from one address.
+    if rate_limited(f"sendotp_ip:{request.remote_addr}", 10, 3600):
+        return jsonify({"error": "Too many OTP requests from this address. Try again later."}), 429
+
     now = datetime.now()
-    
+
     # Check if user is blocked
     abuse_record = abuse_store.get(phone, {"blocked_until": None, "consecutive_failed_requests": 0, "last_requested_at": None})
     if abuse_record["blocked_until"] and now < abuse_record["blocked_until"]:
@@ -787,6 +821,12 @@ def serialize_doc(doc_dict):
 # reconnecting client cannot trigger a large retroactive deduction.
 MAX_BILLABLE_TICK_SECONDS = 60
 
+# Upper bound on the call-second increment a client may submit for heart rewards.
+# Without this a patched client can claim an arbitrarily long call duration (e.g.
+# 10^9 seconds) to farm hearts, each redeemable for real money via heartToInrRate.
+# 7 200 s = 2 hours — a generous but non-exploitable ceiling for any single call.
+MAX_REWARDS_SECONDS = 7200
+
 def get_coin_balance(snapshot):
     if not snapshot.exists:
         raise ValueError("User does not exist")
@@ -991,14 +1031,36 @@ def call_billing_endpoint():
 
             # The first tick only starts the clock. Anchoring to createdAt
             # instead would bill the payer for the time the call spent ringing.
+            # Stamped on both participants every tick so the discovery feed can
+            # tell who is mid-call. Deliberately a timestamp rather than a
+            # boolean "isBusy": a flag has to be cleared by the client, and a
+            # client that is force-quit, crashes or loses the network never gets
+            # to clear it — leaving someone marked busy forever and effectively
+            # invisible to callers. Readers age it out instead (see
+            # CALL_BUSY_TTL_MS), so a call that ends without ceremony simply
+            # stops being refreshed. Written server-side from the server clock,
+            # so it cannot be spoofed to make someone look unavailable.
+            #
+            # Safe to write before the payer/receiver reads below only because
+            # nothing reads those refs after this point on the early-return
+            # paths; Firestore forbids a read after a write in a transaction.
+            def mark_busy():
+                transaction.update(payer_ref, {"inCallSince": now})
+                transaction.update(receiver_ref, {"inCallSince": now})
+
             last = current.get('lastBilledAt')
             if last is None:
+                # First tick only starts the clock, but both parties are already
+                # on the call — without stamping here they would read as free
+                # for the opening seconds and keep receiving calls.
                 transaction.update(call_ref, {"lastBilledAt": now})
+                mark_busy()
                 return 0.0, None, None, False, 0.0
 
             last_dt = last if isinstance(last, datetime) else None
             if last_dt is None:
                 transaction.update(call_ref, {"lastBilledAt": now})
+                mark_busy()
                 return 0.0, None, None, False, 0.0
             if last_dt.tzinfo is None:
                 last_dt = last_dt.replace(tzinfo=timezone.utc)
@@ -1024,8 +1086,8 @@ def call_billing_endpoint():
             payer_new = payer_balance - actual_deduction
             receiver_new = receiver_balance + receiver_share
 
-            transaction.update(payer_ref, {"coins": payer_new})
-            transaction.update(receiver_ref, {"coins": receiver_new})
+            transaction.update(payer_ref, {"coins": payer_new, "inCallSince": now})
+            transaction.update(receiver_ref, {"coins": receiver_new, "inCallSince": now})
             transaction.update(call_ref, {
                 "lastBilledAt": now,
                 "durationSeconds": float(current.get('durationSeconds') or 0) + elapsed_seconds,
@@ -1185,7 +1247,19 @@ def call_rewards_endpoint():
         return jsonify({"error": "Cannot update rewards for another user"}), 403
     try:
         seconds_to_add = parse_positive_number(data.get("secondsToAdd"), "secondsToAdd")
-        threshold_minutes = float(data.get("thresholdMinutes") or 0)
+        # Cap: one reward increment cannot represent more than a full 2-hour call.
+        # A patched client could otherwise submit secondsToAdd=10^9 to farm hearts
+        # even after the threshold fix below.
+        seconds_to_add = min(seconds_to_add, MAX_REWARDS_SECONDS)
+        # Threshold comes from server pricing settings, NOT the client body.
+        # A patched client that sends thresholdMinutes=0.001 would otherwise
+        # turn a single second of call time into tens of thousands of hearts,
+        # each redeemable for real money via heartToInrRate.  The client-supplied
+        # field (thresholdMinutes) is intentionally ignored here.
+        settings = pricing_settings()
+        threshold_minutes = float(settings.get(
+            'callDurationForHeart', DEFAULT_SETTINGS['callDurationForHeart']
+        ))
         is_receiver = bool(data.get("isReceiver"))
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
@@ -1418,7 +1492,12 @@ def notify_incoming_call():
                 "body": f"{caller_name} is calling you...",
                 "sound": "default",
                 "priority": "high",
-                "channelId": "calls",
+                # Must match CALL_CHANNEL_ID in src/services/notificationService.ts.
+                # The old 'calls' channel was created with a custom sound name
+                # that did not exist in the app, so Android gave it no sound and
+                # every call notification arrived silently; channels are
+                # immutable, hence the new id rather than a fix in place.
+                "channelId": "calls_v2",
                 "data": {
                     "roomId": offer.get('roomId'),
                     "mode": mode,
@@ -1466,6 +1545,10 @@ DEFAULT_SETTINGS = {
     "heartToInrRate": 3,
     "minRechargeAmount": 49,
     "inrToCoinRechargeRate": 1.12,
+    # Floor for a payout request. Lived as a bare `33` in EarningsScreen, so the
+    # only way to change it was to ship a new build — and the server had no
+    # opinion at all, which is what let a patched client request any amount.
+    "minWithdrawalHearts": 33,
 }
 
 SETTINGS_BOUNDS = {
@@ -1478,6 +1561,9 @@ SETTINGS_BOUNDS = {
     "heartToInrRate": (0, 10000),
     "minRechargeAmount": (1, 100000),
     "inrToCoinRechargeRate": (0.01, 1000),
+    # Lower bound of 1, never 0: a floor of zero would let anyone open a payout
+    # request worth nothing and clear it through the manual review queue.
+    "minWithdrawalHearts": (1, 100000),
 }
 
 @app.route('/api/v1/admin/is-admin', methods=['GET'])
@@ -1591,6 +1677,205 @@ def coins_for_inr(amount_inr, settings):
     store screen is the figure actually credited.
     """
     return int(math.floor(float(amount_inr) * float(settings['inrToCoinRechargeRate'])))
+
+
+@app.route('/api/v1/withdrawals/request', methods=['POST', 'OPTIONS'])
+def request_withdrawal():
+    """Opens a payout request, deducting the hearts it is worth.
+
+    Previously the client wrote straight into /withdrawalRequests and the rules
+    checked only `hearts > 0`. Nothing compared that number against what the
+    user had actually earned, so a patched client could request any payout it
+    liked; nothing stopped a second request being opened alongside the first;
+    and approving one never reduced the balance, so the same hearts could be
+    cashed out repeatedly. Hearts are real money via `heartToInrRate`, so all
+    three were live revenue leaks.
+
+    Deducting at request time rather than at approval closes all three at once:
+    the balance is spent the moment the claim is staked, so it cannot be
+    claimed twice, and the payable amount is fixed to hearts that provably
+    existed. A rejection refunds them.
+
+    `pendingWithdrawalId` on the user document is what makes "one open request"
+    enforceable inside a single-document transaction — a query would need a
+    composite index and could not be read transactionally without one.
+    """
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    try:
+        settings = pricing_settings()
+        min_hearts = float(settings.get('minWithdrawalHearts', DEFAULT_SETTINGS['minWithdrawalHearts']))
+        heart_rate = float(settings.get('heartToInrRate', DEFAULT_SETTINGS['heartToInrRate']))
+
+        db_client = firestore.client()
+        user_ref = db_client.collection('users').document(uid)
+        request_ref = db_client.collection('withdrawalRequests').document()
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = user_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("User does not exist")
+            user_data = snap.to_dict() or {}
+
+            if user_data.get('pendingWithdrawalId'):
+                raise ValueError("A withdrawal request is already awaiting review.")
+
+            # Payouts are whole hearts, but the balance is not guaranteed to be
+            # one: the call-reward path derives hearts from a duration divided
+            # by a configurable threshold, which can land on a fraction. The
+            # remainder is carried rather than discarded — zeroing the field
+            # outright silently confiscated it, and hearts are worth real money.
+            hearts_available = float(user_data.get('hearts') or 0)
+            hearts = int(hearts_available)
+            remainder = hearts_available - hearts
+
+            if hearts < min_hearts:
+                raise ValueError(
+                    f"You need at least {int(min_hearts)} hearts to withdraw."
+                )
+
+            # Computed here, never taken from the request body: the client's
+            # figure is a display convenience, not an instruction to pay.
+            amount_inr = round(hearts * heart_rate, 2)
+
+            transaction.set(request_ref, {
+                'uid': uid,
+                'hearts': hearts,
+                'amountInr': amount_inr,
+                'heartToInrRate': heart_rate,
+                'status': 'pending',
+                # Marks this claim as one whose hearts were actually taken up
+                # front. Requests written by the old client path were not, and
+                # refunding one of those on rejection would create hearts that
+                # never existed — see the refund guard in resolve_withdrawal.
+                'heartsDeducted': True,
+                'createdAt': firestore.SERVER_TIMESTAMP,
+            })
+            # Same transaction as the request write, so a crash between the two
+            # cannot leave a claim open against hearts that were never spent.
+            transaction.update(user_ref, {
+                'hearts': remainder,
+                'pendingWithdrawalId': request_ref.id,
+            })
+            return hearts, amount_inr
+
+        hearts, amount_inr = apply(transaction)
+        return jsonify({
+            "success": True,
+            "requestId": request_ref.id,
+            "hearts": hearts,
+            "amountInr": amount_inr,
+        }), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[WITHDRAWAL] request failed for {uid}: {e}", flush=True)
+        return jsonify({"error": "Could not open a withdrawal request"}), 500
+
+
+@app.route('/api/v1/withdrawals/resolve', methods=['POST', 'OPTIONS'])
+def resolve_withdrawal():
+    """Admin decision on a payout request.
+
+    Rejecting refunds the hearts, because they were already taken when the
+    request was opened — without this the user would simply lose them, which is
+    the mirror image of the bug this endpoint exists to fix.
+
+    Approving does not deduct anything: that already happened. It only clears
+    the open-request marker, so a user whose payout is approved can start
+    earning towards the next one immediately rather than being locked out until
+    an operator remembers to reset a flag by hand.
+    """
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+    admin_id, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+
+    data = request.get_json(silent=True) or {}
+    request_id = str(data.get('requestId') or '').strip()
+    new_status = str(data.get('status') or '').strip()
+
+    if not request_id:
+        return jsonify({"error": "requestId is required"}), 400
+    if new_status not in ('approved', 'rejected', 'paid'):
+        return jsonify({"error": "status must be approved, rejected or paid"}), 400
+
+    try:
+        db_client = firestore.client()
+        request_ref = db_client.collection('withdrawalRequests').document(request_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            req_snap = request_ref.get(transaction=transaction)
+            if not req_snap.exists:
+                raise ValueError("Unknown withdrawal request")
+            req = req_snap.to_dict() or {}
+
+            # Legal transitions. `pending` and `approved` are both live states,
+            # so an operator can authorise a payout and then mark it paid once
+            # the transfer clears — treating every non-pending state as final
+            # made that ordinary two-step workflow impossible, and forced
+            # operators to jump straight to `paid` before the money had moved.
+            #
+            # `paid` and `rejected` are terminal, which is what stops a replayed
+            # rejection refunding the same hearts twice.
+            allowed_next = {
+                'pending': {'approved', 'rejected', 'paid'},
+                'approved': {'paid', 'rejected'},
+            }
+            current_status = req.get('status')
+            if new_status not in allowed_next.get(current_status, set()):
+                raise ValueError(
+                    f"Request is already {current_status}"
+                    if current_status in ('paid', 'rejected')
+                    else f"Cannot move a {current_status} request to {new_status}"
+                )
+
+            target_uid = req.get('uid')
+            if not target_uid:
+                raise ValueError("Request has no owner")
+            user_ref = db_client.collection('users').document(target_uid)
+            user_snap = user_ref.get(transaction=transaction)
+            if not user_snap.exists:
+                raise ValueError("User does not exist")
+            user_data = user_snap.to_dict() or {}
+
+            user_update = {'pendingWithdrawalId': firestore.DELETE_FIELD}
+            # Refund only what was actually taken. Requests predating this
+            # endpoint were written straight from the client and never debited
+            # the balance, so paying them back would mint hearts — and hearts
+            # are convertible to rupees, so that is minting money.
+            if new_status == 'rejected' and req.get('heartsDeducted'):
+                refund = int(req.get('hearts') or 0)
+                user_update['hearts'] = int(user_data.get('hearts') or 0) + refund
+
+            transaction.update(request_ref, {
+                'status': new_status,
+                'resolvedAt': firestore.SERVER_TIMESTAMP,
+                'resolvedBy': admin_id,
+            })
+            transaction.update(user_ref, user_update)
+            return target_uid
+
+        target_uid = apply(transaction)
+        return jsonify({"success": True, "requestId": request_id, "status": new_status, "uid": target_uid}), 200
+
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[WITHDRAWAL] resolve failed for {request_id}: {e}", flush=True)
+        return jsonify({"error": "Could not resolve the withdrawal request"}), 500
 
 
 @app.route('/api/v1/coins/order', methods=['POST', 'OPTIONS'])
@@ -1872,6 +2157,16 @@ def assert_safe_production_config():
     Leaving one of these set is a config mistake, not a code mistake, so it has
     to fail loudly at boot rather than quietly weaken auth.
     """
+    # Warn at every startup (even in development) so an operator who accidentally
+    # left a bypass on sees it immediately in the boot log, before any requests arrive.
+    for _flag in ("ALLOW_DEV_OTP_BYPASS", "ALLOW_LEGACY_PLAINTEXT_LOGIN"):
+        if os.environ.get(_flag) == "true":
+            print(
+                f"[AUTH][WARNING] {_flag} is ENABLED. "
+                "This is a development-only escape hatch — NEVER set it in production.",
+                flush=True,
+            )
+
     if os.environ.get("APP_ENV", "").lower() not in ("production", "prod"):
         return
 

@@ -6,9 +6,22 @@ request reads, what it writes, and whether a second attempt writes again — and
 it keeps the money tests runnable with no emulator and no network.
 """
 import copy
+import itertools
 
 
 SERVER_TIMESTAMP = "<server-timestamp>"
+
+# Sentinel for a field removal. Compared by identity in FakeDocRef.update, the
+# same way the real client distinguishes "delete this key" from "store this
+# value" — a plain string would be indistinguishable from data.
+class _DeleteField:
+    def __repr__(self):
+        return "<delete-field>"
+
+
+DELETE_FIELD = _DeleteField()
+
+_auto_ids = itertools.count(1)
 
 
 class FakeSnapshot:
@@ -21,11 +34,26 @@ class FakeSnapshot:
 
 
 class FakeDocRef:
-    def __init__(self, store, path):
+    def __init__(self, store, path, reads=None):
         self._store = store
         self._path = path
+        self._reads = reads
+
+    @property
+    def id(self):
+        """Trailing path segment, matching the real DocumentReference.id."""
+        return self._path.rsplit("/", 1)[-1]
 
     def get(self, transaction=None):
+        # Records whether the caller passed `transaction=`. The fake cannot
+        # simulate optimistic concurrency, so it cannot *observe* a double
+        # spend — but a read issued without the transaction is never entered
+        # into Firestore's read set, which is precisely what would let two
+        # concurrent callers both see no pending request and both be paid.
+        # Recording it lets a test assert the wiring is there, so dropping the
+        # kwarg fails the suite instead of passing it silently.
+        if self._reads is not None:
+            self._reads.append({"path": self._path, "in_transaction": transaction is not None})
         return FakeSnapshot(self._store.get(self._path))
 
     def set(self, data, merge=False):
@@ -37,19 +65,29 @@ class FakeDocRef:
     def update(self, data):
         if self._path not in self._store:
             raise KeyError("update on missing document: %s" % self._path)
-        self._store[self._path].update(copy.deepcopy(data))
+        target = self._store[self._path]
+        for key, value in data.items():
+            if isinstance(value, _DeleteField):
+                target.pop(key, None)
+            else:
+                target[key] = copy.deepcopy(value)
 
     def delete(self):
         self._store.pop(self._path, None)
 
 
 class FakeCollection:
-    def __init__(self, store, name):
+    def __init__(self, store, name, reads=None):
         self._store = store
         self._name = name
+        self._reads = reads
 
-    def document(self, doc_id):
-        return FakeDocRef(self._store, "%s/%s" % (self._name, doc_id))
+    def document(self, doc_id=None):
+        # A bare .document() mints a new id, as the real client does — that is
+        # how the withdrawal endpoint reserves a reference before writing it.
+        if doc_id is None:
+            doc_id = "auto_%d" % next(_auto_ids)
+        return FakeDocRef(self._store, "%s/%s" % (self._name, doc_id), self._reads)
 
 
 class FakeTransaction:
@@ -72,11 +110,12 @@ class FakeTransaction:
 
 
 class FakeClient:
-    def __init__(self, store):
+    def __init__(self, store, reads=None):
         self._store = store
+        self._reads = reads
 
     def collection(self, name):
-        return FakeCollection(self._store, name)
+        return FakeCollection(self._store, name, self._reads)
 
     def transaction(self):
         return FakeTransaction(self._store)
@@ -86,12 +125,15 @@ class FakeFirestoreModule:
     """Stands in for `firebase_admin.firestore` inside app.py."""
 
     SERVER_TIMESTAMP = SERVER_TIMESTAMP
+    DELETE_FIELD = DELETE_FIELD
 
     def __init__(self, store):
         self._store = store
+        #: Every document read, in order, as {"path", "in_transaction"}.
+        self.reads = []
 
     def client(self):
-        return FakeClient(self._store)
+        return FakeClient(self._store, self.reads)
 
     @staticmethod
     def transactional(fn):

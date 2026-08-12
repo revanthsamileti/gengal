@@ -34,6 +34,7 @@ const FIELDS: FieldDef[] = [
   { key: 'minRechargeAmount', label: 'Min Recharge', hint: 'Minimum recharge in INR', icon: 'account-balance-wallet', prefix: '₹' },
   { key: 'inrToCoinRechargeRate', label: 'INR → Coins Rate', hint: 'Coins per ₹1 recharged', icon: 'swap-horiz', suffix: 'coins/₹' },
   { key: 'creatorSharePercentage', label: 'Creator Share %', hint: 'Percentage of call cost sent to creator', icon: 'pie-chart', suffix: '%' },
+  { key: 'minWithdrawalHearts', label: 'Min Withdrawal', hint: 'Hearts required before a payout can be requested', icon: 'savings', suffix: 'hearts' },
 ];
 
 export default function AdminPanelScreen({ navigate, goBack }: Props) {
