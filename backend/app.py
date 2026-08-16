@@ -1095,7 +1095,14 @@ def call_billing_endpoint():
                     return 0.0, None, None, False, 0.0
                 transaction.update(call_ref, {"lastBilledAt": now})
                 mark_busy()
-                return 0.0, None, None, False, 0.0
+                # Nothing is charged for this interval, so a payer with an empty
+                # balance has to be turned away here or not at all: they would
+                # otherwise talk free until the next tick, hang up, and do it
+                # again — an unlimited supply of free calls a quarter-minute at
+                # a time. A payer with *some* balance is left alone; the tick
+                # below already lets them spend down to zero and stops there.
+                payer_balance = get_coin_balance(payer_snap)
+                return 0.0, payer_balance, None, payer_balance <= 0, 0.0
 
             elapsed_seconds = (bill_until - last_dt).total_seconds()
             if elapsed_seconds <= 0:

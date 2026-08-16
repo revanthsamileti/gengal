@@ -22,6 +22,7 @@ import IncomingCallOverlay from '../components/IncomingCallOverlay';
 import { authedPost } from '../services/authService';
 import { generateRoomId } from '../utils/ids';
 import { Alert } from '../components/CustomAlert';
+import { popTone, pushTone } from '../theme/activeTone';
 import { useActionLock } from '../hooks/useActionLock';
 import { startRingtone, stopRingtone } from '../services/ringtoneService';
 
@@ -113,6 +114,15 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   /** Same value, readable from inside long-lived interval callbacks. */
   const isPeerUnstableRef = React.useRef(false);
   const isCallActive = isCaller ? (callerStatus === 'accepted') : (!isPending);
+
+  // The ringing UI below paints its own dark backdrop instead of using
+  // ScreenShell, so nothing else publishes a tone while it is up and any alert
+  // raised over it would arrive in the cream dress meant for the rest of app.
+  React.useEffect(() => {
+    if (!isPending) return;
+    const id = pushTone('dark');
+    return () => popTone(id);
+  }, [isPending]);
 
   /**
    * The instant both sides treat as "call started," in epoch ms -- always
@@ -650,7 +660,20 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   // 2b. Initiate call if Caller (runs once on mount)
   React.useEffect(() => {
     if (!isCaller || !roomId || !matchData?.uid || !currentUserProfile) return;
-    
+
+    // Do not ring someone for a call that cannot be paid for. The server
+    // refuses it on its opening tick regardless -- that is the check that
+    // counts, and this one only reads a balance the client happens to be
+    // holding -- but without it the other person's phone rings, they answer,
+    // and the call dies in their ear a second later.
+    if ((currentUserProfile.coins ?? 0) <= 0) {
+      endCallWithNotice(
+        'Not enough coins',
+        'You need coins to place a call. Top up and try again.'
+      );
+      return;
+    }
+
     const callerName = currentUserProfile.name || currentUserProfile.nickname || 'Someone';
     const callerAvatarUrl = currentUserProfile.avatarUrl || currentUserProfile.uri || null;
 
@@ -706,6 +729,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     return () => {
       if (isCaller && ringSlotUid && callRef.callerUid) {
         clearCallOffer(ringSlotUid, callRef).catch(() => {});
+        // Leaving without a teardown -- the navigator replacing this screen,
+        // which is what happens when we yield to the same person calling us
+        // back -- would otherwise strand the record it opened, leaving a call
+        // that never happened showing as still in progress in two histories.
+        // When endCall did run it has already closed it.
+        if (!endedRef.current && roomId) closeCallRecord(roomId);
       }
     };
   }, [isCaller, roomId, matchData?.uid, currentUserProfile]);
@@ -895,9 +924,25 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
      * party to dial straight into a conversation that had only just begun,
      * which is the most likely moment for someone to be calling them.
      */
-    void processCallBilling(roomId).catch((e) =>
-      console.warn('[Billing Engine] Opening tick failed:', e?.message)
-    );
+    void processCallBilling(roomId)
+      .then((result) => {
+        if (isCaller && typeof result.payerNewBalance === 'number') {
+          setCallerLiveCoins(result.payerNewBalance);
+        }
+        // The opening interval is the one the server charges nothing for, so a
+        // caller with an empty balance has to be stopped on this reply. Left to
+        // the regular cadence they would get every call's first quarter-minute
+        // free and could simply keep redialling.
+        if (result.hasInsufficientFunds) {
+          endCallWithNotice(
+            'Call ended',
+            isCaller
+              ? 'You do not have enough coins for this call. Top up to keep talking.'
+              : 'The caller does not have enough coins for this call.'
+          );
+        }
+      })
+      .catch((e) => console.warn('[Billing Engine] Opening tick failed:', e?.message));
 
     const billingInterval = setInterval(async () => {
       const user = auth.currentUser;

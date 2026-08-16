@@ -14,12 +14,18 @@ import {
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { colors, gradients } from '../theme/colors';
+import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
+import { getActiveTone, Tone } from '../theme/activeTone';
 
 /**
  * The app-wide dialog. Screens import `Alert` from here instead of from
- * react-native so every confirmation and error lands in the app's own cream
- * skeuomorphic language (plum serif headings, gold CTAs, warm parchment card)
+ * react-native so every confirmation and error lands in the app's own language
  * rather than the stark OS dialog, which reads as another app entirely.
+ *
+ * It comes in both of the app's tones and picks the one matching whichever
+ * shell is on screen when the alert fires, so a dialog raised over an in-call
+ * screen is not a slab of cream dropped onto black.
  *
  * The imperative signature deliberately mirrors RN's `Alert.alert`, so call
  * sites need no ceremony and can be switched over by changing the import.
@@ -45,6 +51,9 @@ interface AlertOptions {
   cancelable?: boolean;
   /** Icon + tint. Inferred as 'danger' when a destructive button is present. */
   variant?: AlertVariant;
+  /** Overrides the on-screen shell's tone. Only needed by screens that paint
+   *  their own backdrop instead of using ScreenShell. */
+  tone?: Tone;
 }
 
 interface AlertItem {
@@ -52,18 +61,86 @@ interface AlertItem {
   title: string;
   message?: string;
   buttons: AlertButton[];
+  tone: Tone;
   options?: AlertOptions;
 }
 
 let customAlertRef: { alert: (item: Omit<AlertItem, 'id'>) => void } | null = null;
 let nextId = 1;
 
-/** Icon and tint per variant, all drawn from the palette already in the app. */
-const VARIANTS: Record<AlertVariant, { icon: keyof typeof MaterialIcons.glyphMap; fg: string; bg: string }> = {
-  info: { icon: 'info-outline', fg: '#4B0054', bg: '#F6ECF7' },
-  success: { icon: 'check-circle-outline', fg: '#2E7D5B', bg: '#E9F5ED' },
-  warning: { icon: 'error-outline', fg: '#9A7A05', bg: '#FDF3DC' },
-  danger: { icon: 'warning-amber', fg: '#B23B36', bg: '#FBEAE7' },
+interface Palette {
+  scrim: string;
+  card: readonly [string, string, string];
+  border: string;
+  bevel: string;
+  title: string;
+  message: string;
+  primary: readonly [string, string, string];
+  primaryLabel: string;
+  cancelBg: string;
+  cancelBorder: string;
+  cancelLabel: string;
+  destructive: readonly [string, string];
+  destructiveLabel: string;
+  badge: Record<AlertVariant, { fg: string; bg: string }>;
+}
+
+/**
+ * Both palettes are built from the tokens their own shell already uses, so the
+ * dialog moves with the theme rather than carrying a private copy of it.
+ */
+const PALETTES: Record<Tone, Palette> = {
+  light: {
+    // Warm plum rather than neutral black: a grey scrim over a cream app reads
+    // as a dead screen, this reads as the app dimmed.
+    scrim: 'rgba(43, 22, 40, 0.52)',
+    card: skeuoGradients.raised,
+    border: skeuo.border,
+    bevel: 'rgba(255, 255, 255, 0.9)',
+    title: skeuo.plum,
+    message: '#8A7C70',
+    primary: skeuoGradients.gold,
+    primaryLabel: '#422006',
+    cancelBg: skeuo.surfaceInset,
+    cancelBorder: '#E4D5BC',
+    cancelLabel: skeuo.plum,
+    destructive: ['#D2635C', '#B23B36'],
+    destructiveLabel: '#FFFFFF',
+    badge: {
+      info: { fg: skeuo.plum, bg: '#F6ECF7' },
+      success: { fg: '#2E7D5B', bg: '#E9F5ED' },
+      warning: { fg: skeuo.gold, bg: '#FDF3DC' },
+      danger: { fg: '#B23B36', bg: '#FBEAE7' },
+    },
+  },
+  dark: {
+    scrim: 'rgba(4, 2, 6, 0.72)',
+    card: [colors.backgroundCardHover, colors.backgroundCard, colors.primaryDark],
+    border: colors.borderGold,
+    bevel: 'rgba(255, 255, 255, 0.08)',
+    title: colors.textPrimary,
+    message: colors.textSecondary,
+    primary: gradients.goldCTA,
+    primaryLabel: '#2A1A05',
+    cancelBg: 'rgba(255, 255, 255, 0.07)',
+    cancelBorder: 'rgba(255, 255, 255, 0.14)',
+    cancelLabel: colors.goldLight,
+    destructive: ['#C25752', '#8E2B27'],
+    destructiveLabel: '#FFFFFF',
+    badge: {
+      info: { fg: colors.goldLight, bg: 'rgba(201, 168, 76, 0.14)' },
+      success: { fg: colors.success, bg: 'rgba(92, 184, 138, 0.14)' },
+      warning: { fg: colors.gold, bg: 'rgba(201, 168, 76, 0.16)' },
+      danger: { fg: '#FF8A80', bg: 'rgba(232, 93, 117, 0.16)' },
+    },
+  },
+};
+
+const VARIANT_ICONS: Record<AlertVariant, keyof typeof MaterialIcons.glyphMap> = {
+  info: 'info-outline',
+  success: 'check-circle-outline',
+  warning: 'error-outline',
+  danger: 'warning-amber',
 };
 
 /**
@@ -176,8 +253,9 @@ export const CustomAlert = () => {
 
   if (!current) return null;
 
+  const palette = PALETTES[current.tone];
   const variant = resolveVariant(current);
-  const badge = variant ? VARIANTS[variant] : null;
+  const badge = variant ? palette.badge[variant] : null;
   const stacked = shouldStack(current.buttons);
 
   return (
@@ -189,28 +267,33 @@ export const CustomAlert = () => {
       onRequestClose={handleDismiss}
     >
       <TouchableWithoutFeedback onPress={handleDismiss} accessible={false}>
-        <Animated.View style={[styles.scrim, { opacity: fadeAnim }]}>
+        <Animated.View
+          style={[styles.scrim, { backgroundColor: palette.scrim, opacity: fadeAnim }]}
+        >
           <TouchableWithoutFeedback accessible={false}>
             <Animated.View
               accessibilityViewIsModal
-              style={[styles.card, { transform: [{ scale: scaleAnim }] }]}
+              style={[
+                styles.card,
+                { borderColor: palette.border, transform: [{ scale: scaleAnim }] },
+              ]}
             >
               <LinearGradient
-                colors={['#FFFFFF', '#FFF9EE', '#F7EDDD']}
+                colors={[...palette.card]}
                 start={{ x: 0.5, y: 0 }}
                 end={{ x: 0.5, y: 1 }}
                 style={styles.cardBody}
               >
                 {/* The lit top edge that every raised surface in the app has. */}
-                <View pointerEvents="none" style={styles.bevel} />
+                <View pointerEvents="none" style={[styles.bevel, { backgroundColor: palette.bevel }]} />
 
-                {badge && (
+                {badge && variant && (
                   <View style={[styles.badge, { backgroundColor: badge.bg }]}>
-                    <MaterialIcons name={badge.icon} size={30} color={badge.fg} />
+                    <MaterialIcons name={VARIANT_ICONS[variant]} size={30} color={badge.fg} />
                   </View>
                 )}
 
-                <Text style={styles.title} accessibilityRole="header">
+                <Text style={[styles.title, { color: palette.title }]} accessibilityRole="header">
                   {current.title}
                 </Text>
 
@@ -221,7 +304,9 @@ export const CustomAlert = () => {
                     showsVerticalScrollIndicator={false}
                     bounces={false}
                   >
-                    <Text style={styles.message}>{current.message}</Text>
+                    <Text style={[styles.message, { color: palette.message }]}>
+                      {current.message}
+                    </Text>
                   </ScrollView>
                 )}
 
@@ -241,17 +326,24 @@ export const CustomAlert = () => {
                         style={[styles.button, stacked ? styles.buttonFull : styles.buttonFlex]}
                       >
                         {isCancel ? (
-                          <View style={[styles.buttonFill, styles.buttonCancel]}>
-                            <Text style={[styles.buttonLabel, styles.labelCancel]} numberOfLines={1}>
+                          <View
+                            style={[
+                              styles.buttonFill,
+                              styles.buttonCancel,
+                              { backgroundColor: palette.cancelBg, borderColor: palette.cancelBorder },
+                            ]}
+                          >
+                            <Text
+                              style={[styles.buttonLabel, { color: palette.cancelLabel }]}
+                              numberOfLines={1}
+                            >
                               {label}
                             </Text>
                           </View>
                         ) : (
                           <LinearGradient
                             colors={
-                              isDestructive
-                                ? ['#D2635C', '#B23B36']
-                                : ['#FFF1BB', '#D0A92E', '#8F6D05']
+                              isDestructive ? [...palette.destructive] : [...palette.primary]
                             }
                             start={{ x: 0.5, y: 0 }}
                             end={{ x: 0.5, y: 1 }}
@@ -260,7 +352,11 @@ export const CustomAlert = () => {
                             <Text
                               style={[
                                 styles.buttonLabel,
-                                isDestructive ? styles.labelDestructive : styles.labelPrimary,
+                                {
+                                  color: isDestructive
+                                    ? palette.destructiveLabel
+                                    : palette.primaryLabel,
+                                },
                               ]}
                               numberOfLines={1}
                             >
@@ -288,6 +384,10 @@ export const Alert = {
       title: String(title || ''),
       message: message ? String(message) : undefined,
       buttons: buttons?.length ? buttons : [{ text: 'OK' }],
+      // Read now rather than at render time: an alert raised just before a
+      // navigation would otherwise recolour itself mid-display when the next
+      // screen's shell takes over.
+      tone: options?.tone ?? getActiveTone(),
       options,
     };
 
@@ -305,9 +405,6 @@ export const Alert = {
 const styles = StyleSheet.create({
   scrim: {
     flex: 1,
-    // Warm plum rather than neutral black: a grey scrim over a cream app reads
-    // as a dead screen, this reads as the app dimmed.
-    backgroundColor: 'rgba(43, 22, 40, 0.52)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
@@ -318,7 +415,6 @@ const styles = StyleSheet.create({
     borderRadius: 26,
     overflow: 'hidden',
     borderWidth: 1,
-    borderColor: '#E9D9BE',
     boxShadow: Platform.OS === 'web' ? '0 18px 40px rgba(83, 58, 29, 0.28)' : undefined,
     elevation: 24,
   },
@@ -334,7 +430,6 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     height: 1,
-    backgroundColor: 'rgba(255, 255, 255, 0.9)',
   },
   badge: {
     width: 58,
@@ -347,7 +442,6 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 20,
     fontWeight: '900',
-    color: '#4B0054',
     fontFamily: 'serif',
     textAlign: 'center',
   },
@@ -361,7 +455,6 @@ const styles = StyleSheet.create({
   },
   message: {
     fontSize: 14.5,
-    color: '#8A7C70',
     textAlign: 'center',
     lineHeight: 21,
   },
@@ -394,22 +487,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 18,
   },
   buttonCancel: {
-    backgroundColor: '#F3EBDD',
     borderWidth: 1,
-    borderColor: '#E4D5BC',
     borderRadius: 25,
   },
   buttonLabel: {
     fontSize: 15,
     fontWeight: '800',
-  },
-  labelPrimary: {
-    color: '#422006',
-  },
-  labelCancel: {
-    color: '#4B0054',
-  },
-  labelDestructive: {
-    color: '#FFFFFF',
   },
 });

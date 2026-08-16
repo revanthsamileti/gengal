@@ -320,6 +320,16 @@ export default function App() {
     screenRef.current = screen;
   }, [screen]);
 
+  // Who the call screen currently on top is for, and in which direction. The
+  // inbound-call handler needs this to tell "a stranger is ringing while I am
+  // busy" from "the person I am dialling is dialling me back".
+  const currentCallRef = useRef<{ peerUid?: string; isCaller?: boolean }>({});
+  useEffect(() => {
+    currentCallRef.current = screen === 'Call'
+      ? { peerUid: params?.matchData?.uid, isCaller: !!params?.isCaller }
+      : {};
+  }, [screen, params]);
+
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -383,28 +393,8 @@ export default function App() {
 
   // Inbound calls push a Call screen with the offer already attached.
   useIncomingCallWatcher(user, (call) => {
-    if (screenRef.current === 'Call') {
-      // Already on a call — auto-decline with 'rejected' so the caller's
-      // subscribeToOutboundCallStatus listener fires and ends their side
-      // cleanly. Without this the caller's 45-second ring timeout is the
-      // only thing that ends their call, and the offer document stays alive
-      // blocking any subsequent call to this user for that entire window.
-      //
-      // Aimed at this specific offer. Declining "whatever is in the ring slot"
-      // is how a stranger's unanswered call used to hang up the conversation
-      // already in progress: the rejection landed on the shared document that
-      // the live call was still reading its own state from, and both
-      // participants took it as the other one hanging up.
-      const uid = auth.currentUser?.uid;
-      if (uid) {
-        rejectCallOffer(uid, { callerUid: call.callerUid, roomId: call.roomId }, 'busy').catch((e) =>
-          console.warn('[App] Auto-decline busy call failed:', e)
-        );
-      }
-      return;
-    }
-    setNavStack(prev => [...prev, {
-      name: 'Call',
+    const inboundCallEntry = {
+      name: 'Call' as ScreenName,
       params: {
         profileName: call.callerName,
         mode: call.mode,
@@ -418,7 +408,55 @@ export default function App() {
           avatarData: call.callerAvatarData,
         },
       },
-    }]);
+    };
+
+    /**
+     * Both people pressing Call at the same moment.
+     *
+     * This is not an exotic race: MatchScreen shows both halves of a new match
+     * the same "call now" screen at the same instant, so it happens whenever
+     * two eager people are matched. Each one's phone then sees an inbound call
+     * while it is placing an outbound one, each declines the other as busy, and
+     * a match that both sides wanted produced two "Line busy" dialogs and no
+     * call at all.
+     *
+     * Both devices decide it the same way -- lower uid keeps its outbound call,
+     * higher uid drops its own and answers instead -- so exactly one of the two
+     * calls survives, with no extra round-trip to agree on which.
+     */
+    const uid = auth.currentUser?.uid;
+    const active = currentCallRef.current;
+    const dialingEachOther =
+      screenRef.current === 'Call' && active.isCaller && active.peerUid === call.callerUid;
+
+    if (dialingEachOther && uid && uid > call.callerUid) {
+      // We yield. Replacing this screen unmounts the outbound call, whose own
+      // cleanup withdraws the offer we placed, so the other side is not left
+      // ringing an abandoned call.
+      setNavStack(prev => [...prev.slice(0, -1), inboundCallEntry]);
+      return;
+    }
+
+    if (screenRef.current === 'Call') {
+      // Already on a call — auto-decline with 'rejected' so the caller's
+      // subscribeToOutboundCallStatus listener fires and ends their side
+      // cleanly. Without this the caller's 45-second ring timeout is the
+      // only thing that ends their call, and the offer document stays alive
+      // blocking any subsequent call to this user for that entire window.
+      //
+      // Aimed at this specific offer. Declining "whatever is in the ring slot"
+      // is how a stranger's unanswered call used to hang up the conversation
+      // already in progress: the rejection landed on the shared document that
+      // the live call was still reading its own state from, and both
+      // participants took it as the other one hanging up.
+      if (uid) {
+        rejectCallOffer(uid, { callerUid: call.callerUid, roomId: call.roomId }, 'busy').catch((e) =>
+          console.warn('[App] Auto-decline busy call failed:', e)
+        );
+      }
+      return;
+    }
+    setNavStack(prev => [...prev, inboundCallEntry]);
   });
 
   useEffect(() => {

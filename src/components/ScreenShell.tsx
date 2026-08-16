@@ -4,14 +4,23 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, gradients } from '../theme/colors';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
+import { popTone, pushTone, Tone } from '../theme/activeTone';
 
 type ScreenShellProps = {
   children: React.ReactNode;
-  tone?: 'dark' | 'light';
+  tone?: Tone;
 };
 
 
 export default function ScreenShell({ children, tone = 'dark' }: ScreenShellProps) {
+  // Publish the tone so root-level chrome — the alert dialog — can dress to
+  // match the screen it is covering instead of always wearing the cream one.
+  React.useEffect(() => {
+    const id = pushTone(tone);
+    return () => popTone(id);
+  }, [tone]);
+
+
   if (tone === 'light') {
     return (
       <View style={[styles.root, styles.lightRoot]}>
