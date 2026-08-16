@@ -1004,8 +1004,15 @@ def call_billing_endpoint():
             return jsonify({"error": "Not a participant in this call"}), 403
         if not payer_id or not receiver_id or payer_id == receiver_id:
             return jsonify({"success": True, "hasInsufficientFunds": False, "billedSeconds": 0}), 200
-        if call_data.get('status') == 'ended':
-            return jsonify({"success": True, "hasInsufficientFunds": False, "billedSeconds": 0}), 200
+        # A call that has already ended is deliberately NOT rejected here. Both
+        # clients fire one last tick as they tear the screen down, and that tick
+        # is the only thing that charges for the seconds since the previous one
+        # -- up to fifteen of them. Refusing it meant the tail of every single
+        # call was free, and worse, it was a race: the hang-up marks the record
+        # 'ended' at the same moment the final tick is sent, so whether the last
+        # quarter-minute was billed came down to which network round-trip won.
+        # The transaction below bills an ended call only up to its `endedAt`, so
+        # nothing accrues after the parties actually hung up.
 
         settings = pricing_settings()
 
@@ -1020,53 +1027,83 @@ def call_billing_endpoint():
         receiver_ref = db_client.collection('users').document(receiver_id)
         transaction = db_client.transaction()
 
+        def as_utc(value):
+            """A Firestore timestamp as an aware datetime, or None."""
+            if not isinstance(value, datetime):
+                return None
+            return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
         @firestore.transactional
         def apply(transaction):
+            # Every read happens here, before any write: Firestore forbids
+            # reading after writing inside a transaction, and the paths below
+            # need the participants' documents whether they bill or not.
             snap = call_ref.get(transaction=transaction)
+            payer_snap = payer_ref.get(transaction=transaction)
+            receiver_snap = receiver_ref.get(transaction=transaction)
             current = snap.to_dict() or {}
 
             # Elapsed time is measured between server-side timestamps, so a
             # client clock cannot influence the amount.
             now = datetime.now(timezone.utc)
 
-            # The first tick only starts the clock. Anchoring to createdAt
-            # instead would bill the payer for the time the call spent ringing.
-            # Stamped on both participants every tick so the discovery feed can
-            # tell who is mid-call. Deliberately a timestamp rather than a
-            # boolean "isBusy": a flag has to be cleared by the client, and a
-            # client that is force-quit, crashes or loses the network never gets
-            # to clear it — leaving someone marked busy forever and effectively
-            # invisible to callers. Readers age it out instead (see
-            # CALL_BUSY_TTL_MS), so a call that ends without ceremony simply
-            # stops being refreshed. Written server-side from the server clock,
-            # so it cannot be spoofed to make someone look unavailable.
-            #
-            # Safe to write before the payer/receiver reads below only because
-            # nothing reads those refs after this point on the early-return
-            # paths; Firestore forbids a read after a write in a transaction.
+            # An ended call still gets one last tick from each client, and it
+            # must charge for the run-up to the hang-up and not one second more.
+            # `endedAt` is a serverTimestamp() written by the client SDK, which
+            # means the value itself comes from the server -- a client cannot
+            # backdate it to shorten what it owes.
+            ended = current.get('status') == 'ended'
+            ended_at = as_utc(current.get('endedAt'))
+            bill_until = min(now, ended_at) if (ended and ended_at) else now
+
+            # Stamped on both participants every tick so the discovery feed --
+            # and the rule guarding /incoming_calls -- can tell who is mid-call.
+            # Deliberately a timestamp rather than a boolean "isBusy": a flag has
+            # to be cleared by the client, and a client that is force-quit,
+            # crashes or loses the network never gets to clear it — leaving
+            # someone marked busy forever and effectively invisible to callers.
+            # Readers age it out instead (see CALL_BUSY_TTL_MS), so a call that
+            # ends without ceremony simply stops being refreshed. Written
+            # server-side from the server clock, so it cannot be spoofed to make
+            # someone look unavailable.
             def mark_busy():
                 transaction.update(payer_ref, {"inCallSince": now})
                 transaction.update(receiver_ref, {"inCallSince": now})
 
-            last = current.get('lastBilledAt')
-            if last is None:
-                # First tick only starts the clock, but both parties are already
-                # on the call — without stamping here they would read as free
-                # for the opening seconds and keep receiving calls.
-                transaction.update(call_ref, {"lastBilledAt": now})
-                mark_busy()
-                return 0.0, None, None, False, 0.0
+            # ...and cleared as soon as the call closes properly, so hanging up
+            # does not leave both people unreachable for the rest of the TTL.
+            # Skipped for anyone whose stamp is newer than this call's ending:
+            # they are already on the next call, and clearing it would advertise
+            # them as free while they are talking to somebody else.
+            def release_busy():
+                boundary = ended_at or now
+                for ref, user_snap in ((payer_ref, payer_snap), (receiver_ref, receiver_snap)):
+                    stamp = as_utc((user_snap.to_dict() or {}).get('inCallSince'))
+                    if stamp is None or stamp > boundary:
+                        continue
+                    transaction.update(ref, {"inCallSince": firestore.DELETE_FIELD})
 
-            last_dt = last if isinstance(last, datetime) else None
+            last_dt = as_utc(current.get('lastBilledAt'))
             if last_dt is None:
+                # First tick only starts the clock — anchoring to createdAt
+                # instead would bill the payer for the time the call spent
+                # ringing. Both parties are already on the call, so without
+                # stamping here they would read as free for the opening seconds
+                # and keep receiving calls.
+                if ended:
+                    release_busy()
+                    return 0.0, None, None, False, 0.0
                 transaction.update(call_ref, {"lastBilledAt": now})
                 mark_busy()
                 return 0.0, None, None, False, 0.0
-            if last_dt.tzinfo is None:
-                last_dt = last_dt.replace(tzinfo=timezone.utc)
 
-            elapsed_seconds = (now - last_dt).total_seconds()
+            elapsed_seconds = (bill_until - last_dt).total_seconds()
             if elapsed_seconds <= 0:
+                # Nothing left to charge. On an ended call this is the second and
+                # subsequent final flushes (both clients send one), which is
+                # exactly when the busy marker should come off.
+                if ended:
+                    release_busy()
                 return 0.0, None, None, False, 0.0
 
             # Cap a single tick so a long client stall (or a resumed session)
@@ -1074,8 +1111,6 @@ def call_billing_endpoint():
             elapsed_seconds = min(elapsed_seconds, MAX_BILLABLE_TICK_SECONDS)
 
             amount = (rate_per_min / 60.0) * elapsed_seconds
-            payer_snap = payer_ref.get(transaction=transaction)
-            receiver_snap = receiver_ref.get(transaction=transaction)
             payer_balance = get_coin_balance(payer_snap)
             receiver_balance = get_coin_balance(receiver_snap)
 
@@ -1086,13 +1121,22 @@ def call_billing_endpoint():
             payer_new = payer_balance - actual_deduction
             receiver_new = receiver_balance + receiver_share
 
-            transaction.update(payer_ref, {"coins": payer_new, "inCallSince": now})
-            transaction.update(receiver_ref, {"coins": receiver_new, "inCallSince": now})
+            transaction.update(payer_ref, {"coins": payer_new})
+            transaction.update(receiver_ref, {"coins": receiver_new})
             transaction.update(call_ref, {
-                "lastBilledAt": now,
+                # Anchored to what was actually billed, not to "now": on the
+                # closing tick of an ended call those differ, and using `now`
+                # would silently swallow any tail a second flush still owed.
+                "lastBilledAt": bill_until,
                 "durationSeconds": float(current.get('durationSeconds') or 0) + elapsed_seconds,
                 "coinsDeducted": float(current.get('coinsDeducted') or 0) + actual_deduction,
             })
+            # Refreshing the busy marker on a call that has already hung up is
+            # what would keep both people unreachable after they had finished.
+            if ended:
+                release_busy()
+            else:
+                mark_busy()
             return actual_deduction, payer_new, receiver_new, has_insufficient, elapsed_seconds
 
         billed, payer_new, receiver_new, has_insufficient, elapsed = apply(transaction)

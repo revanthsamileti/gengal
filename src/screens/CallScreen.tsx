@@ -17,7 +17,7 @@ import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { transferCoins, processCallBilling } from '../services/coinService';
 import { subscribeToGlobalSettings, GlobalSettings } from '../services/adminService';
 import ConnectingOverlay from '../components/ConnectingOverlay';
-import { createCallOffer, acceptCallOffer, rejectCallOffer, subscribeToOutboundCallStatus, clearCallOffer, openCallRecord, closeCallRecord } from '../services/liveRoomService';
+import { createCallOffer, acceptCallOffer, rejectCallOffer, subscribeToOutboundCallStatus, clearCallOffer, openCallRecord, closeCallRecord, ReceiverBusyError, CallSetupTimeoutError, CallGoneError, OFFER_EXPIRY_MS } from '../services/liveRoomService';
 import IncomingCallOverlay from '../components/IncomingCallOverlay';
 import { authedPost } from '../services/authService';
 import { generateRoomId } from '../utils/ids';
@@ -29,6 +29,16 @@ import { startRingtone, stopRingtone } from '../services/ringtoneService';
 // `isConnecting` true, so neither the peer-timeout nor the heartbeat watchdog
 // can fire. This is the only thing that ends an unanswered outbound call.
 const RING_TIMEOUT_MS = 45000;
+
+/**
+ * How long the caller may sit on "Connecting..." before the call is abandoned.
+ *
+ * Comfortably longer than the offer write's own 10 s bound
+ * (OFFER_WRITE_TIMEOUT_MS in liveRoomService), so in the ordinary case that
+ * write reports its own failure with a more specific message and this backstop
+ * never fires.
+ */
+const CALL_SETUP_TIMEOUT_MS = 20000;
 
 /**
  * Providers the app can actually carry a call on, in preference order.
@@ -59,7 +69,21 @@ type CallScreenProps = {
 };
 
 export default function CallScreen({ profileName, mode = 'call', roomId: initialRoomId, matchData, isCaller, isIncomingPending = false, navigate, goBack }: CallScreenProps) {
-  const [roomId] = useState(initialRoomId || generateRoomId());
+  /**
+   * One room per call attempt, minted here whenever we are the one placing it.
+   *
+   * A receiver must use the id it was given -- that is the channel the caller
+   * is sitting in, and it arrives with the offer. A caller must not, even when
+   * a screen hands one down. MatchScreen passes the matchmaking room id, and
+   * both matched people are looking at that same screen with the same id: if
+   * they both press Call, both try to open `calls/{roomId}` on the same
+   * document, and the second write is rejected outright for changing
+   * callerUid. The same id also comes back on a second attempt after a first
+   * call ends, where it would reopen a record already marked ended. The id is
+   * only ever an Agora channel name and a record key, and the peer learns it
+   * from the offer, so there is nothing to be gained by inheriting it.
+   */
+  const [roomId] = useState(() => (isCaller || !initialRoomId ? generateRoomId() : initialRoomId));
   // Age is shown only when the peer actually has one. It previously defaulted
   // to '24', which displayed a fabricated age for every user missing the field.
   const profile = matchData ? {
@@ -86,6 +110,8 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [callerLiveCoins, setCallerLiveCoins] = useState(0);
   const [isPeerUnstable, setIsPeerUnstable] = useState(false);
+  /** Same value, readable from inside long-lived interval callbacks. */
+  const isPeerUnstableRef = React.useRef(false);
   const isCallActive = isCaller ? (callerStatus === 'accepted') : (!isPending);
 
   /**
@@ -109,19 +135,58 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
    */
   const callStartRef = React.useRef<number | null>(null);
 
+  /** Whether `calls/{roomId}` has been observed in a not-yet-ended state. */
+  const sawLiveCallRecordRef = React.useRef(false);
+
+  /** Whether the ring slot last held an offer belonging to a different call. */
+  const slotIsForeignRef = React.useRef(false);
+
   const lastObservedCallerHeartbeatRef = React.useRef<number | null>(null);
   const lastObservedReceiverHeartbeatRef = React.useRef<number | null>(null);
   const lastObservedCallerTimeRef = React.useRef<number>(Date.now());
   const lastObservedReceiverTimeRef = React.useRef<number>(Date.now());
 
+  /**
+   * Which uid owns the ring slot for this call, and which offer inside it is
+   * ours. Every write to `incoming_calls` goes through these two, so a slot
+   * that has moved on to another caller is left alone instead of being
+   * accepted, declined or deleted on some stranger's behalf.
+   */
+  const peerUid: string | undefined = matchData?.uid;
+  const selfUid = auth.currentUser?.uid;
+  const ringSlotUid = isCaller ? peerUid : selfUid;
+  const callRef = React.useMemo(
+    () => ({ callerUid: (isCaller ? selfUid : peerUid) || '', roomId: roomId || '' }),
+    [isCaller, selfUid, peerUid, roomId]
+  );
+
+  /**
+   * Teardown runs exactly once.
+   *
+   * Half a dozen things can end a call -- the End button, the ring timeout,
+   * the peer timeout, the heartbeat watchdog, the offer being cleared, the
+   * record being closed, running out of coins -- and several of them fire
+   * together when a call drops. `useActionLock` only covers a double-tap: it
+   * releases after 900 ms, so two of those arriving a second apart both ran,
+   * and each one called `goBack()`. Two pops leave the user a screen further
+   * back than they started, stacked behind two "call ended" alerts.
+   */
+  const endedRef = React.useRef(false);
+
   const endCall = async () => {
+    if (endedRef.current) return;
+    endedRef.current = true;
+
     disconnectSeat();
-    const user = auth.currentUser;
-    if (isCaller && roomId) {
+    if (roomId) {
+      // Closed by whichever side hangs up first, not just the caller. When the
+      // receiver hung up, the record stayed 'active' forever -- the call sat
+      // unfinished in both histories, and the caller learnt the call was over
+      // only from the offer document going away. That signal lives in a slot
+      // any later caller can overwrite, so it cannot be the only one.
       closeCallRecord(roomId);
     }
-    const incomingCallDocId = isCaller ? matchData?.uid : user?.uid;
-    if (incomingCallDocId) {
+    if (ringSlotUid && callRef.callerUid) {
       // Deliberately not awaited before goBack(). This is a network round-trip,
       // and awaiting it meant a stalled or offline Firestore write pinned the
       // user on the call screen -- with useActionLock still held, so every
@@ -130,7 +195,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       // depend on the network. The write still runs to completion because it is
       // a plain service call rather than component state, so the peer is still
       // told the call is over.
-      void clearCallOffer(incomingCallDocId).catch((e) =>
+      void clearCallOffer(ringSlotUid, callRef).catch((e) =>
         console.warn('Failed to clear call offer on end call', e)
       );
     }
@@ -141,6 +206,40 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const { locked: isEnding, run: runEndCall } = useActionLock();
   const handleEndCall = () => runEndCall(endCall);
 
+  /**
+   * Ends the call after telling the user why, without letting a second cause
+   * of death queue up another dialog behind the first. Before the guard, a
+   * dropped connection commonly produced two alerts -- the heartbeat watchdog
+   * and the peer timeout both firing -- and the user had to dismiss the same
+   * news twice.
+   */
+  const endCallWithNotice = (title: string, message: string) => {
+    if (endedRef.current) return;
+    Alert.alert(title, message, [{ text: 'OK' }]);
+    void endCall();
+  };
+
+  /**
+   * The ringing phone gives up too, not just the caller.
+   *
+   * Every other way an inbound ring ends depends on the caller's device still
+   * working: they hang up, they time out at 45 s, they lose the call and their
+   * heartbeat stops. If that device simply stops -- force-quit, battery dead,
+   * killed by the OS while the app was backgrounded -- nothing clears the
+   * offer, and this screen rang, vibrated and refused to go away until the
+   * user forced their own app closed. The offer is dead to everyone else after
+   * OFFER_EXPIRY_MS, so this screen should not outlive it either.
+   */
+  React.useEffect(() => {
+    if (!isPending) return;
+
+    const timer = setTimeout(() => {
+      endCallWithNotice('Missed call', `${profile.name} stopped calling.`);
+    }, OFFER_EXPIRY_MS);
+
+    return () => clearTimeout(timer);
+  }, [isPending]);
+
   // An unanswered outbound call otherwise rings indefinitely: the caller path
   // keeps `isConnecting` true, which disables both the peer timeout and the
   // heartbeat watchdog below.
@@ -148,9 +247,29 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     if (!isCaller || callStep !== 'ringing') return;
 
     const timer = setTimeout(() => {
-      Alert.alert('No answer', `${profile.name} did not pick up.`, [{ text: 'OK' }]);
-      void endCall();
+      endCallWithNotice('No answer', `${profile.name} did not pick up.`);
     }, RING_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [isCaller, callStep]);
+
+  // The ring timeout above only arms once the call has *reached* the ringing
+  // step, so anything that stalls before then -- a profile read that never
+  // settles, an offer write that hangs on a degraded connection -- left the
+  // caller on "Connecting..." with no timer running and no way out but the
+  // back button. Both of those have been fixed at their source, but the shape
+  // of the bug is worth closing off for good: any future stall on the way to
+  // ringing now surfaces instead of hanging silently. Generous, because it is
+  // a backstop and must never pre-empt a call that is merely slow to dial.
+  React.useEffect(() => {
+    if (!isCaller || callStep !== 'connecting') return;
+
+    const timer = setTimeout(() => {
+      endCallWithNotice(
+        'Could not connect',
+        'We could not start this call. Please check your connection and try again.'
+      );
+    }, CALL_SETUP_TIMEOUT_MS);
 
     return () => clearTimeout(timer);
   }, [isCaller, callStep]);
@@ -176,6 +295,11 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   // the screen would otherwise sit on the connecting overlay forever.
   React.useEffect(() => {
     if (isCaller && !matchData?.uid) {
+      // Nothing has been created yet, so there is nothing to tear down -- but
+      // the profile load below can fail for the same call and also leave, and
+      // two departures pop two screens.
+      if (endedRef.current) return;
+      endedRef.current = true;
       Alert.alert('Unavailable', 'This profile cannot be called right now.', [{ text: 'OK' }]);
       goBack();
     }
@@ -184,14 +308,35 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   // 0. Fetch current user profile to determine gender/role
   React.useEffect(() => {
     const user = auth.currentUser;
-    if (user) {
-      import('../services/userService').then(({ getUserProfile }) => {
-        getUserProfile(user.uid).then(p => {
-          setCurrentUserProfile(p);
-          if (p?.coins) setCallerLiveCoins(p.coins);
-        });
+    if (!user) return;
+    let cancelled = false;
+    import('../services/userService')
+      .then(({ getUserProfile }) => getUserProfile(user.uid))
+      .then(p => {
+        if (cancelled) return;
+        setCurrentUserProfile(p);
+        if (p?.coins) setCallerLiveCoins(p.coins);
+      })
+      .catch(e => {
+        // This had no .catch() at all, which was the original cause of calls
+        // silently never going through: the offer-creation effect below is
+        // gated on currentUserProfile ever being set, so a failed read here
+        // left the caller staring at "Connecting..." forever -- no offer sent,
+        // no error shown, nothing in the receiver's incoming_calls to explain
+        // why. For the receiver this profile only feeds a cosmetic live coin
+        // counter, so their answer flow is unaffected and this stays a
+        // console warning; only the caller side, which cannot proceed at all
+        // without it, needs to fail loudly and let the user retry.
+        console.warn('[CallScreen] Failed to load caller profile:', e);
+        if (cancelled) return;
+        if (isCaller) {
+          if (endedRef.current) return;
+          endedRef.current = true;
+          Alert.alert('Could not connect', 'Could not reach that user. Please try again.', [{ text: 'OK' }]);
+          goBack();
+        }
       });
-    }
+    return () => { cancelled = true; };
   }, []);
 
   // 1. Initialize the 40K Multi-Adapter
@@ -244,6 +389,37 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         if (data.mode === 'call' && mode === 'video') {
           setVideoDowngraded(true);
         }
+        // Whichever side hangs up closes this record, and unlike the ring slot
+        // there is exactly one of these per call -- nobody else's call can
+        // overwrite it. That makes it the reliable "the other person left"
+        // signal for both sides. The slot's own delete still fires first in the
+        // ordinary case; this covers the case where the slot has already been
+        // taken over by a later caller and can no longer speak for this call.
+        //
+        // Only honoured after this record has been seen live at least once.
+        // `openCallRecord` is not awaited before the offer goes out, and a
+        // matchmade room id can be handed out again, so the first snapshot can
+        // still be the *previous* call's closed record -- which would otherwise
+        // end this call the instant it started.
+        if (data.status === 'ended') {
+          if (sawLiveCallRecordRef.current) {
+            console.log('[CallScreen] Call record closed by peer. Ending call.');
+            void endCall();
+          }
+        } else {
+          sawLiveCallRecordRef.current = true;
+        }
+
+        // Peer liveness. What is compared is only whether the *value changed*,
+        // and the elapsed time is measured from when this device saw it change,
+        // so the two phones' clocks never have to agree.
+        const peerBeat = isCaller ? data.receiverHeartbeat : data.callerHeartbeat;
+        const lastBeatRef = isCaller ? lastObservedReceiverHeartbeatRef : lastObservedCallerHeartbeatRef;
+        const lastSeenRef = isCaller ? lastObservedReceiverTimeRef : lastObservedCallerTimeRef;
+        if (typeof peerBeat === 'number' && lastBeatRef.current !== peerBeat) {
+          lastBeatRef.current = peerBeat;
+          lastSeenRef.current = Date.now();
+        }
       }
     }, (error) => {
       // The rules on /calls read `resource.data`, so this listener is denied
@@ -256,7 +432,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       console.warn('[CallScreen] Call record listener unavailable:', error?.message);
     });
     return unsub;
-  }, [roomId, currentProvider]);
+  }, [roomId, currentProvider, isCaller]);
 
   // Listen for the incoming_calls document being deleted, which means the call ended.
   React.useEffect(() => {
@@ -266,23 +442,59 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
     const unsub = onSnapshot(doc(db, 'incoming_calls', user.uid), (snap) => {
       if (!snap.exists()) {
+        // A delete carries no data, so it cannot be attributed on its own. If
+        // the last thing in the slot was somebody else's offer, this is that
+        // caller giving up, not ours -- ending here would hang up a working
+        // call because a stranger cancelled theirs.
+        if (slotIsForeignRef.current) {
+          console.log("[CallScreen] Another caller's offer was cleared; ignoring.");
+          return;
+        }
         console.log("[CallScreen] Call offer document deleted. Ending call.");
-        disconnectSeat();
-        goBack();
+        void endCall();
       } else {
         const data = snap.data();
-        if (data.status === 'rejected') {
-          console.log("[CallScreen] Call rejected by caller. Ending call.");
-          disconnectSeat();
-          goBack();
-        }
-        
-        // Receiver records caller heartbeat updates (immune to clock drift)
-        if ((data.status === 'accepted' || !isPending) && data.callerHeartbeat) {
-          if (lastObservedCallerHeartbeatRef.current === null || data.callerHeartbeat !== lastObservedCallerHeartbeatRef.current) {
-            lastObservedCallerHeartbeatRef.current = data.callerHeartbeat;
-            lastObservedCallerTimeRef.current = Date.now();
+
+        // Everything below describes *this* call, so anything else in the slot
+        // is somebody else's business. Without this check a second person
+        // dialling mid-conversation ended the conversation: their offer landed
+        // here, the busy-guard in App.tsx stamped `rejected` on it, and this
+        // listener read that as "the person I am talking to hung up". The
+        // newcomer is handled by the watcher in App.tsx; from in here it is
+        // noise, and this call's own liveness comes from the per-call `calls`
+        // record and the heartbeat watchdog instead.
+        if (data.callerUid !== callRef.callerUid || data.roomId !== callRef.roomId) {
+          slotIsForeignRef.current = true;
+          // Mid-call this is pure noise. Still ringing, though, it means our
+          // caller's offer has been displaced and will never be answered --
+          // there is nothing left to accept, so stop ringing now rather than
+          // buzzing at a dead offer until it expires.
+          if (isPending) {
+            console.log('[CallScreen] Ring slot taken over while ringing; ending.');
+            endCallWithNotice('Missed call', `${profile.name} stopped calling.`);
+          } else {
+            console.log('[CallScreen] Ring slot now holds another call; ignoring.');
           }
+          return;
+        }
+        slotIsForeignRef.current = false;
+
+        if (data.status === 'rejected') {
+          // We declined (nobody else can write this status for our own call).
+          // Leave the offer and the history record exactly as they are: that
+          // 'rejected' status is the only way the caller finds out why their
+          // call stopped, and clearing the offer or closing the record here
+          // races that message -- Firestore is free to coalesce a delete over
+          // an update the caller has not read yet, and then all they see is
+          // the call vanishing, with a "No answer" forty-five seconds later.
+          // The caller tidies both up once it has shown the decline.
+          console.log("[CallScreen] Call declined here. Leaving the call screen.");
+          if (!endedRef.current) {
+            endedRef.current = true;
+            disconnectSeat();
+            goBack();
+          }
+          return;
         }
 
         // Anchor the timer to the resolved server timestamp, not this
@@ -308,10 +520,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       // call is over — their own listener sees the delete. A bare goBack() left
       // the caller talking to a screen nobody was on.
       console.warn('[CallScreen] Offer listener failed; ending call.', error?.message);
-      handleEndCall();
+      void endCall();
     });
     return unsub;
-  }, [isCaller, isPending]);
+  }, [isCaller, isPending, callRef]);
 
   // 2. Automatically connect to the voice room when the screen mounts or provider changes
   React.useEffect(() => {
@@ -372,13 +584,11 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         // fix was to grant the permission and try again.
         if (error?.code === 'PERMISSION_DENIED') {
           console.warn('[CallScreen] Microphone permission denied; not proceeding with call.');
-          Alert.alert(
-            'Microphone access needed',
-            'GenGal needs microphone access to make and receive calls. Please allow it in your device settings and try again.',
-            [{ text: 'OK' }]
-          );
           if (isMounted) setIsConnecting(false);
-          void endCall();
+          endCallWithNotice(
+            'Microphone access needed',
+            'GenGal needs microphone access to make and receive calls. Please allow it in your device settings and try again.'
+          );
           return;
         }
 
@@ -418,12 +628,13 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             );
           }
         } else {
-          Alert.alert(
+          // endCall, not goBack: this leaves an opened history record and a
+          // live offer behind otherwise, so the call reads as still running to
+          // the server and to the person at the other end.
+          endCallWithNotice(
             'Connection failed',
-            'We could not establish a secure connection. Please try again later.',
-            [{ text: 'OK' }]
+            'We could not establish a secure connection. Please try again later.'
           );
-          goBack();
         }
       }
     };
@@ -446,16 +657,20 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     import('../services/debugLogger').then(({ logDebugEvent }) => {
       logDebugEvent('call.createOffer.start', { targetUid: matchData.uid, roomId });
 
-      // Open the history record first so both sides have a document to sync the
-      // active provider through.
+      // The history record has to exist before anyone is told about the call,
+      // and the call cannot proceed without it. It is not just history: the
+      // billing endpoint reads the rate, the participants and the elapsed
+      // clock from this document and returns "Unknown call" without it, so a
+      // call placed after a failed write connected, ran, and was never charged
+      // for. It is also the document both sides sync the provider through and
+      // the one that reports the hang-up, so the receiver used to be able to
+      // subscribe to it before it existed.
       openCallRecord(
         roomId,
         { uid: auth.currentUser!.uid, name: callerName, avatarUrl: callerAvatarUrl, avatarData: currentUserProfile.avatarData },
         { uid: matchData.uid, name: profile.name, avatarUrl: matchData.avatarUrl || matchData.uri, avatarData: matchData.avatarData },
         mode
-      ).catch(e => console.warn('Failed to open call record', e));
-
-      createCallOffer(
+      ).then(() => createCallOffer(
         auth.currentUser!.uid,
         matchData.uid,
         callerName,
@@ -463,31 +678,45 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         currentUserProfile.avatarData || null,
         mode,
         roomId
-      ).then(() => {
+      )).then(() => {
         logDebugEvent('call.createOffer.success', { targetUid: matchData.uid });
         setCallStep('ringing');
       }).catch(e => {
         console.warn('Failed to send call offer', e);
         logDebugEvent('call.createOffer.failed', { error: String(e), targetUid: matchData.uid }, 'error');
-        Alert.alert('Could not connect', 'Could not reach that user. Please try again.', [{ text: 'OK' }]);
-        goBack();
+        const isBusy = e instanceof ReceiverBusyError;
+        const isTimeout = e instanceof CallSetupTimeoutError;
+        // Through endCall rather than a bare goBack: the history record was
+        // opened a moment ago, and leaving without closing it left a call that
+        // never happened sitting in both users' history as still in progress.
+        endCallWithNotice(
+          isBusy ? 'Line busy' : 'Could not connect',
+          isBusy
+            // Covers both "on a call" and "someone else's phone is ringing
+            // them right now" — the caller is not allowed to see which, and
+            // claiming the wrong one would be a guess stated as fact.
+            ? `${profile.name} is busy right now. Try again in a moment.`
+            : isTimeout
+              ? 'We could not reach the server to start this call. Please check your connection and try again.'
+              : 'Could not reach that user. Please try again.'
+        );
       });
     });
 
     return () => {
-      if (isCaller && matchData?.uid) {
-        clearCallOffer(matchData.uid).catch(() => {});
+      if (isCaller && ringSlotUid && callRef.callerUid) {
+        clearCallOffer(ringSlotUid, callRef).catch(() => {});
       }
     };
   }, [isCaller, roomId, matchData?.uid, currentUserProfile]);
 
   // 2c. Listen for status changes on the outbound call offer
   React.useEffect(() => {
-    if (!isCaller || !matchData?.uid) return;
+    if (!isCaller || !ringSlotUid || !callRef.callerUid) return;
 
-    const unsubStatus = subscribeToOutboundCallStatus(matchData.uid, (status, data) => {
-      setCallerStatus(status);
+    const unsubStatus = subscribeToOutboundCallStatus(ringSlotUid, callRef, (status, data) => {
       if (status === 'accepted') {
+        setCallerStatus('accepted');
         setCallStep('talking');
         if (callStartRef.current === null) {
           const acceptedAt = (data as any)?.acceptedAt;
@@ -498,49 +727,82 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             ? acceptedAt.toMillis()
             : Date.now();
         }
-      } else if (status === 'rejected') {
-        Alert.alert('Call declined', `${profile.name} declined the call.`, [{ text: 'OK' }]);
+        return;
+      }
+
+      if (status === 'rejected') {
+        setCallerStatus('rejected');
+        // A device that is already on a call declines automatically, and the
+        // person never sees it ring. Reporting that as "they declined your
+        // call" told the caller something untrue about someone who was given
+        // no say in it.
+        const busy = (data as any)?.rejectReason === 'busy';
         // Must go through endCall, not a bare disconnect. Declining only sets
         // status='rejected'; nothing deletes the offer document, so leaving here
         // without clearing it stranded a stale offer on the receiver and left
         // the /calls history record stuck at status 'active' forever.
-        handleEndCall();
-      } else if (status === null && callStep === 'talking') {
-        // Offer already gone, but the history record still needs closing.
-        handleEndCall();
+        endCallWithNotice(
+          busy ? 'Line busy' : 'Call declined',
+          busy
+            ? `${profile.name} is already on another call. Try again in a moment.`
+            : `${profile.name} declined the call.`
+        );
+        return;
       }
 
-      // Caller records receiver heartbeat updates (immune to clock drift)
-      const callData = data as any;
-      if (status === 'accepted' && callData?.receiverHeartbeat) {
-        if (lastObservedReceiverHeartbeatRef.current === null || callData.receiverHeartbeat !== lastObservedReceiverHeartbeatRef.current) {
-          lastObservedReceiverHeartbeatRef.current = callData.receiverHeartbeat;
-          lastObservedReceiverTimeRef.current = Date.now();
+      if (status === 'taken') {
+        // Another caller now owns the ring slot. While we were still ringing
+        // that means our offer was displaced and will never be answered, so
+        // say so now instead of leaving the caller listening to a ringtone for
+        // the full forty-five seconds with nothing at the other end.
+        //
+        // Once the call is up it means nothing: the conversation runs on the
+        // per-call record, its heartbeats and the RTC session, none of which a
+        // stranger's offer can touch. Ending here is what used to let a third
+        // person's unanswered call hang up on two people mid-sentence.
+        if (callStep !== 'talking') {
+          endCallWithNotice(
+            'Unavailable',
+            `${profile.name} could not take this call. Please try again in a moment.`
+          );
         }
+        return;
+      }
+
+      if (status === 'calling') {
+        setCallerStatus('calling');
+        return;
+      }
+
+      // 'gone' -- no offer in the slot. Expected before our own write lands, so
+      // it only means something once the call is up: the receiver hung up.
+      setCallerStatus(null);
+      if (callStep === 'talking') {
+        // Offer already gone, but the history record still needs closing.
+        void endCall();
       }
     });
 
     return () => {
       unsubStatus();
     };
-  }, [isCaller, matchData?.uid, callStep]);
+  }, [isCaller, ringSlotUid, callRef, callStep]);
 
-  // 2c. Send periodic local heartbeat to keep the call signaling document alive
+  // 2c. Send periodic local heartbeat on the call's own record, so the peer can
+  // tell a quiet line from a dead one.
   React.useEffect(() => {
     if (!isCallActive || !roomId) return;
-    const callDocId = isCaller ? matchData?.uid : auth.currentUser?.uid;
-    if (!callDocId) return;
 
     const sendHeartbeat = () => {
       import('../services/liveRoomService').then(({ updateCallHeartbeat }) => {
-        updateCallHeartbeat(callDocId, isCaller ? 'caller' : 'receiver');
+        updateCallHeartbeat(roomId, isCaller ? 'caller' : 'receiver');
       });
     };
 
     sendHeartbeat();
     const interval = setInterval(sendHeartbeat, 5000);
     return () => clearInterval(interval);
-  }, [isCallActive, isCaller, roomId, matchData?.uid]);
+  }, [isCallActive, isCaller, roomId]);
 
   // 2d. Auto-hangup if peer is offline on Agora for more than 10 seconds
   React.useEffect(() => {
@@ -548,8 +810,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
     const timeout = setTimeout(() => {
       console.log("[CallScreen] Peer connection timeout. Terminating call.");
-      Alert.alert('Call ended', 'The connection to the other person was lost.', [{ text: 'OK' }]);
-      handleEndCall();
+      endCallWithNotice('Call ended', 'The connection to the other person was lost.');
     }, 10000);
 
     return () => clearTimeout(timeout);
@@ -579,24 +840,34 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     lastObservedReceiverHeartbeatRef.current = null;
 
     const interval = setInterval(() => {
+      // Judge the peer only once they have actually been heard from. If their
+      // beats never arrive at all -- a call record listener that could not be
+      // established, say -- silence means "no information", not "they are
+      // gone", and hanging up on a working call for want of a status document
+      // is the worse failure. A peer who genuinely never joins is caught by
+      // the RTC peer timeout above instead.
+      const lastBeat = isCaller ? lastObservedReceiverHeartbeatRef.current : lastObservedCallerHeartbeatRef.current;
+      if (lastBeat === null) return;
+
       const now = Date.now();
       const lastTime = isCaller ? lastObservedReceiverTimeRef.current : lastObservedCallerTimeRef.current;
       const elapsed = now - lastTime;
 
-      if (elapsed > 20000) {
-        setIsPeerUnstable(true);
-      } else {
-        setIsPeerUnstable(false);
-      }
+      const unstable = elapsed > 20000;
+      setIsPeerUnstable(unstable);
+      // Mirrored into a ref because the billing loop below reads it from inside
+      // a `setInterval` callback that is created once and never re-created --
+      // it closed over the value at the moment the call started, which is
+      // always `false`. The pause it is supposed to apply therefore never
+      // happened, and both parties kept paying through an outage.
+      isPeerUnstableRef.current = unstable;
 
       if (elapsed > 45000) {
         console.log(`[CallScreen] Heartbeat timed out after ${elapsed}ms. Ending call.`);
-        Alert.alert(
+        endCallWithNotice(
           'Call ended',
-          isCaller ? `${profile.name}'s connection was lost.` : "The caller's connection was lost.",
-          [{ text: 'OK' }]
+          isCaller ? `${profile.name}'s connection was lost.` : "The caller's connection was lost."
         );
-        handleEndCall();
       }
     }, 1000);
 
@@ -613,12 +884,27 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     const billingRatePerSec =
       (isVideo ? globalSettings.videoCallRatePerMin : globalSettings.voiceCallRatePerMin) / 60;
 
+    /**
+     * One tick immediately, before the fifteen-second cadence starts.
+     *
+     * The first tick bills nothing -- it only starts the server's clock -- but
+     * it is also what stamps `inCallSince` on both participants, and that stamp
+     * is the only signal telling everyone else these two are busy. Waiting for
+     * the regular cadence left a fifteen-second window at the start of every
+     * call in which both people still read as free: long enough for a third
+     * party to dial straight into a conversation that had only just begun,
+     * which is the most likely moment for someone to be calling them.
+     */
+    void processCallBilling(roomId).catch((e) =>
+      console.warn('[Billing Engine] Opening tick failed:', e?.message)
+    );
+
     const billingInterval = setInterval(async () => {
       const user = auth.currentUser;
       if (!user) return;
 
       // Pause ticks while the peer link is down so neither side pays for dead air.
-      if (isPeerUnstable) {
+      if (isPeerUnstableRef.current) {
         console.log("[CallScreen] Peer connection is unstable. Pausing billing ticks.");
         return;
       }
@@ -649,14 +935,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
           if (result.hasInsufficientFunds) {
             console.warn(`[Billing Engine] Call disconnected: User ran out of coins.`);
-            Alert.alert(
+            endCallWithNotice(
               'Call ended',
               isCaller
                 ? 'You have run out of coins. Top up to keep talking.'
-                : 'The caller has run out of coins.',
-              [{ text: 'OK' }]
+                : 'The caller has run out of coins.'
             );
-            handleEndCall();
             return;
           }
         } catch (error: any) {
@@ -680,6 +964,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       clearInterval(billingInterval);
 
       const remainingSeconds = syncIntervalRef.current;
+      // Consumed, so it cannot be paid out twice. This effect re-runs whenever
+      // its inputs change -- `globalSettings` is a live subscription, so an
+      // admin editing the rates mid-call is enough -- and the counter used to
+      // survive the teardown, so the seconds flushed here were then counted
+      // again by the next interval's first batch.
+      syncIntervalRef.current = 0;
       const user = auth.currentUser;
 
       // Final tick so the last partial interval is charged from the server clock.
@@ -751,23 +1041,45 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             timestamp: null,
           }}
           onAccept={() => {
+            if (!ringSlotUid || !callRef.callerUid) return;
             // callStartRef is deliberately NOT set here from Date.now(): this
             // device's own clock can be skewed from the caller's, which
             // showed up as the two timers being permanently offset rather
             // than just briefly out of step. The incoming_calls listener
             // above sets it once the write's serverTimestamp resolves, so
             // both sides read the same instant off the same clock.
-            if (auth.currentUser) {
-              acceptCallOffer(auth.currentUser.uid).catch(e =>
-                console.warn('Failed to accept call:', e)
-              );
-            }
-            setIsPending(false);
-            setIsConnecting(true);
+            //
+            // The acceptance is recorded against *this* offer or not at all.
+            // It used to be written straight into the ring slot whatever was in
+            // it, so a second caller arriving in the moment between the phone
+            // ringing and the tap got accepted instead: this device joined the
+            // first caller's room while the newcomer was told they were through,
+            // leaving two people in empty rooms and the newcomer paying for it.
+            // The screen still moves on immediately -- the answer has to feel
+            // instant -- and unwinds if the offer turns out to be gone.
+            acceptCallOffer(ringSlotUid, callRef).catch((e) => {
+              console.warn('Failed to accept call:', e);
+              if (e instanceof CallGoneError) {
+                endCallWithNotice('Call ended', `${profile.name} is no longer on the line.`);
+              } else {
+                endCallWithNotice(
+                  'Could not answer',
+                  'Something went wrong answering that call. Please try again.'
+                );
+              }
+            });
           }}
           onReject={() => {
-            if (auth.currentUser) {
-              rejectCallOffer(auth.currentUser.uid).catch(e =>
+            // Claim the teardown before writing: the rejection shows up on this
+            // device's own listener almost immediately (Firestore surfaces the
+            // local write before the server acknowledges it), and that listener
+            // also leaves the screen. Without the claim both fire and the
+            // navigator pops twice, landing the user a screen further back than
+            // they were when the phone rang.
+            if (endedRef.current) return;
+            endedRef.current = true;
+            if (ringSlotUid && callRef.callerUid) {
+              rejectCallOffer(ringSlotUid, callRef).catch(e =>
                 console.warn('Failed to reject call:', e)
               );
             }

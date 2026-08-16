@@ -390,7 +390,12 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                     activeOpacity={0.84}
                     style={styles.chatButton}
                     hitSlop={tap42}
-                    onPress={() => navigate('Chat', { profileName: profile.name })}
+                    // `matchData` is what carries the peer's uid, and ChatScreen
+                    // builds its chatId from it. Navigating with only a display
+                    // name left targetUid undefined, so chatId was '' and every
+                    // send died on the "conversation is not ready yet" guard --
+                    // chat was unusable from this screen entirely.
+                    onPress={() => navigate('Chat', { profileName: profile.name, matchData: profile })}
                   >
                     <MaterialIcons name="chat-bubble-outline" size={18} color="#4B0054" />
                     <Text style={styles.chatButtonText}>Chat</Text>

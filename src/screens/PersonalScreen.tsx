@@ -111,8 +111,10 @@ function ActionButtonsBar({
           accessibilityRole="button"
           accessibilityLabel={`Call ${node.name}, ${rates.call} coins per minute`}
         >
-          <MaterialIcons name="phone" size={18} color="#6E5211" />
-          <PriceStars amount={rates.call} tone="gold" />
+          {/* Light foreground to match the video pill's fill — the dark gold
+              this used was for the cream background it no longer has. */}
+          <MaterialIcons name="phone" size={18} color="#FFF" />
+          <PriceStars amount={rates.call} tone="light" />
         </TouchableOpacity>
       )}
 
@@ -1489,7 +1491,7 @@ const styles = StyleSheet.create({
   buttonsRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
     width: '100%',
   },
   // Applied over callPillBtn / videoPillBtn for seeded demo profiles. These must
@@ -1497,17 +1499,23 @@ const styles = StyleSheet.create({
   // real, callable profile.
   callPillBtn: {
     flex: 1,
+    // Without minWidth:0 a flex child will not shrink below the intrinsic width
+    // of its text, so these two pills kept their full content width and ran off
+    // the right edge of the card -- the video price was clipped mid-glyph.
+    minWidth: 0,
     height: 38,
     borderRadius: 19,
-    backgroundColor: '#FFF9E8',
+    // Matches videoPillBtn by request. The cream-and-gold treatment made voice
+    // look like the secondary option rather than simply the cheaper one.
+    backgroundColor: '#52104F',
     borderWidth: 1.5,
-    borderColor: '#E4CC8B',
+    borderColor: '#52104F',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     // Tight: these pills sit two-across inside an already narrow card and now
     // carry a price as well as an icon and label.
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     gap: 3,
     ...Platform.select({
       android: { elevation: 2 },
@@ -1522,18 +1530,25 @@ const styles = StyleSheet.create({
     flexShrink: 0,
   },
   pillPriceText: {
-    fontSize: 12.5,
+    // 12.5 was wide enough that two pills plus their icons could not fit the
+    // card on a 411dp handset.
+    fontSize: 11.5,
     fontWeight: '800',
   },
   videoPillBtn: {
     flex: 1,
+    minWidth: 0,
     height: 38,
     borderRadius: 19,
     backgroundColor: '#52104F',
+    // Matches callPillBtn's 1.5 border so both pills end up the same height and
+    // width; without it the two differed by 3px and sat unevenly.
+    borderWidth: 1.5,
+    borderColor: '#52104F',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 8,
     gap: 3,
     ...Platform.select({
       android: { elevation: 3 },

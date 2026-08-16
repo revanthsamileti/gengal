@@ -1,4 +1,5 @@
-import { Alert, Linking, PermissionsAndroid, Platform } from 'react-native';
+import { Linking, PermissionsAndroid, Platform } from 'react-native';
+import { Alert } from '../components/CustomAlert';
 
 /**
  * Up-front microphone/camera gating for outbound calls.

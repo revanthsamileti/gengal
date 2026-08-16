@@ -158,3 +158,7 @@ mobile_screen.png
 metro_log.txt
 backend_log.txt
 backend/debug_events.log
+
+# Point-in-time snapshots of deployed rules. Never current; check live state
+# with the Firebase CLI instead of trusting a file on disk.
+firestore.rules.snapshot-*

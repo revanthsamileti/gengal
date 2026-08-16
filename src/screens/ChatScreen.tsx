@@ -89,14 +89,24 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
   );
 
   const currentUid = auth.currentUser?.uid;
-  const targetUid = matchData?.uid;
+  // Callers arrive with the peer's uid in one of two shapes: inside `matchData`
+  // (profile cards, the conversation list) or as a top-level `targetUid`
+  // (ExpertRoomScreen's private-match hand-off). Reading only the first meant
+  // the second produced an empty chatId, and every send died on the "not ready
+  // yet" guard below. Accept both rather than making every caller conform.
+  const targetUid = matchData?.uid ?? route?.params?.targetUid;
   const chatId = (currentUid && targetUid) ? getChatId(currentUid, targetUid) : '';
+
+  // Newest peer message already marked read, so a snapshot carrying nothing new
+  // from them (our own send, a typing change) costs no write.
+  const lastReadPeerMessageRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!chatId) {
       setMessages([]);
       return;
     }
+    lastReadPeerMessageRef.current = null;
 
     // Clear the unread badge as soon as the conversation is open.
     // Non-fatal: if this fails the badge may lag, but reading continues.
@@ -108,6 +118,24 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
       chatId,
       (fetchedMessages) => {
         setListenerError(false);
+
+        // Messages that arrive while the screen is already open increment the
+        // recipient's counter exactly as they do when it is closed, and this
+        // ran on mount only -- so reading a conversation as it happened left a
+        // badge on the Messages tab for messages that were already on screen,
+        // and it stayed there until the user backed out and came in again.
+        const newestFromPeer = [...fetchedMessages]
+          .reverse()
+          .find(m => m.senderId !== currentUid);
+        if (
+          currentUid &&
+          newestFromPeer?.id &&
+          newestFromPeer.id !== lastReadPeerMessageRef.current
+        ) {
+          lastReadPeerMessageRef.current = newestFromPeer.id;
+          markConversationRead(chatId, currentUid);
+        }
+
         const formatted: Message[] = fetchedMessages.map(m => ({
           id: m.id as any,
           from: m.senderId === currentUid ? 'me' : 'them',
@@ -208,7 +236,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
           <TouchableOpacity hitSlop={tap40} style={styles.headerButton} activeOpacity={0.78} onPress={() => goBack ? goBack() : navigate('Home')}
             accessibilityRole="button"
             accessibilityLabel="Go back">
-            <MaterialIcons name="arrow-back" size={22} color="#5A075F" />
+            <MaterialIcons name="arrow-back" size={22} color="#8C5566" />
           </TouchableOpacity>
           <View style={styles.headerProfile}>
             {/* Avatar hierarchy: avatarData (avatar builder) → photo URI → icon
@@ -220,14 +248,20 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
               <Image source={{ uri: profile.uri }} style={styles.avatar} />
             ) : (
               <View style={[styles.avatar, styles.avatarEmpty]}>
-                <MaterialIcons name="person" size={26} color="#C9BDB2" />
+                <MaterialIcons name="person" size={26} color="#D5BFB6" />
               </View>
             )}
             <View style={styles.headerCopy}>
-              <Text style={styles.name}>{profile.name}</Text>
+              {/* Truncate rather than let a long name push the call buttons
+                  off the right edge -- the container already has minWidth 0,
+                  but without numberOfLines the text still forces the row wider. */}
+              <Text style={styles.name} numberOfLines={1}>{profile.name}</Text>
               <View style={styles.statusRow}>
                 <View style={styles.onlineDot} />
-                <Text style={styles.statusText}>Online now</Text>
+                {/* Single line: the two price pills leave this column narrow,
+                    and without it "Online now" wrapped and pushed the header
+                    taller than the name it sits under. */}
+                <Text style={styles.statusText} numberOfLines={1}>Online now</Text>
               </View>
             </View>
           </View>
@@ -242,8 +276,8 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
               accessibilityState={{ disabled: !canCall || callLocked }}
               onPress={() => startCall('call')}
             >
-              <MaterialIcons name="phone" size={16} color="#FFF" />
-              <CallPriceTag mode="call" />
+              <MaterialIcons name="phone" size={16} color="#FFF7FF" />
+              <CallPriceTag mode="call" bare textColor="#FFF7FF" />
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.headerAction, styles.headerActionDark, (!canCall || callLocked) && { opacity: 0.5 }]}
@@ -256,7 +290,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
               onPress={() => startCall('video')}
             >
               <MaterialIcons name="videocam" size={16} color="#FFF7FF" />
-              <CallPriceTag mode="video" />
+              <CallPriceTag mode="video" bare textColor="#FFF7FF" />
             </TouchableOpacity>
           </View>
         </View>
@@ -270,23 +304,23 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
           contentContainerStyle={styles.messages}
         >
           <LinearGradient
-            colors={['#FFFDF8', '#F7EEDF']}
+            colors={['#FFFDF8', '#F7EDE4']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={styles.matchBanner}
           >
-            <MaterialIcons name="favorite" size={17} color="#7E6507" />
+            <MaterialIcons name="favorite" size={17} color="#C08497" />
             <Text style={styles.matchText}>Private match connected</Text>
           </LinearGradient>
 
           {listenerError ? (
             <View style={styles.emptyChat}>
-              <MaterialIcons name="cloud-off" size={40} color="#D8C9AE" />
+              <MaterialIcons name="cloud-off" size={40} color="#DDC9BF" />
               <Text style={styles.emptyChatText}>Could not load messages. Check your connection.</Text>
             </View>
           ) : messages.length === 0 ? (
             <View style={styles.emptyChat}>
-              <MaterialIcons name="chat-bubble-outline" size={40} color="#D8C9AE" />
+              <MaterialIcons name="chat-bubble-outline" size={40} color="#DDC9BF" />
               <Text style={styles.emptyChatText}>Say hello to start the conversation</Text>
             </View>
           ) : null}
@@ -304,7 +338,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
                     <Image source={{ uri: profile.uri }} style={styles.messageAvatar} />
                   ) : (
                     <View style={[styles.messageAvatar, styles.messageAvatarEmpty]}>
-                      <MaterialIcons name="person" size={16} color="#C9BDB2" />
+                      <MaterialIcons name="person" size={16} color="#D5BFB6" />
                     </View>
                   )
                 ) : null}
@@ -326,7 +360,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
                 <Image source={{ uri: profile.uri }} style={styles.messageAvatar} />
               ) : (
                 <View style={[styles.messageAvatar, styles.messageAvatarEmpty]}>
-                  <MaterialIcons name="person" size={16} color="#C9BDB2" />
+                  <MaterialIcons name="person" size={16} color="#D5BFB6" />
                 </View>
               )}
               <View style={[styles.bubble, styles.theirBubble]}>
@@ -390,18 +424,18 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     width: '100%',
     maxWidth: 430,
-    backgroundColor: '#FFFCF7',
+    backgroundColor: '#FFFBF4',
   },
   header: {
     minHeight: 76,
-    paddingHorizontal: 14,
+    paddingHorizontal: 12,
     paddingVertical: 10,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
     borderBottomWidth: 1,
-    borderBottomColor: '#F0E7DA',
-    backgroundColor: '#FFFCF7',
+    borderBottomColor: '#F0E4D8',
+    backgroundColor: '#FFFDF8',
   },
   headerButton: {
     width: 40,
@@ -409,7 +443,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFF8EA',
+    backgroundColor: '#FBF2E8',
   },
   headerProfile: {
     flex: 1,
@@ -423,19 +457,19 @@ const styles = StyleSheet.create({
     height: 44,
     borderRadius: 22,
     borderWidth: 2,
-    borderColor: '#D8BD57',
+    borderColor: '#E8C6C1',
   },
   avatarEmpty: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#F2ECE4',
+    backgroundColor: '#F5EDE5',
   },
   headerCopy: {
     flex: 1,
     minWidth: 0,
   },
   name: {
-    color: '#4B0054',
+    color: '#8C5566',
     fontFamily: 'serif',
     fontSize: 22,
     fontWeight: '900',
@@ -453,23 +487,37 @@ const styles = StyleSheet.create({
     backgroundColor: '#73BB58',
   },
   statusText: {
-    color: '#7D8B70',
+    color: '#9E8C82',
     fontSize: 10,
     fontWeight: '900',
   },
   headerActions: {
-    flexDirection: 'column',
-    gap: 7,
+    // Was `column`, which stacked two 38dp pills plus a 7dp gap into a header
+    // whose minHeight is 76 -- so the second one spilled over the bottom
+    // border. Side by side also stops the two heaviest elements on the screen
+    // from towering over the name they belong to.
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
   headerAction: {
-    height: 38,
-    minWidth: 38,
-    paddingHorizontal: 10,
-    borderRadius: 19,
+    height: 34,
+    // Tight horizontally on purpose: two priced pills plus a back button and an
+    // avatar leave the name very little room on a narrow handset.
+    paddingHorizontal: 8,
+    borderRadius: 17,
     flexDirection: 'row',
-    gap: 4,
+    gap: 3,
     alignItems: 'center',
     justifyContent: 'center',
+    // Voice and video share one colour by request: the two are equal-weight
+    // actions, so giving voice a quieter tint made it read as the lesser
+    // option when it is simply the cheaper one.
+    //
+    // Deliberately held at the brand purple and NOT re-tinted with the red
+    // velvet palette around it: these two are the only controls on this screen
+    // that spend money, and keeping them the colour they are everywhere else
+    // in the app is worth more than matching the surrounding theme.
     backgroundColor: '#7A256D',
     borderWidth: 1,
     borderColor: '#7A256D',
@@ -490,10 +538,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 7,
     borderWidth: 1,
-    borderColor: '#EAD8A9',
+    borderColor: '#EBD9D2',
   },
   matchText: {
-    color: '#6B5B24',
+    color: '#8C5566',
     fontSize: 11,
     fontWeight: '900',
     letterSpacing: 0.6,
@@ -515,7 +563,7 @@ const styles = StyleSheet.create({
   messageAvatarEmpty: {
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#F2ECE4',
+    backgroundColor: '#F5EDE5',
   },
   bubble: {
     maxWidth: '76%',
@@ -526,38 +574,38 @@ const styles = StyleSheet.create({
   },
   theirBubble: {
     borderBottomLeftRadius: 6,
-    backgroundColor: '#FFFDF8',
+    backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: '#EFE4D3',
+    borderColor: '#F0E2DA',
   },
   myBubble: {
     borderBottomRightRadius: 6,
-    backgroundColor: '#4B0054',
+    backgroundColor: '#C08497',
     boxShadow: Platform.OS === 'web' ? '0 8px 16px rgba(75, 0, 84, 0.16)' : undefined,
   },
   bubbleText: {
-    color: '#6B5F57',
+    color: '#5F5048',
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '700',
   },
   typingText: {
-    color: '#A59A91',
+    color: '#A99A90',
     fontSize: 13,
     lineHeight: 18,
     fontWeight: '700',
     fontStyle: 'italic',
   },
   myBubbleText: {
-    color: '#FFF7FF',
+    color: '#FFFFFF',
   },
   messageTime: {
-    color: '#AAA098',
+    color: '#A99A90',
     fontSize: 9,
     fontWeight: '800',
   },
   myMessageTime: {
-    color: '#D8C7DC',
+    color: '#F5E3E7',
   },
   quickRow: {
     paddingHorizontal: 14,
@@ -572,12 +620,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 8,
-    backgroundColor: '#FFF5D8',
+    backgroundColor: '#FDF6EF',
     borderWidth: 1,
-    borderColor: '#E1C460',
+    borderColor: '#EBDCCF',
   },
   quickText: {
-    color: '#806806',
+    color: '#8C5566',
     fontSize: 10,
     fontWeight: '900',
   },
@@ -590,19 +638,19 @@ const styles = StyleSheet.create({
     gap: 8,
     borderTopWidth: 1,
     borderTopColor: '#F0E7DA',
-    backgroundColor: '#FFFCF7',
+    backgroundColor: '#FFFDF8',
   },
   input: {
     flex: 1,
     height: 42,
     borderRadius: 21,
     paddingHorizontal: 15,
-    color: '#4B0054',
+    color: '#5F5048',
     fontSize: 13,
     fontWeight: '800',
-    backgroundColor: '#FFFDF8',
+    backgroundColor: '#FFFFFF',
     borderWidth: 1,
-    borderColor: '#EFE4D3',
+    borderColor: '#F0E2DA',
   },
   sendButton: {
     width: 42,
@@ -610,10 +658,10 @@ const styles = StyleSheet.create({
     borderRadius: 21,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#BCA9BF',
+    backgroundColor: '#E0CBC6',
   },
   sendButtonActive: {
-    backgroundColor: '#4B0054',
+    backgroundColor: '#C08497',
   },
   emptyChat: {
     alignItems: 'center',
@@ -621,7 +669,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   emptyChatText: {
-    color: '#B0A49A',
+    color: '#A99A90',
     fontSize: 13,
     fontWeight: '700',
     textAlign: 'center',

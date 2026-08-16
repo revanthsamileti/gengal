@@ -13,6 +13,37 @@ service cloud.firestore {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
 
+    // An offer in /incoming_calls that nobody is waiting on any more: already
+    // answered or declined, or left ringing for longer than any caller waits.
+    // Mirrors OFFER_EXPIRY_MS in src/services/liveRoomService.ts.
+    function offerIsStale() {
+      // Every clause guards its own field first: a missing key is an evaluation
+      // error, and an error denies the whole write -- which here would mean a
+      // half-written offer document could lock a receiver out of being called.
+      return !('status' in resource.data)
+        || resource.data.status != 'calling'
+        || !('timestamp' in resource.data)
+        || resource.data.timestamp == null
+        || request.time > resource.data.timestamp + duration.value(60, 's');
+    }
+
+    // Whether someone is mid-call, from the one signal a client cannot forge:
+    // `inCallSince` is written only by the billing endpoint, from the server's
+    // own clock, and is refreshed for as long as the call runs. It expires on
+    // its own (mirrors CALL_BUSY_TTL_MS in src/services/userService.ts) so a
+    // call that ends in a crash cannot leave someone permanently uncallable.
+    //
+    // The client checks this too, before it even opens the call screen, but it
+    // deliberately fails open on a read error and cannot see the case where two
+    // people dial the same idle person in the same instant. This is the copy
+    // that actually holds.
+    function receiverIsOnCall(receiverId) {
+      return exists(/databases/$(database)/documents/users/$(receiverId))
+        && get(/databases/$(database)/documents/users/$(receiverId))
+             .data.get('inCallSince', request.time - duration.value(1, 'h'))
+           > request.time - duration.value(45, 's');
+    }
+
     // Public profile fields only. Phone numbers and push tokens live in
     // /user_private, password material in /user_credentials, because a document
     // that any signed-in user can read must not carry private data.
@@ -191,25 +222,37 @@ service cloud.firestore {
             || resource.data.callerUid == request.auth.uid);
       allow create: if signedIn()
         && request.resource.data.callerUid == request.auth.uid
-        && request.resource.data.receiverUid == receiverId;
+        && request.resource.data.receiverUid == receiverId
+        && !receiverIsOnCall(receiverId);
       // acceptCallOffer/rejectCallOffer are merge writes by the *receiver*, and
       // for a merge write `request.resource.data` is the full post-merge
       // document -- so callerUid there is still the original caller's uid, not
       // the receiver's. The receiver-or-original-caller clause is what makes
-      // those writes (and heartbeats) legal.
+      // those writes legal.
       //
-      // The second clause lets a *new* caller overwrite an existing document,
-      // mirroring `create`'s own condition ("last call wins"). Without it, any
-      // offer left uncleared -- a crash before cleanup, a swallowed
-      // clearCallOffer failure, both real and already documented elsewhere in
-      // this codebase -- permanently blocked every other caller from ever
-      // reaching that receiver again, since neither of them was the stale
-      // document's caller.
+      // The third clause lets a *new* caller take over the slot, and its
+      // conditions are the only defence the first caller has. A client cannot
+      // read an offer belonging to somebody else -- the read rule above sees to
+      // that, and rightly, since the document carries a third party's name,
+      // avatar and room id -- so no caller can judge for itself whether the
+      // line is free. This rule is where that judgement has to live.
+      //
+      // It used to be an unconditional "last call wins", which meant a second
+      // caller silently destroyed the first caller's live offer in place. The
+      // first caller kept watching a document that was now a stranger's call;
+      // the receiver rang for one person and answered another; and a call that
+      // was already in progress could be hung up by a third party who never got
+      // through. Requiring the receiver to be free and the existing offer to be
+      // stale closes all of that, while keeping the property that made the
+      // unconditional version attractive: an offer abandoned by a crash still
+      // ages out, so nobody is ever permanently unreachable.
       allow update: if signedIn()
         && (
           request.auth.uid == receiverId || resource.data.callerUid == request.auth.uid
           || (request.resource.data.callerUid == request.auth.uid
-              && request.resource.data.receiverUid == receiverId)
+              && request.resource.data.receiverUid == receiverId
+              && !receiverIsOnCall(receiverId)
+              && offerIsStale())
         );
     }
 

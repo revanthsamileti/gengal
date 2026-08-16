@@ -9,6 +9,8 @@ import {
   writeBatch,
   increment,
   limitToLast,
+  limit,
+  where,
   updateDoc,
   setDoc,
   deleteDoc,
@@ -262,6 +264,66 @@ export const markConversationRead = async (chatId: string, uid: string) => {
  * query payload grows with the conversation: a chat active for a year delivers
  * a year of history on every screen mount.
  */
+/** A row in the conversation list. */
+export interface Conversation {
+  id: string;
+  /** The other participant. Derived from the id, which encodes both uids. */
+  peerUid: string;
+  lastMessage: string;
+  lastUpdatedAt: any;
+  /** Messages the signed-in user has not opened yet. */
+  unreadCount: number;
+}
+
+/**
+ * The signed-in user's conversations, most recently active first.
+ *
+ * Ordered by `lastUpdatedAt` rather than by document id so a reply bumps the
+ * thread to the top, which is the only ordering a chat list can have without
+ * looking broken.
+ *
+ * Conversations with no `lastMessage` are filtered out: opening a chat screen
+ * creates the parent document before anything is said (the message rules need
+ * it to exist first), so without this the list would fill with empty threads
+ * for everyone the user merely looked at.
+ */
+export const subscribeToConversations = (
+  uid: string,
+  callback: (conversations: Conversation[]) => void,
+  onError?: (error: Error) => void,
+) => {
+  const q = query(
+    collection(db, 'chats'),
+    where('participants', 'array-contains', uid),
+    orderBy('lastUpdatedAt', 'desc'),
+    limit(50),
+  );
+
+  return onSnapshot(
+    q,
+    (snap) => {
+      const rows = snap.docs
+        .map((d) => {
+          const data = d.data() as any;
+          const participants: string[] = Array.isArray(data.participants)
+            ? data.participants
+            : d.id.split('_');
+          return {
+            id: d.id,
+            peerUid: participants.find((p) => p !== uid) ?? '',
+            lastMessage: data.lastMessage ?? '',
+            lastUpdatedAt: data.lastUpdatedAt ?? null,
+            // Written by sendMessage, cleared by markConversationRead.
+            unreadCount: Number(data[`unreadFor_${uid}`] ?? 0),
+          } as Conversation;
+        })
+        .filter((c) => c.peerUid && c.lastMessage);
+      callback(rows);
+    },
+    snapshotError('chat:conversations', onError, () => callback([])),
+  );
+};
+
 export const MESSAGE_PAGE_SIZE = 50;
 
 /**

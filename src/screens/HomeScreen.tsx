@@ -56,7 +56,7 @@ function ModeButton({
       <MaterialIcons
         name={isVideo ? 'videocam' : 'phone'}
         size={13}
-        color={isVideo ? '#FFFFFF' : '#FFFFFF'}
+        color="#FFFFFF"
       />
       <Text style={[styles.modeText, isVideo && styles.modeTextVideo]}>
         {isVideo ? 'Video' : 'Call'}
@@ -746,21 +746,20 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
-    backgroundColor: '#8E2A6B',
+    // Voice now uses the video button's colour, by request. They are equal
+    // actions rather than a primary and a secondary, so a single colour reads
+    // better than the two-tone split that was here.
+    backgroundColor: '#C2477E',
     borderWidth: 1,
-    borderColor: '#A63C80',
-    boxShadow: Platform.OS === 'web' ? '0 6px 12px rgba(142, 42, 107, 0.3)' : undefined,
-    shadowColor: '#8E2A6B',
+    borderColor: '#D96297',
+    boxShadow: Platform.OS === 'web' ? '0 6px 12px rgba(194, 71, 126, 0.3)' : undefined,
+    shadowColor: '#C2477E',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.28,
     shadowRadius: 8,
     elevation: 3,
   },
-  modeButtonVideo: {
-    backgroundColor: '#C2477E',
-    borderColor: '#D96297',
-    shadowColor: '#C2477E',
-  },
+  modeButtonVideo: {},
   modeText: {
     color: '#FFFFFF',
     fontSize: 9,

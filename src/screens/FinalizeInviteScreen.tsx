@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Alert,
   Animated,
   PanResponder,
   Platform,
@@ -15,6 +14,7 @@ import {
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { Alert } from '../components/CustomAlert';
 import { collection, getDocs, query, where } from 'firebase/firestore';
 import DiamondBadge from '../components/DiamondBadge';
 import GengalAvatar, { AvatarData, DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';

@@ -10,6 +10,8 @@ import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
 import { auth, db } from '../config/firebase';
 import { collection, query, where, orderBy, onSnapshot, limit } from 'firebase/firestore';
+import { subscribeToConversations, Conversation } from '../services/chatService';
+import { getUserProfile, UserProfile } from '../services/userService';
 
 type Props = { navigate: (s: string, p?: any) => void };
 
@@ -37,8 +39,13 @@ function CallRow({ record, index }: { record: CallRecord; index: number }) {
     ]).start();
   }, []);
 
-  const mins = Math.floor(record.durationSeconds / 60);
-  const secs = record.durationSeconds % 60;
+  // durationSeconds is a float: the server bills against its own clock and
+  // stores the exact elapsed time, so `% 60` produced labels like "1.471264s".
+  // Round to whole seconds for display -- the precise value still drives
+  // billing, it just has no business being shown to a person.
+  const totalSecs = Math.max(0, Math.round(record.durationSeconds));
+  const mins = Math.floor(totalSecs / 60);
+  const secs = totalSecs % 60;
   const durationLabel = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
   const isVideo = record.mode === 'video';
   const isCaller = record.role === 'caller';
@@ -95,13 +102,16 @@ function CallRow({ record, index }: { record: CallRecord; index: number }) {
           {isCaller && record.coinsSpent > 0 && (
             <View style={styles.statPill}>
               <MaterialIcons name="monetization-on" size={11} color="#D49A0B" />
-              <Text style={styles.statText}>-{record.coinsSpent}</Text>
+              {/* Two decimals rather than the raw float: a per-second rate
+                  yields values like 0.735632, and "-0.735632" on a call row is
+                  noise. Short calls still show a non-zero cost. */}
+              <Text style={styles.statText}>-{record.coinsSpent.toFixed(2)}</Text>
             </View>
           )}
           {!isCaller && record.heartsEarned > 0 && (
             <View style={[styles.statPill, styles.heartPill]}>
               <MaterialIcons name="favorite" size={11} color="#C9504B" />
-              <Text style={[styles.statText, { color: '#C9504B' }]}>+{record.heartsEarned}</Text>
+              <Text style={[styles.statText, { color: '#C9504B' }]}>+{Math.round(record.heartsEarned)}</Text>
             </View>
           )}
         </View>
@@ -114,6 +124,52 @@ export default function ActivityScreen({ navigate }: Props) {
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+
+  const [tab, setTab] = useState<'calls' | 'chats'>('calls');
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [chatsLoading, setChatsLoading] = useState(true);
+  const [chatsError, setChatsError] = useState(false);
+  // uid -> profile, so a conversation row can show a face and a name. The chat
+  // document stores only participant uids; looking each peer up once and
+  // caching avoids re-reading the same profile on every snapshot.
+  const [peers, setPeers] = useState<Record<string, UserProfile>>({});
+
+  useEffect(() => {
+    const uid = auth.currentUser?.uid;
+    if (!uid) { setChatsLoading(false); return; }
+    const unsubscribe = subscribeToConversations(
+      uid,
+      (rows) => {
+        setChatsError(false);
+        setConversations(rows);
+        setChatsLoading(false);
+      },
+      () => {
+        // Surfaced rather than swallowed: an empty list and a failed listener
+        // look identical, and "no chats yet" is the wrong thing to tell someone
+        // whose conversations simply could not be read.
+        setChatsError(true);
+        setChatsLoading(false);
+      },
+    );
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    // Fetch only peers not already cached, so this does nothing on the common
+    // re-render and never re-reads a profile it has.
+    const missing = conversations.map(c => c.peerUid).filter(uid => uid && !peers[uid]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const fetched = await Promise.all(missing.map(uid => getUserProfile(uid).catch(() => null)));
+      if (cancelled) return;
+      const next: Record<string, UserProfile> = {};
+      missing.forEach((uid, i) => { if (fetched[i]) next[uid] = fetched[i] as UserProfile; });
+      if (Object.keys(next).length) setPeers(prev => ({ ...prev, ...next }));
+    })();
+    return () => { cancelled = true; };
+  }, [conversations, peers]);
 
   useEffect(() => {
     const uid = auth.currentUser?.uid;
@@ -200,9 +256,20 @@ export default function ActivityScreen({ navigate }: Props) {
     return () => { unsubCaller(); unsubReceiver(); };
   }, []);
 
-  const totalMins = Math.floor(calls.reduce((s, c) => s + c.durationSeconds, 0) / 60);
-  const totalCoins = calls.filter(c => c.role === 'caller').reduce((s, c) => s + c.coinsSpent, 0);
-  const totalHearts = calls.filter(c => c.role === 'receiver').reduce((s, c) => s + c.heartsEarned, 0);
+  const totalSeconds = calls.reduce((s, c) => s + c.durationSeconds, 0);
+  const totalMins = Math.floor(totalSeconds / 60);
+  // Show seconds while under a minute rather than a flat "0m", which read as
+  // "you have never talked to anyone" right after a real call.
+  const talkTimeLabel = totalMins > 0 ? `${totalMins}m` : `${Math.round(totalSeconds)}s`;
+  // Coins accrue per-second and are therefore fractional. Summing them raw put
+  // "0.735632" on screen under COINS SPENT; the ledger keeps full precision,
+  // the summary card does not need it.
+  const totalCoins = Math.round(
+    calls.filter(c => c.role === 'caller').reduce((s, c) => s + c.coinsSpent, 0),
+  );
+  const totalHearts = Math.round(
+    calls.filter(c => c.role === 'receiver').reduce((s, c) => s + c.heartsEarned, 0),
+  );
 
   return (
     <ScreenShell tone="light">
@@ -211,8 +278,125 @@ export default function ActivityScreen({ navigate }: Props) {
 
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           {/* Header */}
-          <Text style={styles.pageTitle}>Recent Calls</Text>
+          <Text style={styles.pageTitle}>{tab === 'calls' ? 'Recent Calls' : 'Messages'}</Text>
 
+          {/* Calls / Chats switch. Unread total sits on the tab so an unopened
+              message is visible without leaving whichever tab you are on. */}
+          <View style={styles.tabRow}>
+            {(['calls', 'chats'] as const).map((key) => {
+              const active = tab === key;
+              const unread = conversations.reduce((s, c) => s + c.unreadCount, 0);
+              return (
+                <TouchableOpacity
+                  key={key}
+                  style={[styles.tabBtn, active && styles.tabBtnActive]}
+                  onPress={() => setTab(key)}
+                  activeOpacity={0.85}
+                  accessibilityRole="tab"
+                  accessibilityState={{ selected: active }}
+                  accessibilityLabel={
+                    key === 'chats' && unread > 0
+                      ? `Messages tab, ${unread} unread`
+                      : `${key === 'calls' ? 'Calls' : 'Messages'} tab`
+                  }
+                >
+                  <MaterialIcons
+                    name={key === 'calls' ? 'call' : 'chat-bubble-outline'}
+                    size={17}
+                    color={active ? '#4B0054' : '#A99A86'}
+                  />
+                  <Text style={[styles.tabText, active && styles.tabTextActive]}>
+                    {key === 'calls' ? 'Calls' : 'Messages'}
+                  </Text>
+                  {key === 'chats' && unread > 0 ? (
+                    <View style={styles.tabBadge}>
+                      <Text style={styles.tabBadgeText}>{unread > 99 ? '99+' : unread}</Text>
+                    </View>
+                  ) : null}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+
+          {tab === 'chats' ? (
+            chatsLoading ? (
+              <View style={styles.empty}>
+                <MaterialIcons name="hourglass-empty" size={44} color="#D1B23B" />
+                <Text style={styles.emptyTitle}>Loading…</Text>
+              </View>
+            ) : chatsError ? (
+              <View style={styles.empty}>
+                <MaterialIcons name="cloud-off" size={52} color="#D1B23B" />
+                <Text style={styles.emptyTitle}>Could not load your messages</Text>
+                <Text style={styles.emptySub}>Check your connection and try again.</Text>
+              </View>
+            ) : conversations.length === 0 ? (
+              <View style={styles.empty}>
+                <MaterialIcons name="chat-bubble-outline" size={52} color="#D1B23B" />
+                <Text style={styles.emptyTitle}>No messages yet</Text>
+                <Text style={styles.emptySub}>Say hello to someone and it will show up here</Text>
+                <TouchableOpacity style={styles.goBtn} onPress={() => navigate('Personal')}>
+                  <Text style={styles.goBtnText}>Find someone to talk to</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <View style={styles.list}>
+                {conversations.map((c) => {
+                  const peer = peers[c.peerUid];
+                  const name = peer?.nickname || peer?.username || 'User';
+                  return (
+                    <TouchableOpacity
+                      key={c.id}
+                      style={styles.chatRow}
+                      activeOpacity={0.85}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        c.unreadCount > 0
+                          ? `Chat with ${name}, ${c.unreadCount} unread`
+                          : `Chat with ${name}`
+                      }
+                      onPress={() =>
+                        navigate('Chat', {
+                          profileName: name,
+                          matchData: { ...(peer || {}), uid: c.peerUid, name },
+                        })
+                      }
+                    >
+                      {/* Same avatar hierarchy as everywhere else: builder
+                          avatar, then a photo, then an icon -- never an Image
+                          with an empty uri. */}
+                      {peer?.avatarData ? (
+                        <GengalAvatar data={peer.avatarData} size={46} />
+                      ) : (
+                        <View style={styles.chatAvatarEmpty}>
+                          <MaterialIcons name="person" size={24} color="#C9BDB2" />
+                        </View>
+                      )}
+
+                      <View style={styles.chatBody}>
+                        <Text style={styles.chatName} numberOfLines={1}>{name}</Text>
+                        <Text
+                          style={[styles.chatPreview, c.unreadCount > 0 && styles.chatPreviewUnread]}
+                          numberOfLines={1}
+                        >
+                          {c.lastMessage}
+                        </Text>
+                      </View>
+
+                      {c.unreadCount > 0 ? (
+                        <View style={styles.chatBadge}>
+                          <Text style={styles.chatBadgeText}>
+                            {c.unreadCount > 99 ? '99+' : c.unreadCount}
+                          </Text>
+                        </View>
+                      ) : null}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )
+          ) : (
+          <>
           {/* Summary stats */}
           {calls.length > 0 && (
             <View style={styles.statsRow}>
@@ -223,7 +407,7 @@ export default function ActivityScreen({ navigate }: Props) {
               </View>
               <View style={styles.statCard}>
                 <MaterialIcons name="timer" size={22} color="#D49A0B" />
-                <Text style={styles.statValue}>{totalMins}m</Text>
+                <Text style={styles.statValue}>{talkTimeLabel}</Text>
                 <Text style={styles.statLabel}>Talk Time</Text>
               </View>
               <View style={styles.statCard}>
@@ -267,6 +451,8 @@ export default function ActivityScreen({ navigate }: Props) {
               ))}
             </View>
           )}
+          </>
+          )}
         </ScrollView>
 
         <BottomNav active="Activity" navigate={navigate} />
@@ -278,6 +464,67 @@ export default function ActivityScreen({ navigate }: Props) {
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
   scroll: { padding: 16, paddingBottom: 110 },
+
+  tabRow: { flexDirection: 'row', gap: 10, marginBottom: 14 },
+  tabBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: 44,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#F0E4D2',
+    backgroundColor: '#FFFDF8',
+  },
+  tabBtnActive: { backgroundColor: '#FFE899', borderColor: '#F0D68A' },
+  tabText: { fontSize: 13, fontWeight: '800', color: '#A99A86' },
+  tabTextActive: { color: '#4B0054' },
+  tabBadge: {
+    minWidth: 20,
+    paddingHorizontal: 5,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#C9504B',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabBadgeText: { color: '#FFF', fontSize: 11, fontWeight: '800' },
+
+  chatRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 12,
+    borderRadius: 18,
+    backgroundColor: '#FFFDF8',
+    borderWidth: 1,
+    borderColor: '#F5EADB',
+    marginBottom: 10,
+  },
+  chatAvatarEmpty: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: '#F2ECE4',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatBody: { flex: 1, minWidth: 0, gap: 2 },
+  chatName: { fontSize: 14.5, fontWeight: '800', color: '#4B0054' },
+  chatPreview: { fontSize: 12.5, fontWeight: '600', color: '#A99A86' },
+  chatPreviewUnread: { color: '#6B5F57', fontWeight: '800' },
+  chatBadge: {
+    minWidth: 22,
+    paddingHorizontal: 6,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#C9504B',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  chatBadgeText: { color: '#FFF', fontSize: 11.5, fontWeight: '800' },
 
   pageTitle: {
     fontSize: 26, fontWeight: '900', color: '#4B0054',

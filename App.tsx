@@ -389,9 +389,15 @@ export default function App() {
       // cleanly. Without this the caller's 45-second ring timeout is the
       // only thing that ends their call, and the offer document stays alive
       // blocking any subsequent call to this user for that entire window.
+      //
+      // Aimed at this specific offer. Declining "whatever is in the ring slot"
+      // is how a stranger's unanswered call used to hang up the conversation
+      // already in progress: the rejection landed on the shared document that
+      // the live call was still reading its own state from, and both
+      // participants took it as the other one hanging up.
       const uid = auth.currentUser?.uid;
       if (uid) {
-        rejectCallOffer(uid).catch((e) =>
+        rejectCallOffer(uid, { callerUid: call.callerUid, roomId: call.roomId }, 'busy').catch((e) =>
           console.warn('[App] Auto-decline busy call failed:', e)
         );
       }
