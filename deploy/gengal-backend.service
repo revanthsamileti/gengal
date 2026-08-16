@@ -1,0 +1,53 @@
+[Unit]
+Description=GenGal backend (Flask under waitress)
+# network-online, not just network: firebase-admin opens a connection to Google
+# on import, so starting before DNS and routing are up makes the first boot
+# after a reboot fail and sit in the restart loop below until it happens to win.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gengal
+Group=gengal
+WorkingDirectory=/opt/gengal/backend
+
+# Secrets live here, root-owned and 0640, never in the unit file -- `systemctl
+# show` and `systemd-analyze dump` print unit contents to any user, and
+# Environment= lines would put FIREBASE_CREDENTIALS_JSON and the Razorpay
+# secret in both.
+EnvironmentFile=/etc/gengal/gengal.env
+
+# Bound to loopback on purpose. nginx terminates TLS and is the only thing that
+# should be able to reach the app; without --host 127.0.0.1 waitress listens on
+# 0.0.0.0 and the app is reachable on :5055 in plain HTTP, bypassing TLS
+# entirely for anyone who finds the port.
+ExecStart=/opt/gengal/venv/bin/waitress-serve \
+    --host 127.0.0.1 \
+    --port 5055 \
+    --threads 8 \
+    app:app
+
+Restart=always
+RestartSec=3
+# A crash loop from bad config should stop, not hammer forever.
+StartLimitIntervalSec=120
+StartLimitBurst=6
+
+# The app writes debug_events.log and temp_media/ under WorkingDirectory, so
+# ProtectSystem=full (read-only /usr and /etc, /opt still writable) rather than
+# strict, which would break both.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gengal-backend
+
+[Install]
+WantedBy=multi-user.target

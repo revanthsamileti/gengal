@@ -23,7 +23,6 @@
     "expo-status-bar": "~56.0.4",
     "expo-updates": "~56.0.23",
     "firebase": "^12.15.0",
-    "http-proxy": "^1.18.1",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.85.3",
@@ -31,7 +30,6 @@
     "react-native-safe-area-context": "~5.7.0",
     "react-native-svg": "15.15.4",
     "react-native-web": "^0.21.2",
-    "react-native-web-webview": "^1.0.2",
     "react-native-webview": "13.16.1"
   },
   "devDependencies": {
