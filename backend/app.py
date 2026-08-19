@@ -1031,7 +1031,21 @@ def call_billing_endpoint():
             # they are already on the next call, and clearing it would advertise
             # them as free while they are talking to somebody else.
             def release_busy():
+                # The cutoff is the last moment *this* call is known to have
+                # touched the marker, which is not always when it ended. The
+                # hang-up and the closing tick race: whichever tick still sees
+                # the record 'active' refreshes the marker one final time, and
+                # that stamp then sits *after* `endedAt`. Judged against
+                # `endedAt` alone it looked like a newer call's stamp, so the
+                # release was skipped and both people stayed advertised as busy
+                # for the rest of the TTL after every call they finished.
+                # `lastBilledAt` moves in lockstep with the marker -- the same
+                # transaction writes both -- so the later of the two is this
+                # call's true high-water mark. Anything past it really does
+                # belong to a call that started afterwards.
                 boundary = ended_at or now
+                if last_dt is not None and last_dt > boundary:
+                    boundary = last_dt
                 for ref, user_snap in ((payer_ref, payer_snap), (receiver_ref, receiver_snap)):
                     stamp = as_utc((user_snap.to_dict() or {}).get('inCallSince'))
                     if stamp is None or stamp > boundary:

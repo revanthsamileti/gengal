@@ -231,3 +231,35 @@ class TestBusyMarkerRelease:
             "starting the billing clock on a call that has already ended "
             "would bill its first interval to whoever ticks next"
         )
+
+    def test_releases_the_marker_when_the_closing_tick_landed_after_the_hang_up(
+        self, client, as_user, store
+    ):
+        """The call's own late stamp must not be mistaken for a newer call.
+
+        Observed on two real handsets: the hang-up and the final flush race,
+        and the tick that still saw the record 'active' refreshed
+        `inCallSince` a moment *after* `endedAt`. Judging that stamp against
+        `endedAt` read it as "they are already talking to somebody else", so
+        the marker was never cleared and both people stayed unreachable for
+        the rest of the TTL after every call they finished.
+        """
+        now = datetime.now(timezone.utc)
+        ended = now - timedelta(seconds=10)
+        late = ended + timedelta(seconds=4)  # the closing tick that raced the hang-up
+        data = store(
+            last_billed=late,
+            ended_at=ended,
+            status="ended",
+            busy_at=late,
+        )
+
+        response = tick(client)
+
+        assert response.get_json()["billedSeconds"] == 0, (
+            "nothing is owed once lastBilledAt is already past endedAt"
+        )
+        assert "inCallSince" not in data["users/%s" % CALLER], (
+            "the caller is off the call and must not stay advertised as busy"
+        )
+        assert "inCallSince" not in data["users/%s" % RECEIVER]
