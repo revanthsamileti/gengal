@@ -19,6 +19,19 @@ const DEBUG_BACKEND_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
 const sessionId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 const context: DebugContext = {};
 
+/**
+ * The receiving endpoint only exists when the backend runs with
+ * ENABLE_REMOTE_DEBUG_LOG set, which is not the default. Without this latch
+ * every event still cost a round-trip that could only ever 404 -- dozens of
+ * them per call -- and none of them were visible as failures, because a 404 is
+ * a perfectly successful HTTP response and so never reached the `.catch()`
+ * below. The first 404 turns logging off for the rest of the session.
+ *
+ * A transport failure deliberately does not latch: the backend may just be
+ * briefly unreachable, and the endpoint could well be there when it returns.
+ */
+let endpointMissing = false;
+
 const normalizeError = (value: unknown) => {
   if (value instanceof Error) {
     return {
@@ -43,7 +56,7 @@ export const logDebugEvent = (
   details: DebugDetails = {},
   level: DebugLevel = 'info',
 ) => {
-  if (!DEBUG_BACKEND_URL) return;
+  if (!DEBUG_BACKEND_URL || endpointMissing) return;
   const payload = {
     level,
     event,
@@ -61,5 +74,9 @@ export const logDebugEvent = (
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
-  }).catch(() => {});
+  })
+    .then(response => {
+      if (response.status === 404) endpointMissing = true;
+    })
+    .catch(() => {});
 };
