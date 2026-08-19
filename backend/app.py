@@ -195,6 +195,22 @@ def unhandled_exception(e):
 
 
 DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "debug_events.log")
+@app.route('/healthz', methods=['GET'])
+def healthz():
+    """Liveness probe. Deliberately does nothing.
+
+    No auth, no Firestore, no environment reads -- it answers from the process
+    itself, so a 200 means exactly one thing: this worker is up and serving.
+    Anything heavier turns a monitor into a source of load, and on hosts that
+    bill or rate-limit reads, into a source of cost.
+
+    It exists because free hosts that idle a service out (Render and similar)
+    only stay awake if something requests them, and an uptime monitor needs a
+    URL that returns 200 -- every other route here either requires a bearer
+    token or 404s, both of which a monitor reports as an outage.
+    """
+    return jsonify({"status": "ok"}), 200
+
 
 
 # Selfie classification pipeline removed
