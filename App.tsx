@@ -362,11 +362,17 @@ export default function App() {
     }
 
     if (TAB_SCREENS.has(next)) {
+      // Re-selecting the tab you are already on keeps that entry's identity.
+      // Now that entries are keyed, a fresh key would remount the screen --
+      // dropping its scroll position and refetching everything -- so tapping
+      // the current tab would silently become a reload.
+      const key = currentRoute.name === next ? currentRoute.key : nextNavKey();
+
       // Rebase rather than push: Home stays underneath so hardware back still
       // leads out of a tab, but hopping between tabs can't grow the stack.
       setNavStack(next === 'Home'
-        ? [{ name: 'Home', params: nextParams, key: nextNavKey() }]
-        : [{ name: 'Home', params: {}, key: nextNavKey() }, { name: next, params: nextParams, key: nextNavKey() }]);
+        ? [{ name: 'Home', params: nextParams, key }]
+        : [{ name: 'Home', params: {}, key: nextNavKey() }, { name: next, params: nextParams, key }]);
       return;
     }
 
@@ -559,9 +565,24 @@ export default function App() {
       <ErrorBoundary>
         <UserProvider>
           <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
-          {/* goBack is bound to the entry that is rendering it, so a screen
-              that has since been replaced cannot pop its own replacement. */}
-          {SCREENS[screen]({ params, navigate, goBack: screenGoBack })}
+          {/* Keyed on the entry, so replacing one Call screen with another
+              genuinely remounts it. Without a key React sees the same element
+              type in the same position and reconciles, which kept the previous
+              call's state alive: `roomId` and `isPending` come from useState
+              initializers that run once per instance, and `endedRef` from a
+              ref. A yielded outbound call therefore handed the incoming call
+              its room id and an already-tripped `endedRef`, so the screen could
+              never end itself -- it sat on "Talking..." while its heartbeat
+              re-triggered the ended-record listener every five seconds.
+
+              This is also what makes the key check in goBack safe: a screen's
+              closures can no longer outlive its own stack entry, so a rejected
+              pop always means the caller is genuinely gone. */}
+          <React.Fragment key={currentRoute.key}>
+            {/* goBack is bound to the entry that is rendering it, so a screen
+                that has since been replaced cannot pop its own replacement. */}
+            {SCREENS[screen]({ params, navigate, goBack: screenGoBack })}
+          </React.Fragment>
           {/* Mounted last so its Modal renders above every screen. Without this
               the imperative Alert API silently no-ops (see CustomAlert.tsx). */}
           <CustomAlert />
