@@ -309,7 +309,23 @@ export default function App() {
     ...MaterialIcons.font,
   });
 
-  const [navStack, setNavStack] = useState<{name: ScreenName, params: NavigationParams}[]>([{ name: 'Language', params: {} }]);
+  /**
+   * Identity for a stack entry, so a screen can only ever pop *itself*.
+   *
+   * `goBack` used to pop whatever was on top, which is wrong for any screen
+   * that is replaced rather than popped. The glare path does exactly that: the
+   * device that yields swaps its outbound call screen for the inbound one, and
+   * the outbound screen's teardown -- which runs after it has already been
+   * unmounted -- then called goBack() and took the replacement down with it.
+   * The yielding side landed back on Home while the other side rang on at a
+   * call nobody would ever see.
+   */
+  const navKeyRef = useRef(0);
+  const nextNavKey = () => ++navKeyRef.current;
+
+  const [navStack, setNavStack] = useState<{name: ScreenName, params: NavigationParams, key: number}[]>(
+    [{ name: 'Language', params: {}, key: 0 }]
+  );
   
   const currentRoute = navStack[navStack.length - 1];
   const screen = currentRoute.name;
@@ -334,7 +350,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
 
   const resetTo = (next: ScreenName, params: NavigationParams = {}) => {
-    setNavStack([{ name: next, params }]);
+    setNavStack([{ name: next, params, key: nextNavKey() }]);
   };
 
   const navigate = (next: string, nextParams: NavigationParams = {}) => {
@@ -349,17 +365,40 @@ export default function App() {
       // Rebase rather than push: Home stays underneath so hardware back still
       // leads out of a tab, but hopping between tabs can't grow the stack.
       setNavStack(next === 'Home'
-        ? [{ name: 'Home', params: nextParams }]
-        : [{ name: 'Home', params: {} }, { name: next, params: nextParams }]);
+        ? [{ name: 'Home', params: nextParams, key: nextNavKey() }]
+        : [{ name: 'Home', params: {}, key: nextNavKey() }, { name: next, params: nextParams, key: nextNavKey() }]);
       return;
     }
 
-    setNavStack(prev => [...prev, { name: next, params: nextParams }]);
+    setNavStack(prev => [...prev, { name: next, params: nextParams, key: nextNavKey() }]);
   };
 
-  const goBack = () => {
-    setNavStack(prev => prev.length > 1 ? prev.slice(0, -1) : prev);
+  /**
+   * Pop the stack.
+   *
+   * `fromKey` identifies the entry asking to be dismissed. A screen that has
+   * already been replaced is no longer on top, and popping on its behalf would
+   * remove whatever took its place -- so those calls are dropped. Passing no
+   * key keeps the old unconditional behaviour, which is what the hardware back
+   * button wants.
+   */
+  const goBack = (fromKey?: number) => {
+    setNavStack(prev => {
+      if (prev.length <= 1) return prev;
+      if (fromKey !== undefined && prev[prev.length - 1].key !== fromKey) return prev;
+      return prev.slice(0, -1);
+    });
   };
+
+  /**
+   * What screens actually receive. Bound to the entry rendering it, so a
+   * screen's late teardown cannot dismiss a different screen -- screens call
+   * `goBack()` with no arguments and get self-dismissal for free.
+   */
+  const screenGoBack = React.useCallback(
+    () => goBack(currentRoute.key),
+    [currentRoute.key]
+  );
 
   useEffect(() => {
     if (Platform.OS !== 'web') {
@@ -433,7 +472,7 @@ export default function App() {
       // We yield. Replacing this screen unmounts the outbound call, whose own
       // cleanup withdraws the offer we placed, so the other side is not left
       // ringing an abandoned call.
-      setNavStack(prev => [...prev.slice(0, -1), inboundCallEntry]);
+      setNavStack(prev => [...prev.slice(0, -1), { ...inboundCallEntry, key: nextNavKey() }]);
       return;
     }
 
@@ -456,7 +495,7 @@ export default function App() {
       }
       return;
     }
-    setNavStack(prev => [...prev, inboundCallEntry]);
+    setNavStack(prev => [...prev, { ...inboundCallEntry, key: nextNavKey() }]);
   });
 
   useEffect(() => {
@@ -520,7 +559,9 @@ export default function App() {
       <ErrorBoundary>
         <UserProvider>
           <StatusBar style={screen === 'Call' && params.mode === 'video' ? 'light' : 'dark'} />
-          {SCREENS[screen]({ params, navigate, goBack })}
+          {/* goBack is bound to the entry that is rendering it, so a screen
+              that has since been replaced cannot pop its own replacement. */}
+          {SCREENS[screen]({ params, navigate, goBack: screenGoBack })}
           {/* Mounted last so its Modal renders above every screen. Without this
               the imperative Alert API silently no-ops (see CustomAlert.tsx). */}
           <CustomAlert />
