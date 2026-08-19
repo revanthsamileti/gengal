@@ -752,6 +752,17 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
               : 'Could not reach that user. Please try again.'
         );
       });
+    }).catch(e => {
+      // Everything above -- the history record, the offer, the move to
+      // "ringing" -- happens inside this dynamically imported block, so a
+      // failed chunk load means the call was never placed at all. With no
+      // catch here that surfaced only as an unhandled rejection, while the
+      // caller watched a screen that was never going to resolve.
+      console.warn('[CallScreen] Could not load call services:', e);
+      endCallWithNotice(
+        'Could not connect',
+        'Something went wrong starting this call. Please try again.'
+      );
     });
 
     return () => {
@@ -861,9 +872,17 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     if (!isCallActive || !roomId) return;
 
     const sendHeartbeat = () => {
-      import('../services/liveRoomService').then(({ updateCallHeartbeat }) => {
-        updateCallHeartbeat(roomId, isCaller ? 'caller' : 'receiver');
-      });
+      // updateCallHeartbeat swallows its own write failures, so the only thing
+      // that can reject here is the import. Left uncaught it fired an
+      // unhandled rejection every five seconds for the length of the call --
+      // seen on a handset whose lazy chunk fetches were failing -- while the
+      // heartbeat itself silently stopped, which is the very signal the peer
+      // uses to tell a quiet line from a dead one.
+      import('../services/liveRoomService')
+        .then(({ updateCallHeartbeat }) => {
+          updateCallHeartbeat(roomId, isCaller ? 'caller' : 'receiver');
+        })
+        .catch(e => console.warn('[CallScreen] Heartbeat module unavailable:', e));
     };
 
     sendHeartbeat();
@@ -1075,10 +1094,14 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         .catch(e => console.warn('[Billing Engine] Final flush failed:', e));
 
       if (remainingSeconds > 0 && user) {
-        import('../services/coinService').then(({ updateCallRewards }) => {
-          updateCallRewards(user.uid, remainingSeconds, globalSettings.callDurationForHeart, !isCaller)
-            .catch(e => console.warn("[Rewards Engine] Final flush failed", e));
-        });
+        import('../services/coinService')
+          .then(({ updateCallRewards }) =>
+            updateCallRewards(user.uid, remainingSeconds, globalSettings.callDurationForHeart, !isCaller)
+          )
+          // Chained rather than nested: the inner .catch() covered the call but
+          // not the import that produces it, so a failed chunk load rejected
+          // with nothing attached to it.
+          .catch(e => console.warn("[Rewards Engine] Final flush failed", e));
       }
     };
   }, [roomId, matchData?.uid, globalSettings, currentUserProfile, isCaller, isVideo, isCallActive, peerEverConnected]);
