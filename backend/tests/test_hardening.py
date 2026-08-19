@@ -8,8 +8,7 @@ Fixes covered
 1. call-rewards: threshold comes from server settings, not the client body.
 2. call-rewards: secondsToAdd is capped at MAX_REWARDS_SECONDS.
 3. send-otp: per-IP rate limit prevents bulk SMS enumeration.
-4. uploads: <string:filename> routing rejects paths containing directory separators.
-5. global error handler: unhandled exceptions return a generic JSON 500.
+4. global error handler: unhandled exceptions return a generic JSON 500.
 """
 
 import os
@@ -247,39 +246,7 @@ class TestSendOtpIpRateLimit:
 
 
 # ===========================================================================
-# 4. uploads: path traversal is blocked at the routing layer
-# ===========================================================================
-
-class TestUploadsPathTraversal:
-    """<string:filename> does not match paths containing '/', blocking traversal."""
-
-    def test_subpath_is_not_routed(self, client):
-        """A URL with a second path segment after /uploads/ does not match the route.
-
-        This is the primary defence: Flask never calls send_from_directory for
-        these URLs, so no safe_join check is even needed.
-        """
-        r = client.get("/uploads/subdir/secret.m4a")
-        assert r.status_code == 404
-
-    def test_dotdot_segment_is_not_routed(self, client):
-        """A path like /uploads/../../etc/passwd is not matched by the route."""
-        r = client.get("/uploads/../etc/passwd")
-        # Flask normalises the URL; either way it must not return 200.
-        assert r.status_code in (301, 302, 303, 307, 308, 404)
-
-    def test_normal_filename_is_still_routable(self, client):
-        """A plain filename with no path separators still reaches the handler.
-
-        The handler may 404 if the file doesn't exist (there are no real files in
-        tests), but it must not 405 or raise an exception.
-        """
-        r = client.get("/uploads/intro_123456_1700000000.m4a")
-        assert r.status_code in (200, 404)
-
-
-# ===========================================================================
-# 5. global error handler returns generic JSON
+# 4. global error handler returns generic JSON
 # ===========================================================================
 
 class TestGlobalErrorHandler:

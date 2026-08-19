@@ -34,9 +34,9 @@ RestartSec=3
 StartLimitIntervalSec=120
 StartLimitBurst=6
 
-# The app writes debug_events.log and temp_media/ under WorkingDirectory, so
-# ProtectSystem=full (read-only /usr and /etc, /opt still writable) rather than
-# strict, which would break both.
+# The app writes debug_events.log under WorkingDirectory, so ProtectSystem=full
+# (read-only /usr and /etc, /opt still writable) rather than strict, which
+# would break it.
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full

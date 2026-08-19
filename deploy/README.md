@@ -1,5 +1,7 @@
 # Deploying the GenGal backend to Oracle Cloud Always Free
 
+> Deploying to Google Compute Engine instead? See [README-gce.md](README-gce.md).
+
 Target: one Always Free **ARM (Ampere A1)** instance in the region nearest your
 users — Mumbai for an India-facing app. Always-on, so no cold start on the RTC
 token mint or the opening billing tick, both of which happen at call-connect
@@ -119,7 +121,6 @@ sudo systemctl restart gengal-backend
 VM nothing truncates it, so cap `logDebugEvent` in production or add a
 logrotate rule before it fills the boot volume.
 
-**`temp_media/` is never swept.** Same disk, same outcome.
 
 **Free tier reclamation.** Oracle may reclaim *idle* Always Free compute. A
 backend serving real traffic is not idle, but a project that goes quiet for

@@ -194,9 +194,8 @@ def unhandled_exception(e):
     return jsonify({"error": "An internal server error occurred"}), 500
 
 
-TEMP_DIR = "temp_media"
-os.makedirs(TEMP_DIR, exist_ok=True)
 DEBUG_LOG_FILE = os.path.join(os.path.dirname(__file__), "debug_events.log")
+
 
 # Selfie classification pipeline removed
 
@@ -391,66 +390,6 @@ def generate_zego_token():
         print(f"[Zego Token Authority Fault]: {str(e)}")
         return jsonify({"error": "Internal Token Server Exception"}), 500
 
-MAX_INTRO_BYTES = 5 * 1024 * 1024
-
-@app.route('/api/v1/host/upload-intro', methods=['POST', 'OPTIONS'])
-def upload_intro():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    uid, error_response = require_bearer_uid()
-    if error_response:
-        return error_response
-
-    if rate_limited(f"upload:{uid}", 5, 3600):
-        return jsonify({"error": "Upload limit reached, try again later"}), 429
-
-    try:
-        if 'audio' not in request.files:
-            return jsonify({"error": "No audio file provided"}), 400
-
-        audio_file = request.files['audio']
-        if audio_file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-
-        # Bound the write: the filename is server-generated, but the body is not.
-        audio_file.seek(0, os.SEEK_END)
-        size = audio_file.tell()
-        audio_file.seek(0)
-        if size > MAX_INTRO_BYTES:
-            return jsonify({"error": "Audio file is too large (max 5MB)"}), 413
-
-        uploads_dir = os.path.join(os.path.dirname(__file__), 'uploads')
-        if not os.path.exists(uploads_dir):
-            os.makedirs(uploads_dir)
-
-        # Namespaced by uid so one user cannot overwrite another's intro.
-        filename = f"intro_{agora_numeric_uid(uid)}_{int(time.time())}.m4a"
-        file_path = os.path.join(uploads_dir, filename)
-
-        audio_file.save(file_path)
-
-        public_base_url = require_env("PUBLIC_BASE_URL").rstrip("/")
-        public_url = f"{public_base_url}/uploads/{filename}"
-
-        return jsonify({
-            "message": "Upload successful",
-            "url": public_url
-        }), 200
-
-    except Exception as e:
-        print(f"[Upload Server Fault]: {str(e)}")
-        return jsonify({"error": "Internal Upload Exception"}), 500
-
-# Optional: Add a simple static file route so the frontend can playback the audio
-from flask import send_from_directory
-
-@app.route('/uploads/<string:filename>')
-def serve_upload(filename):
-    # <string:filename> does not match '/', so a URL like /uploads/../etc/passwd
-    # is rejected by the router before send_from_directory is ever called.
-    # send_from_directory also uses safe_join internally — this is defence in depth.
-    return send_from_directory(os.path.join(os.path.dirname(__file__), 'uploads'), filename)
 
 # ==========================================
 # AUTHENTICATION ROUTES
