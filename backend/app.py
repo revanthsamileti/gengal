@@ -13,9 +13,11 @@ import hmac
 import math
 import time
 import sys
+import traceback
 import random
 import requests
 from datetime import datetime, timedelta, timezone
+from google.api_core.exceptions import Aborted as FirestoreAborted
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from agora_token_builder import RtcTokenBuilder
@@ -1115,7 +1117,44 @@ def call_billing_endpoint():
                 mark_busy()
             return actual_deduction, payer_new, receiver_new, has_insufficient, elapsed_seconds
 
-        billed, payer_new, receiver_new, has_insufficient, elapsed = apply(transaction)
+        try:
+            billed, payer_new, receiver_new, has_insufficient, elapsed = apply(transaction)
+        except (FirestoreAborted, ValueError) as e:
+            # Cross-transaction contention, which is not a failure to bill.
+            #
+            # Both participants tick the same call, and at the two moments they
+            # are naturally in step -- the opening tick and the final flush at
+            # hang-up -- their transactions collide on the same three documents.
+            # Firestore aborts one of them to keep the two serialisable. That
+            # arrives either as `Aborted` straight from gRPC, which fell through
+            # to the catch-all below and reached the client as a 500, or, once
+            # the SDK has spent its five retries, as a bare ValueError from the
+            # commit helper -- indistinguishable from a bad-input ValueError, so
+            # it was answered with a 400 quoting "Failed to commit transaction
+            # in 5 attempts." at the user.
+            #
+            # Nothing is lost when a tick is aborted. Billing is anchored on
+            # `lastBilledAt`, so the seconds this tick would have charged are
+            # still owed, and the next tick -- or the final flush, or the other
+            # participant's tick moments later -- charges them. A transaction
+            # that loses the race commits nothing, so there is no partial state
+            # to unpick either. Reporting zero billed seconds is the truthful
+            # answer rather than a swallowed error.
+            #
+            # A ValueError that is not the commit helper's is re-raised: `apply`
+            # raises nothing itself today, and if that changes this must not
+            # quietly report success for it.
+            if isinstance(e, ValueError) and 'Failed to commit transaction' not in str(e):
+                raise
+            print(f"[COINS] Billing tick contended, deferring to the next tick: {type(e).__name__}")
+            return jsonify({
+                "success": True,
+                "hasInsufficientFunds": False,
+                "billedAmount": 0,
+                "billedSeconds": 0,
+                "contended": True,
+            }), 200
+
         return jsonify({
             "success": True,
             "hasInsufficientFunds": has_insufficient,
@@ -1127,7 +1166,11 @@ def call_billing_endpoint():
     except (TypeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
-        print(f"[COINS] Billing error: {e}")
+        # Full traceback, not just str(e): the bare message told us a billing
+        # tick had failed but never where, so a 500 seen in the wild could not
+        # be diagnosed without reproducing it first.
+        print(f"[COINS] Billing error: {type(e).__name__}: {e}")
+        traceback.print_exc()
         return jsonify({"error": "Failed to process billing"}), 500
 
 ROOM_COLLECTIONS = {'expert_rooms', 'chill_rooms', 'ludo_rooms'}

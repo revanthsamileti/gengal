@@ -263,3 +263,71 @@ class TestBusyMarkerRelease:
             "the caller is off the call and must not stay advertised as busy"
         )
         assert "inCallSince" not in data["users/%s" % RECEIVER]
+
+
+class TestBillingContention:
+    """A tick that loses a race must not be reported as a failure.
+
+    Both participants tick the same call, so at the opening tick and again at
+    the final flush their transactions collide on the same documents. Firestore
+    aborts one to keep them serialisable. That reached the client as a 500 when
+    it arrived as `Aborted`, and as a 400 quoting "Failed to commit transaction
+    in 5 attempts." once the SDK had spent its retries -- an internal message
+    shown to a user for a condition that costs them nothing, since the seconds
+    stay owed and the next tick bills them.
+    """
+
+    def test_aborted_tick_reports_nothing_billed_instead_of_failing(
+        self, client, as_user, store, monkeypatch
+    ):
+        from google.api_core.exceptions import Aborted
+        store(status="active")
+
+        def explode(fn):
+            def raise_aborted(_transaction):
+                raise Aborted("409 Aborted due to cross-transaction contention.")
+            return raise_aborted
+
+        monkeypatch.setattr(app_module.firestore, "transactional", explode)
+
+        response = tick(client)
+
+        assert response.status_code == 200, "contention is not the caller's error"
+        body = response.get_json()
+        assert body["billedSeconds"] == 0
+        assert body["contended"] is True
+
+    def test_retry_exhaustion_is_treated_the_same(
+        self, client, as_user, store, monkeypatch
+    ):
+        store(status="active")
+
+        def explode(fn):
+            def raise_retry_exhausted(_transaction):
+                raise ValueError("Failed to commit transaction in 5 attempts.")
+            return raise_retry_exhausted
+
+        monkeypatch.setattr(app_module.firestore, "transactional", explode)
+
+        response = tick(client)
+
+        assert response.status_code == 200
+        assert response.get_json()["billedSeconds"] == 0
+
+    def test_an_unrelated_value_error_still_surfaces(
+        self, client, as_user, store, monkeypatch
+    ):
+        """The contention branch must not become a catch-all for ValueError."""
+        store(status="active")
+
+        def explode(fn):
+            def raise_real_bug(_transaction):
+                raise ValueError("rate is not a number")
+            return raise_real_bug
+
+        monkeypatch.setattr(app_module.firestore, "transactional", explode)
+
+        response = tick(client)
+
+        assert response.status_code == 400, "a genuine ValueError must not report success"
+        assert "rate is not a number" in response.get_json()["error"]
