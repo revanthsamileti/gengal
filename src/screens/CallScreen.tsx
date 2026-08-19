@@ -42,6 +42,19 @@ const RING_TIMEOUT_MS = 45000;
 const CALL_SETUP_TIMEOUT_MS = 20000;
 
 /**
+ * How long to wait, after our own Agora join resolves, for the peer to show
+ * up as a `remoteUid` before giving up on the connection.
+ *
+ * This used to be 10 s and it was a false-positive machine: on real hardware
+ * over real networks, one side's engine joining does not mean the other
+ * side's join + ICE negotiation + Agora's own channel propagation finishes
+ * within 10 s of that instant, especially on a cold SDK (first call of the
+ * session). Measured failures on live devices where both legs connected
+ * fine at 11-14 s. 20 s matches CALL_SETUP_TIMEOUT_MS above.
+ */
+const PEER_JOIN_TIMEOUT_MS = 20000;
+
+/**
  * Providers the app can actually carry a call on, in preference order.
  *
  * Only Agora is implemented — `useGengalVoice.connectSeat` throws for anything
@@ -113,6 +126,21 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [isPeerUnstable, setIsPeerUnstable] = useState(false);
   /** Same value, readable from inside long-lived interval callbacks. */
   const isPeerUnstableRef = React.useRef(false);
+  /**
+   * Whether the RTC peer has ever actually shown up (`remoteUids` non-empty).
+   *
+   * Billing hangs off this rather than off the call being *accepted*. The
+   * server measures elapsed wall-clock time and has no idea whether audio ever
+   * flowed, so anchoring the clock at accept charged the caller for calls that
+   * were accepted and then failed to connect on the media layer -- the app
+   * told them the connection was lost and billed them for it anyway.
+   *
+   * Gating the whole billing effect (rather than just its teardown flush) is
+   * deliberate: the opening tick is what stamps `lastBilledAt` and marks both
+   * parties busy, so withholding it means a never-connected call leaves no
+   * billing clock to charge against *and* no busy marker needing release.
+   */
+  const [peerEverConnected, setPeerEverConnected] = useState(false);
   const isCallActive = isCaller ? (callerStatus === 'accepted') : (!isPending);
 
   // The ringing UI below paints its own dark backdrop instead of using
@@ -789,7 +817,17 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         // per-call record, its heartbeats and the RTC session, none of which a
         // stranger's offer can touch. Ending here is what used to let a third
         // person's unanswered call hang up on two people mid-sentence.
-        if (callStep !== 'talking') {
+        //
+        // `ringing` specifically, and not merely "not talking": the step only
+        // becomes `ringing` once createCallOffer has resolved, so before that
+        // our own offer is not in the slot yet and whatever is sitting there
+        // -- a previous call's document still being cleared, most often --
+        // fails `isSameCall` for the ordinary reason that it is not ours yet.
+        // Treating that as displacement killed the call the instant it was
+        // placed, telling the caller the other person "could not take this
+        // call" while their phone had never even rung. This is the same window
+        // the 'gone' branch below already declines to judge.
+        if (callStep === 'ringing') {
           endCallWithNotice(
             'Unavailable',
             `${profile.name} could not take this call. Please try again in a moment.`
@@ -833,14 +871,20 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     return () => clearInterval(interval);
   }, [isCallActive, isCaller, roomId]);
 
-  // 2d. Auto-hangup if peer is offline on Agora for more than 10 seconds
+  // 2d. Latch the first sighting of the peer. Billing below starts from here,
+  // not from the call being accepted, so dead air is never charged.
+  React.useEffect(() => {
+    if (remoteUids.length > 0) setPeerEverConnected(true);
+  }, [remoteUids.length]);
+
+  // 2e. Auto-hangup if peer is offline on Agora for more than PEER_JOIN_TIMEOUT_MS
   React.useEffect(() => {
     if (isPending || isConnecting || remoteUids.length > 0) return;
 
     const timeout = setTimeout(() => {
       console.log("[CallScreen] Peer connection timeout. Terminating call.");
       endCallWithNotice('Call ended', 'The connection to the other person was lost.');
-    }, 10000);
+    }, PEER_JOIN_TIMEOUT_MS);
 
     return () => clearTimeout(timeout);
   }, [isPending, isConnecting, remoteUids.length]);
@@ -904,7 +948,11 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   }, [isCallActive, isCaller]);
 
   React.useEffect(() => {
+    // `peerEverConnected` and not merely `isCallActive`: acceptance is not
+    // connection. See the state's declaration for why billing must not start
+    // until the media session actually carries the other person.
     if (!roomId || !matchData?.uid || !globalSettings || !currentUserProfile || !isCallActive) return;
+    if (!peerEverConnected) return;
 
     // Billing is server-authoritative: the backend measures elapsed time from
     // its own clock and applies the configured rate. Both participants tick the
@@ -1017,7 +1065,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       syncIntervalRef.current = 0;
       const user = auth.currentUser;
 
-      // Final tick so the last partial interval is charged from the server clock.
+      // Final tick so the last partial interval is charged from the server
+      // clock. Unconditional on purpose: this is also the call that releases
+      // the server-side busy marker, and skipping it would leave both parties
+      // advertised as mid-call until the marker aged out. The effect only runs
+      // once the peer has actually connected, so a call that never carried
+      // audio never reaches this teardown in the first place.
       processCallBilling(roomId)
         .catch(e => console.warn('[Billing Engine] Final flush failed:', e));
 
@@ -1028,7 +1081,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         });
       }
     };
-  }, [roomId, matchData?.uid, globalSettings, currentUserProfile, isCaller, isVideo, isCallActive]);
+  }, [roomId, matchData?.uid, globalSettings, currentUserProfile, isCaller, isVideo, isCallActive, peerEverConnected]);
 
   const formatTimer = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -1102,6 +1155,14 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             // leaving two people in empty rooms and the newcomer paying for it.
             // The screen still moves on immediately -- the answer has to feel
             // instant -- and unwinds if the offer turns out to be gone.
+            //
+            // Leaving `isPending` set is what made every answered call fail:
+            // it gates the effect that joins the RTC channel, so the receiver
+            // sat on the ringing overlay having accepted in Firestore but
+            // never joined. The caller joined an empty channel, waited out the
+            // peer timeout alone, and both sides were told the connection had
+            // been lost. Nothing else in the component clears this.
+            setIsPending(false);
             acceptCallOffer(ringSlotUid, callRef).catch((e) => {
               console.warn('Failed to accept call:', e);
               if (e instanceof CallGoneError) {
