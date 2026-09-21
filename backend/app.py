@@ -21,6 +21,7 @@ from google.api_core.exceptions import Aborted as FirestoreAborted
 import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from agora_token_builder import RtcTokenBuilder
+import sms_verify
 
 app = Flask(__name__)
 
@@ -412,6 +413,180 @@ def generate_zego_token():
 # ==========================================
 # AUTHENTICATION ROUTES
 # ==========================================
+
+# ------------------------------------------
+# Reverse-OTP sign-in (user texts a code from their own phone)
+# Design: docs/superpowers/specs/2026-09-21-reverse-otp-sms-design.md
+# ------------------------------------------
+
+# In memory and per-process, like the rate limiter: the gateway webhook and the
+# app's poll must land on the same process. Single waitress process only.
+sms_sessions = sms_verify.SessionStore()
+sms_gateway = sms_verify.GatewayHealth()
+
+
+def client_ip():
+    return request.remote_addr or "unknown"
+
+
+def log_sms(outcome, phone=None):
+    """One grep-able line per outcome; never a full number or a code."""
+    masked = sms_verify.mask_phone(phone) if phone else "-"
+    print(f"[AUTH] sms_verify outcome={outcome} phone={masked}", flush=True)
+
+
+@app.route('/api/v1/auth/sms/start', methods=['POST', 'OPTIONS'])
+def sms_start():
+    if request.method == 'OPTIONS':
+        return '', 200
+    data = request.get_json(silent=True) or {}
+    phone = sms_verify.normalize_in_mobile(data.get("phone"))
+    if not phone:
+        return jsonify({"error": "Enter a valid Indian mobile number", "code": "invalid_phone"}), 400
+
+    dev_bypass = os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true"
+    gateway_number = env_value("SMS_GATEWAY_NUMBER")
+    if not dev_bypass:
+        if not (gateway_number and env_value("SMS_GATEWAY_SIGNING_KEY")):
+            return jsonify({"error": "SMS sign-in is not configured", "code": "sms_not_configured"}), 503
+        health, _ = sms_gateway.status()
+        if health in ("offline", "misconfigured"):
+            log_sms("gateway_" + health, phone)
+            return jsonify({"error": "SMS sign-in is temporarily unavailable", "code": "sms_gateway_offline"}), 503
+
+    if rate_limited(f"sms-start:ip:{client_ip()}", 20, 3600):
+        return jsonify({"error": "Too many attempts. Try again later.", "code": "rate_limited"}), 429
+    if rate_limited(f"sms-start:10m:{phone}", 3, 600) or rate_limited(f"sms-start:day:{phone}", 10, 86400):
+        return jsonify({"error": "Too many attempts for this number. Try again in a few minutes.",
+                        "code": "rate_limited"}), 429
+
+    try:
+        session = sms_sessions.start(phone, verified=dev_bypass)
+    except sms_verify.StoreFull:
+        log_sms("store_full", phone)
+        return jsonify({"error": "SMS sign-in is busy. Try again shortly.", "code": "sms_busy"}), 503
+
+    log_sms("started", phone)
+    return jsonify({
+        "sessionId": session["id"],
+        "code": session["code"],
+        "message": f"{sms_verify.CODE_PREFIX} {session['code']}",
+        "gatewayNumber": gateway_number,
+        "expiresIn": sms_verify.SESSION_TTL_SECONDS,
+    }), 200
+
+
+@app.route('/api/v1/auth/sms/inbound', methods=['POST'])
+def sms_inbound():
+    """Webhook from the gateway phone. Only a bad signature earns a non-2xx:
+    anything else would make the gateway retry the same useless SMS for days."""
+    raw = request.get_data(cache=True)
+    if not sms_verify.verify_signature(
+        raw,
+        request.headers.get("X-Timestamp"),
+        request.headers.get("X-Signature"),
+        env_value("SMS_GATEWAY_SIGNING_KEY"),
+    ):
+        log_sms("bad_signature")
+        return jsonify({"error": "invalid signature"}), 401
+
+    sms_gateway.seen()
+    ok = (jsonify({"ok": True}), 200)
+    try:
+        event = json.loads(raw or b"{}")
+    except ValueError:
+        log_sms("bad_payload")
+        return ok
+    if not isinstance(event, dict):
+        log_sms("bad_payload")
+        return ok
+
+    kind = str(event.get("event") or "")
+    if kind.startswith("sms:batch:") or kind.startswith("mms:batch:"):
+        sms_gateway.flag_misconfigured()
+        print("[AUTH][ERROR] SMS gateway is sending batched webhooks. "
+              "Turn batching off in the gateway app, then restart gengal-backend.", flush=True)
+        return ok
+    if kind != "sms:received":
+        return ok
+    if sms_sessions.seen_delivery(event.get("id")):
+        log_sms("duplicate")
+        return ok
+
+    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+    sender = sms_verify.normalize_in_mobile(payload.get("sender") or payload.get("phoneNumber"))
+    code = sms_verify.parse_code(payload.get("message"))
+    if not sender or not code:
+        log_sms("unparseable", sender)
+        return ok
+
+    outcome = sms_sessions.mark_verified(code, sender, sms_verify.parse_received_at(payload.get("receivedAt")))
+    log_sms(outcome, sender)
+    return ok
+
+
+@app.route('/api/v1/auth/sms/status', methods=['POST', 'OPTIONS'])
+def sms_status():
+    if request.method == 'OPTIONS':
+        return '', 200
+    data = request.get_json(silent=True) or {}
+    session_id = data.get("sessionId")
+    if not isinstance(session_id, str) or not session_id:
+        return jsonify({"status": "expired"}), 200
+
+    state, value = sms_sessions.poll(session_id)
+    if state == "throttled":
+        return jsonify({"error": "Polling too fast", "code": "throttled"}), 429
+    if state == "expired":
+        return jsonify({"status": "expired"}), 200
+    if state == "pending":
+        return jsonify({"status": "pending", "expiresIn": value}), 200
+
+    phone = value
+    uid = f"fast2sms:{phone}"
+    # Look up and mint BEFORE consuming, so a Firestore or token failure leaves
+    # the session verified and the app's next poll can simply retry.
+    try:
+        is_new_user = not firestore.client().collection('users').document(uid).get().exists
+    except Exception as e:
+        print(f"[AUTH] sms status users lookup failed: {e}", flush=True)
+        log_sms("lookup_failed", phone)
+        return jsonify({"error": "Temporarily unavailable", "code": "lookup_failed"}), 503
+    try:
+        token = auth.create_custom_token(uid)
+        token = token.decode("utf-8") if isinstance(token, bytes) else token
+    except Exception as e:
+        print(f"[AUTH] sms status token minting failed: {e}", flush=True)
+        log_sms("token_error", phone)
+        return jsonify({"error": "Could not complete sign-in", "code": "token_error"}), 500
+
+    if not sms_sessions.consume(session_id):
+        # A concurrent poll already delivered the token for this session.
+        return jsonify({"status": "expired"}), 200
+
+    try:
+        firestore.client().collection('auth_events').document().set({
+            "uid": uid,
+            "phoneMasked": sms_verify.mask_phone(phone),
+            "method": "reverse_sms",
+            "isNewUser": is_new_user,
+            "ip": client_ip(),
+            "at": firestore.SERVER_TIMESTAMP,
+        })
+    except Exception as e:
+        # The audit trail must never block a sign-in that already succeeded.
+        print(f"[AUTH] auth_events write failed: {e}", flush=True)
+
+    log_sms("verified", phone)
+    return jsonify({"status": "verified", "token": token, "isNewUser": is_new_user}), 200
+
+
+@app.route('/api/v1/auth/sms/health', methods=['GET'])
+def sms_health():
+    """For an external uptime monitor: 503 when the gateway phone has gone quiet."""
+    state, age = sms_gateway.status()
+    return jsonify({"gateway": state, "lastSeenSecondsAgo": age}), (200 if state in ("online", "starting") else 503)
+
 
 # In-process abuse tracking. NOTE: like otp_store above, this is per-worker and
 # lost on restart — both must move to Redis before scaling past one worker.
