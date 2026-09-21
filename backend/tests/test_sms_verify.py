@@ -120,3 +120,167 @@ def test_parse_received_at_reads_offset_timestamps():
 def test_parse_received_at_returns_none_for_junk():
     assert sms_verify.parse_received_at("yesterday") is None
     assert sms_verify.parse_received_at(None) is None
+
+
+# --- SessionStore -------------------------------------------------------------
+
+PHONE = "+919876543210"
+OTHER = "+919123456789"
+
+
+class Clock:
+    def __init__(self, t=1_000_000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def make_store(**kw):
+    clock = kw.pop("clock", Clock())
+    kw.setdefault("min_poll_interval", 0)
+    return sms_verify.SessionStore(clock=clock, **kw), clock
+
+
+def test_start_returns_a_session_with_a_six_digit_code():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    assert s["phone"] == PHONE
+    assert len(s["code"]) == 6 and s["code"].isdigit()
+    assert len(s["id"]) >= 40
+    assert s["verified_at"] is None
+
+
+def test_verified_sms_from_the_right_number_verifies():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    assert store.mark_verified(s["code"], PHONE) == "verified"
+    assert store.poll(s["id"]) == ("verified", PHONE)
+
+
+def test_sms_from_another_number_does_not_verify():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    assert store.mark_verified(s["code"], OTHER) == "sender_mismatch"
+    assert store.poll(s["id"])[0] == "pending"
+
+
+def test_unknown_code_is_no_session():
+    store, _ = make_store(code_source=lambda: 111111)
+    store.start(PHONE)
+    assert store.mark_verified("222222", PHONE) == "no_session"
+
+
+def test_sms_received_before_the_session_is_stale():
+    store, clock = make_store()
+    s = store.start(PHONE)
+    received = clock.t - 61
+    assert store.mark_verified(s["code"], PHONE, received_at=received) == "stale"
+    assert store.mark_verified(s["code"], PHONE, received_at=clock.t - 59) == "verified"
+
+
+def test_session_expires_after_ttl():
+    store, clock = make_store()
+    s = store.start(PHONE)
+    clock.t += 601
+    assert store.poll(s["id"]) == ("expired", None)
+    assert store.mark_verified(s["code"], PHONE) == "no_session"
+
+
+def test_poll_reports_seconds_left():
+    store, clock = make_store()
+    s = store.start(PHONE)
+    clock.t += 100
+    assert store.poll(s["id"]) == ("pending", 500)
+
+
+def test_poll_is_throttled_below_the_minimum_interval():
+    clock = Clock()
+    store = sms_verify.SessionStore(clock=clock, min_poll_interval=0.9)
+    s = store.start(PHONE)
+    assert store.poll(s["id"])[0] == "pending"
+    assert store.poll(s["id"]) == ("throttled", None)
+    clock.t += 1
+    assert store.poll(s["id"])[0] == "pending"
+
+
+def test_consume_succeeds_exactly_once():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    store.mark_verified(s["code"], PHONE)
+    assert store.consume(s["id"]) is True
+    assert store.consume(s["id"]) is False
+    assert store.poll(s["id"]) == ("expired", None)
+
+
+def test_starting_again_replaces_the_previous_session_for_that_phone():
+    store, _ = make_store()
+    first = store.start(PHONE)
+    second = store.start(PHONE)
+    assert store.poll(first["id"]) == ("expired", None)
+    assert store.poll(second["id"])[0] == "pending"
+    assert len(store) == 1
+
+
+def test_codes_are_redrawn_until_unique():
+    draws = iter([123456, 123456, 654321])
+    store, _ = make_store(code_source=lambda: next(draws))
+    a = store.start(PHONE)
+    b = store.start(OTHER)
+    assert a["code"] == "123456"
+    assert b["code"] == "654321"
+
+
+def test_store_cap_raises_store_full():
+    store, _ = make_store(max_sessions=1)
+    store.start(PHONE)
+    with pytest.raises(sms_verify.StoreFull):
+        store.start(OTHER)
+
+
+def test_dev_bypass_session_starts_verified():
+    store, _ = make_store()
+    s = store.start(PHONE, verified=True)
+    assert store.poll(s["id"]) == ("verified", PHONE)
+
+
+def test_duplicate_delivery_ids_are_detected_for_24h():
+    store, clock = make_store()
+    assert store.seen_delivery("d1") is False
+    assert store.seen_delivery("d1") is True
+    clock.t += 86_401
+    assert store.seen_delivery("d1") is False
+
+
+def test_empty_delivery_id_is_never_a_duplicate():
+    store, _ = make_store()
+    assert store.seen_delivery("") is False
+    assert store.seen_delivery(None) is False
+
+
+# --- GatewayHealth --------------------------------------------------------------
+
+def test_health_is_starting_until_first_signal_then_offline():
+    clock = Clock()
+    health = sms_verify.GatewayHealth(clock=clock)
+    assert health.status() == ("starting", None)
+    clock.t += 301
+    assert health.status() == ("offline", None)
+
+
+def test_health_is_online_after_a_signal_and_offline_when_it_goes_quiet():
+    clock = Clock()
+    health = sms_verify.GatewayHealth(clock=clock)
+    health.seen()
+    clock.t += 60
+    assert health.status() == ("online", 60)
+    clock.t += 241
+    assert health.status() == ("offline", 301)
+
+
+def test_misconfigured_wins_over_online():
+    clock = Clock()
+    health = sms_verify.GatewayHealth(clock=clock)
+    health.seen()
+    health.flag_misconfigured()
+    assert health.status()[0] == "misconfigured"

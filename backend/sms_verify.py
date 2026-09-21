@@ -90,3 +90,167 @@ def parse_received_at(value):
         return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except ValueError:
         return None
+
+
+class StoreFull(Exception):
+    """Too many live sessions; refuse new ones rather than grow without bound."""
+
+
+class SessionStore:
+    """Live reverse-OTP sessions, in memory, for a single process.
+
+    The gateway webhook and the app's status poll must reach the same process
+    for this to work, which the one-worker waitress setup guarantees. Moving to
+    several workers means moving this to Redis first.
+    """
+
+    def __init__(self, ttl_seconds=SESSION_TTL_SECONDS, max_sessions=MAX_LIVE_SESSIONS,
+                 min_poll_interval=MIN_POLL_INTERVAL_SECONDS, clock=time.time, code_source=None):
+        self._ttl = ttl_seconds
+        self._max = max_sessions
+        self._min_poll = min_poll_interval
+        self._clock = clock
+        self._code_source = code_source or (lambda: secrets.randbelow(10 ** 6))
+        self._lock = threading.Lock()
+        self._sessions = {}    # session id -> session dict
+        self._by_code = {}     # code -> session id
+        self._by_phone = {}    # phone -> session id
+        self._deliveries = {}  # gateway delivery id -> first seen
+
+    def __len__(self):
+        with self._lock:
+            self._purge(self._clock())
+            return len(self._sessions)
+
+    def start(self, phone, verified=False):
+        with self._lock:
+            now = self._clock()
+            self._purge(now)
+            previous = self._by_phone.get(phone)
+            if previous:
+                self._drop(previous)
+            if len(self._sessions) >= self._max:
+                raise StoreFull()
+            code = self._fresh_code()
+            session = {
+                "id": secrets.token_urlsafe(32),
+                "phone": phone,
+                "code": code,
+                "created_at": now,
+                "expires_at": now + self._ttl,
+                "verified_at": now if verified else None,
+                "last_poll": None,
+            }
+            self._sessions[session["id"]] = session
+            self._by_code[code] = session["id"]
+            self._by_phone[phone] = session["id"]
+            return {k: v for k, v in session.items() if k != "last_poll"}
+
+    def mark_verified(self, code, sender, received_at=None):
+        with self._lock:
+            now = self._clock()
+            self._purge(now)
+            session_id = self._by_code.get(code)
+            if not session_id:
+                return "no_session"
+            session = self._sessions[session_id]
+            # The gateway retries for about two days, so an old queued SMS can
+            # arrive long after its session died. It must not verify a newer
+            # session that happened to draw the same code.
+            if received_at is not None and received_at < session["created_at"] - RECEIVED_AT_SKEW_SECONDS:
+                return "stale"
+            if sender != session["phone"]:
+                return "sender_mismatch"
+            if session["verified_at"] is None:
+                session["verified_at"] = now
+            return "verified"
+
+    def seen_delivery(self, delivery_id):
+        if not delivery_id:
+            return False
+        with self._lock:
+            now = self._clock()
+            self._purge(now)
+            if delivery_id in self._deliveries:
+                return True
+            self._deliveries[delivery_id] = now
+            return False
+
+    def poll(self, session_id):
+        with self._lock:
+            now = self._clock()
+            self._purge(now)
+            session = self._sessions.get(session_id) if session_id else None
+            if not session:
+                return "expired", None
+            last = session["last_poll"]
+            if last is not None and now - last < self._min_poll:
+                return "throttled", None
+            session["last_poll"] = now
+            if session["verified_at"] is None:
+                return "pending", max(0, int(session["expires_at"] - now))
+            return "verified", session["phone"]
+
+    def consume(self, session_id):
+        with self._lock:
+            if session_id not in self._sessions:
+                return False
+            self._drop(session_id)
+            return True
+
+    def _fresh_code(self):
+        while True:
+            code = "%06d" % self._code_source()
+            if code not in self._by_code:
+                return code
+
+    def _purge(self, now):
+        for session_id in [s for s, v in self._sessions.items() if v["expires_at"] <= now]:
+            self._drop(session_id)
+        for delivery_id in [d for d, seen in self._deliveries.items() if now - seen > DELIVERY_ID_TTL_SECONDS]:
+            del self._deliveries[delivery_id]
+
+    def _drop(self, session_id):
+        session = self._sessions.pop(session_id, None)
+        if not session:
+            return
+        if self._by_code.get(session["code"]) == session_id:
+            del self._by_code[session["code"]]
+        if self._by_phone.get(session["phone"]) == session_id:
+            del self._by_phone[session["phone"]]
+
+
+class GatewayHealth:
+    """Whether the gateway phone is alive, from the last signed request it sent.
+
+    `starting` covers the minute after a server restart, before the first
+    heartbeat arrives, so a deploy does not briefly lock everyone out.
+    `misconfigured` sticks until restart: it means batching was turned on and
+    every SMS is arriving in a shape this server does not read.
+    """
+
+    def __init__(self, clock=time.time, stale_seconds=GATEWAY_STALE_SECONDS):
+        self._clock = clock
+        self._stale = stale_seconds
+        self._lock = threading.Lock()
+        self._started_at = clock()
+        self._last_seen = None
+        self._misconfigured = False
+
+    def seen(self):
+        with self._lock:
+            self._last_seen = self._clock()
+
+    def flag_misconfigured(self):
+        with self._lock:
+            self._misconfigured = True
+
+    def status(self):
+        with self._lock:
+            now = self._clock()
+            age = None if self._last_seen is None else int(now - self._last_seen)
+            if self._misconfigured:
+                return "misconfigured", age
+            if self._last_seen is None:
+                return ("starting" if now - self._started_at <= self._stale else "offline"), None
+            return ("online" if age <= self._stale else "offline"), age
