@@ -314,6 +314,11 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Sign-in audit trail, written only by the backend's Admin SDK.
+    match /auth_events/{eventId} {
+      allow read, write: if false;
+    }
+
     // Payout requests awaiting manual review. A user may file their own and
     // read it back, but never approve it: status is fixed to "pending" on
     // create and the client cannot update or delete afterwards.

@@ -5,6 +5,10 @@ Description=GenGal backend (Flask under waitress)
 # after a reboot fail and sit in the restart loop below until it happens to win.
 After=network-online.target
 Wants=network-online.target
+# A crash loop from bad config should stop, not hammer forever. These belong in
+# [Unit]: under [Service] systemd ignores them and logs "Unknown key name".
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -22,17 +26,21 @@ EnvironmentFile=/etc/gengal/gengal.env
 # should be able to reach the app; without --host 127.0.0.1 waitress listens on
 # 0.0.0.0 and the app is reachable on :5055 in plain HTTP, bypassing TLS
 # entirely for anyone who finds the port.
+#
+# The trusted-proxy flags make waitress take the client address from nginx's
+# X-Forwarded-For. Without them request.remote_addr is 127.0.0.1 for every
+# user, and every per-IP rate limit becomes one bucket shared by all users.
 ExecStart=/opt/gengal/venv/bin/waitress-serve \
     --host 127.0.0.1 \
     --port 5055 \
     --threads 8 \
+    --trusted-proxy=127.0.0.1 \
+    --trusted-proxy-headers=x-forwarded-for \
+    --clear-untrusted-proxy-headers \
     app:app
 
 Restart=always
 RestartSec=3
-# A crash loop from bad config should stop, not hammer forever.
-StartLimitIntervalSec=120
-StartLimitBurst=6
 
 # The app writes debug_events.log under WorkingDirectory, so ProtectSystem=full
 # (read-only /usr and /etc, /opt still writable) rather than strict, which

@@ -141,15 +141,13 @@ PAYMENT_PROVIDER=razorpay
 RAZORPAY_KEY_ID=
 RAZORPAY_KEY_SECRET=
 
-TWILIO_ACCOUNT_SID=
-TWILIO_AUTH_TOKEN=
-TWILIO_PHONE_NUMBER=
+SMS_GATEWAY_NUMBER=
+SMS_GATEWAY_SIGNING_KEY=
 
 ADMIN_UIDS=
 CORS_ALLOWED_ORIGINS=
 
 ALLOW_DEV_OTP_BYPASS=false
-ALLOW_LEGACY_PLAINTEXT_LOGIN=false
 FLASK_DEBUG=false
 ENABLE_REMOTE_DEBUG_LOG=false
 ```
@@ -189,13 +187,13 @@ Then set `EXPO_PUBLIC_BACKEND_URL=https://<your-host>` in the app and rebuild.
    an instance by *subnet*; there is no VCN field.
 6. **The cost estimator always shows list price** (for example $8.50/month for 200 GB)
    and never subtracts the free allowance. Judge cost from the step 1 audit instead.
-7. **`deploy/gengal.env.example` is incomplete**: `TWILIO_ACCOUNT_SID`,
-   `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` and `ZEGO_APP_ID` are read by the code but
-   missing from the template. Twilio is read lazily inside `send-otp`, so the service
-   starts fine and OTP sending fails later.
-8. **One process only.** The OTP store and rate limiters are in-memory dicts; a second
-   worker breaks OTP verification. Scale with threads (`--threads`), not workers, until
-   they move to Redis.
+7. **Never re-run `setup-oracle.sh` after certbot.** It reinstalls
+   `deploy/nginx-gengal.conf` over `/etc/nginx/sites-available/gengal`, which
+   wipes certbot's TLS server block and the real `server_name`. Redeploy code with
+   `git fetch` + `reset` in `/opt/gengal` instead (see §12).
+8. **One process only.** The reverse-OTP session store and the rate limiters are
+   in-memory; the gateway's webhook and the app's poll must reach the same process. Scale
+   with threads (`--threads`), not workers, until they move to Redis.
 9. **Idle reclamation.** Oracle can reclaim an Always Free VM left idle for 7 days. Keep
    this runbook so a rebuild is cheap; the server holds no data — everything is in Firestore.
 
@@ -205,3 +203,42 @@ At about 1,000 concurrent callers the server sees only billing ticks: two per ca
 15 seconds, roughly 67 req/s, about 0.3 of a core. Raise waitress to `--threads 32` in
 `/etc/systemd/system/gengal-backend.service` at that point. The real costs at that scale
 are Agora/Zego per-minute charges and Firestore reads and writes, not the VM.
+
+## 12. Reverse-OTP gateway phone
+
+Sign-in works by users texting `GENGAL <code>` from their own phone to a spare Android
+phone, which forwards the SMS to the backend.
+
+1. Spare Android phone, Indian SIM, charger always connected, Wi-Fi on.
+2. Install **SMS Gateway for Android** (capcom6, open source). Grant SMS permission.
+3. Use **Local server** mode (messages do not pass through a third-party cloud). Note the
+   local address, username and password it shows.
+4. From a computer on the same Wi-Fi, register both webhooks:
+   ```bash
+   curl -X POST -u USER:PASS -H "Content-Type: application/json" \
+     -d '{"id":"gengal-sms","url":"https://<host>/api/v1/auth/sms/inbound","event":"sms:received"}' \
+     http://<phone-ip>:8080/webhooks
+   curl -X POST -u USER:PASS -H "Content-Type: application/json" \
+     -d '{"id":"gengal-ping","url":"https://<host>/api/v1/auth/sms/inbound","event":"system:ping"}' \
+     http://<phone-ip>:8080/webhooks
+   ```
+5. In the app: **Settings → Ping** = 60 s. Leave webhook **batching off**.
+6. Copy **Settings → Webhooks → Signing Key** into `SMS_GATEWAY_SIGNING_KEY`, and the SIM's
+   number into `SMS_GATEWAY_NUMBER`, in `/etc/gengal/gengal.env`.
+7. Exempt the app from battery optimisation and enable start-on-boot. Keep the SIM
+   recharged — an expired prepaid SIM stops receiving SMS.
+8. `sudo systemctl restart gengal-backend`, wait a minute, then
+   `curl -s https://<host>/api/v1/auth/sms/health` must show `"gateway":"online"`.
+9. Add a free uptime monitor (UptimeRobot / Better Stack) on that URL every 5 minutes with
+   email alerts. It fires when the phone dies.
+
+**Redeploying code** (never re-run `setup-oracle.sh`, see Trap 7):
+
+```bash
+sudo git -C /opt/gengal fetch --depth 1 origin <branch>
+sudo git -C /opt/gengal reset --hard FETCH_HEAD
+sudo /opt/gengal/venv/bin/pip install -r /opt/gengal/backend/requirements.txt
+sudo chown -R gengal:gengal /opt/gengal
+sudo install -m 0644 /opt/gengal/deploy/gengal-backend.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl restart gengal-backend
+```
