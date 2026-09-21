@@ -157,11 +157,16 @@ Firebase service account (Firebase console → Project settings → Service acco
 Generate new private key), copied up with `scp` to `/home/ubuntu/sa.json`, then:
 
 ```bash
-sudo bash -c 'printf "FIREBASE_CREDENTIALS_JSON=%s\n" "$(jq -c . /home/ubuntu/sa.json)" >> /etc/gengal/gengal.env'
+sudo install -m 0640 -o root -g gengal /home/ubuntu/sa.json /etc/gengal/firebase-sa.json
+echo 'FIREBASE_CREDENTIALS_FILE=/etc/gengal/firebase-sa.json' | sudo tee -a /etc/gengal/gengal.env
 rm /home/ubuntu/sa.json
 ```
 
-It must be **one line**: systemd's EnvironmentFile truncates at the first newline.
+**Trap:** never inline the JSON as `FIREBASE_CREDENTIALS_JSON=` in the env file.
+systemd strips backslashes from unquoted values, so the private key arrives
+corrupted, Firebase silently fails to initialise ("Unable to load PEM file" in
+`journalctl`), and every sign-in fails with `lookup_failed`. After starting, check
+`journalctl -u gengal-backend -b | grep "Firebase Admin"` says "initialized successfully".
 
 ## 9. Start and verify
 
