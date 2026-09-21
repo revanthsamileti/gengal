@@ -16,7 +16,7 @@ import { auth, db } from '../config/firebase';
 import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
 import { transferCoins, processCallBilling } from '../services/coinService';
 import { subscribeToGlobalSettings, GlobalSettings } from '../services/adminService';
-import ConnectingOverlay from '../components/ConnectingOverlay';
+import ConnectingOverlay, { CallStage } from '../components/ConnectingOverlay';
 import { createCallOffer, acceptCallOffer, rejectCallOffer, subscribeToOutboundCallStatus, clearCallOffer, openCallRecord, closeCallRecord, ReceiverBusyError, CallSetupTimeoutError, CallGoneError, OFFER_EXPIRY_MS } from '../services/liveRoomService';
 import IncomingCallOverlay from '../components/IncomingCallOverlay';
 import { authedPost } from '../services/authService';
@@ -120,6 +120,13 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [callerStatus, setCallerStatus] = useState<'calling' | 'accepted' | 'rejected' | null>(null);
   const [callStep, setCallStep] = useState<'connecting' | 'ringing' | 'talking'>('connecting');
   const overlayStatus = (isCaller && callStep === 'ringing') ? 'ringing' : 'connecting';
+  // Which part of joining the media session is in flight, so the connecting
+  // screen reports the real step rather than a timer.
+  const [joinPhase, setJoinPhase] = useState<'securing' | 'joining'>('securing');
+  const callStage: CallStage =
+    isCaller && callerStatus !== 'accepted'
+      ? (callStep === 'ringing' ? 'ringing' : 'setup')
+      : joinPhase;
 
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [callerLiveCoins, setCallerLiveCoins] = useState(0);
@@ -581,6 +588,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       const connectionPromise = async () => {
         // Ephemeral RTC keys are minted by the backend, which derives the uid
         // from the bearer token rather than trusting the request body.
+        if (isMounted) setJoinPhase('securing');
         if (currentProvider === 'agora' && user) {
           // Usually already in flight (or done) from the prefetch above, so this
           // resolves immediately instead of adding a round-trip after answering.
@@ -604,6 +612,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         }
 
         if (isMounted) {
+          setJoinPhase('joining');
           await connectSeat(roomId, connectionToken, extraParam);
           if (isMounted) setIsConnecting(false);
         }
@@ -1228,6 +1237,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             targetName={profile.name}
             onCancel={handleEndCall} 
             status={overlayStatus}
+            stage={callStage}
+            isCaller={isCaller}
+            isVideo={isVideo}
+            targetAvatarData={profile.avatarData}
+            targetAvatarUri={profile.uri}
+            ringTimeoutMs={RING_TIMEOUT_MS}
           />
         )}
         <View style={styles.voicePhone}>
@@ -1325,6 +1340,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           targetName={profile.name}
           onCancel={handleEndCall} 
           status={overlayStatus}
+          stage={callStage}
+          isCaller={isCaller}
+          isVideo={isVideo}
+          targetAvatarData={profile.avatarData}
+          targetAvatarUri={profile.uri}
+          ringTimeoutMs={RING_TIMEOUT_MS}
         />
       )}
       <View style={styles.videoPhone}>
