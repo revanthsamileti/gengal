@@ -1554,8 +1554,8 @@ In `docs/ORACLE_SETUP_RUNBOOK.md`:
 
    **Redeploying code** (never re-run `setup-oracle.sh`, see Trap 7):
    ```bash
-   sudo git -C /opt/gengal fetch --depth 1 origin <branch>
-   sudo git -C /opt/gengal reset --hard FETCH_HEAD
+   sudo git -c safe.directory=/opt/gengal -C /opt/gengal fetch --depth 1 origin <branch>
+   sudo git -c safe.directory=/opt/gengal -C /opt/gengal reset --hard FETCH_HEAD
    sudo /opt/gengal/venv/bin/pip install -r /opt/gengal/backend/requirements.txt
    sudo chown -R gengal:gengal /opt/gengal
    sudo install -m 0644 /opt/gengal/deploy/gengal-backend.service /etc/systemd/system/
@@ -2303,13 +2303,13 @@ git push -u origin feature/reverse-otp-sms
 Over SSH to `ubuntu@129.225.117.93` (key `~/.ssh/oracle_gengal.key`). Do **not** run `setup-oracle.sh` (it overwrites certbot's nginx config).
 
 ```bash
-/opt/gengal/venv/bin/waitress-serve --help | grep -E "trusted-proxy|clear-untrusted"
+/opt/gengal/venv/bin/python -c "from waitress.adjustments import Adjustments as A; kw,_=A.parse_args(['--trusted-proxy=127.0.0.1','--trusted-proxy-headers=x-forwarded-for','--clear-untrusted-proxy-headers','app:app']); kw.pop('help',None); kw.pop('call',None); a=A(**kw); print(a.trusted_proxy, sorted(a.trusted_proxy_headers), a.clear_untrusted_proxy_headers)"
 ```
-Expected: lines for `--trusted-proxy`, `--trusted-proxy-headers`, `--clear-untrusted-proxy-headers`. If any is missing, stop.
+Expected: `127.0.0.1 ['x-forwarded-for'] True`. (waitress 3.0's `--help` text does not list these flags, but its argument parser accepts them.) If it raises, stop.
 
 ```bash
-sudo git -C /opt/gengal fetch --depth 1 origin feature/reverse-otp-sms
-sudo git -C /opt/gengal reset --hard FETCH_HEAD
+sudo git -c safe.directory=/opt/gengal -C /opt/gengal fetch --depth 1 origin feature/reverse-otp-sms
+sudo git -c safe.directory=/opt/gengal -C /opt/gengal reset --hard FETCH_HEAD
 sudo /opt/gengal/venv/bin/pip install -q -r /opt/gengal/backend/requirements.txt
 sudo chown -R gengal:gengal /opt/gengal
 sudo install -m 0644 /opt/gengal/deploy/gengal-backend.service /etc/systemd/system/

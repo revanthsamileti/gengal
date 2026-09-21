@@ -236,8 +236,8 @@ phone, which forwards the SMS to the backend.
 **Redeploying code** (never re-run `setup-oracle.sh`, see Trap 7):
 
 ```bash
-sudo git -C /opt/gengal fetch --depth 1 origin <branch>
-sudo git -C /opt/gengal reset --hard FETCH_HEAD
+sudo git -c safe.directory=/opt/gengal -C /opt/gengal fetch --depth 1 origin <branch>
+sudo git -c safe.directory=/opt/gengal -C /opt/gengal reset --hard FETCH_HEAD
 sudo /opt/gengal/venv/bin/pip install -r /opt/gengal/backend/requirements.txt
 sudo chown -R gengal:gengal /opt/gengal
 sudo install -m 0644 /opt/gengal/deploy/gengal-backend.service /etc/systemd/system/
