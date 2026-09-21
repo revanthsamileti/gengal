@@ -115,8 +115,13 @@ def parse_positive_number(value, field_name):
 
 # Initialize Firebase Admin
 try:
+    firebase_creds_file = env_value("FIREBASE_CREDENTIALS_FILE")
     firebase_creds_json = env_value("FIREBASE_CREDENTIALS_JSON")
-    if firebase_creds_json:
+    if firebase_creds_file:
+        # Preferred on the server: systemd's EnvironmentFile strips the
+        # backslashes out of an inline JSON value, corrupting the private key.
+        cred = credentials.Certificate(firebase_creds_file)
+    elif firebase_creds_json:
         # Load from environment variable (preferred; never stores credentials in git)
         cred = credentials.Certificate(json.loads(firebase_creds_json))
     else:
