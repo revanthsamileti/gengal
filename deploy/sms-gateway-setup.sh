@@ -14,7 +14,21 @@ set -euo pipefail
 ENV_FILE=/etc/gengal/gengal.env
 HOST="${GENGAL_HOST:-gengalapp.duckdns.org}"
 ROTATE=false
-[ "${1:-}" = "--rotate" ] && ROTATE=true
+QUIET=false
+ARG_NUMBER=""
+ARG_SIM=""
+# --number 9XXXXXXXXX / --sim sim1 skip the prompts. --quiet never prints the
+# secrets, for when another tool delivers them to the phone.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --rotate) ROTATE=true ;;
+        --quiet) QUIET=true ;;
+        --number) ARG_NUMBER="${2:-}"; shift ;;
+        --sim) ARG_SIM="${2:-}"; shift ;;
+        *) echo "Unknown option: $1" >&2; exit 1 ;;
+    esac
+    shift
+done
 
 if [ "$(id -u)" -ne 0 ]; then
     echo "Run with sudo." >&2
@@ -31,7 +45,11 @@ set_var() {
 
 # --- gateway SIM number --------------------------------------------------------
 number="$(current SMS_GATEWAY_NUMBER)"
-read -rp "Gateway SIM number (10 digits, the SIM users will text) [${number:-none}]: " input
+if [ -n "$ARG_NUMBER" ]; then
+    input="$ARG_NUMBER"
+else
+    read -rp "Gateway SIM number (10 digits, the SIM users will text) [${number:-none}]: " input
+fi
 if [ -n "$input" ]; then
     digits="$(printf '%s' "$input" | tr -cd '0-9')"
     digits="${digits: -10}"
@@ -48,7 +66,11 @@ fi
 
 # --- SIM slot ------------------------------------------------------------------
 sim="$(current SMS_GATEWAY_SIM)"
-read -rp "SIM slot of that number on the gateway phone (sim1/sim2) [${sim:-sim1}]: " input
+if [ -n "$ARG_SIM" ]; then
+    input="$ARG_SIM"
+else
+    read -rp "SIM slot of that number on the gateway phone (sim1/sim2) [${sim:-sim1}]: " input
+fi
 sim="${input:-${sim:-sim1}}"
 case "$sim" in sim1|sim2) ;; *) echo "Use sim1 or sim2." >&2; exit 1 ;; esac
 
@@ -72,6 +94,11 @@ chmod 0640 "$ENV_FILE"
 systemctl restart gengal-backend
 sleep 3
 systemctl is-active --quiet gengal-backend || { echo "gengal-backend failed to start; see journalctl -u gengal-backend" >&2; exit 1; }
+
+if $QUIET; then
+    echo "Saved number $number ($sim) and secrets to $ENV_FILE; gengal-backend restarted. Secrets not shown."
+    exit 0
+fi
 
 cat <<EOF
 
