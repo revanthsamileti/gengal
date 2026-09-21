@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from werkzeug.security import check_password_hash
 import json
 import os
 try:
@@ -14,7 +13,6 @@ import math
 import time
 import sys
 import traceback
-import random
 import requests
 from datetime import datetime, timedelta, timezone
 from google.api_core.exceptions import Aborted as FirestoreAborted
@@ -35,36 +33,6 @@ def require_env(name):
         raise RuntimeError(f"Missing required environment variable: {name}")
     return value
 
-def hash_password(password, salt=None):
-    salt = salt or os.urandom(16).hex()
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 210000)
-    return f"pbkdf2_sha256$210000${salt}${digest.hex()}"
-
-def verify_password(password, stored):
-    if not stored:
-        return False
-    parts = stored.split("$")
-    if len(parts) == 4 and parts[0] == "pbkdf2_sha256":
-        _, rounds, salt, expected = parts
-        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), int(rounds)).hex()
-        return hmac.compare_digest(digest, expected)
-    # Werkzeug-format hashes ("scrypt:...$salt$hash", "pbkdf2:sha256:...$..."),
-    # written by an earlier code path into /user_credentials. Without this the
-    # verifier fell straight through to the plaintext branch below, which is
-    # off in production -- so every account holding one was locked out of its
-    # own password entirely. login_password migrates these to the native format
-    # on the next successful sign-in.
-    if ":" in parts[0]:
-        try:
-            return check_password_hash(stored, password)
-        except Exception as e:
-            print(f"[AUTH] Could not verify werkzeug-format hash: {e}", flush=True)
-            return False
-    # Legacy plaintext comparison, kept only to migrate accounts created before
-    # hashing existed. Opt in explicitly; leave it off in production.
-    if os.environ.get("ALLOW_LEGACY_PLAINTEXT_LOGIN") == "true":
-        return hmac.compare_digest(password, stored)
-    return False
 
 def agora_numeric_uid(user_uid):
     """Stable 31-bit uid for Agora.
@@ -159,9 +127,6 @@ try:
 except Exception as e:
     print(f"Warning: Could not initialize Firebase Admin: {e}")
 
-# Fast2SMS Global config
-FAST2SMS_API_KEY = env_value("FAST2SMS_API_KEY")
-otp_store = {} # simple dictionary mapping { phone: { "otp": "123456", "expires": datetime } }
 
 # Securely extract your credentials from the environment variables
 AGORA_APP_ID = env_value("AGORA_APP_ID")
@@ -588,251 +553,6 @@ def sms_health():
     return jsonify({"gateway": state, "lastSeenSecondsAgo": age}), (200 if state in ("online", "starting") else 503)
 
 
-# In-process abuse tracking. NOTE: like otp_store above, this is per-worker and
-# lost on restart — both must move to Redis before scaling past one worker.
-abuse_store = {}
-
-@app.route('/api/v1/auth/send-otp', methods=['POST'])
-def send_otp():
-    data = request.json
-    phone = data.get('phone')
-    if not phone:
-        return jsonify({"error": "Phone number is required"}), 400
-        
-    # Clean phone
-    phone = phone.replace(" ", "")
-
-    # OTP delivery costs money (Twilio SMS). Rate-limit per source IP in addition
-    # to the per-phone cooldown below so a single attacker cannot drive cost by
-    # cycling through many different destination numbers from one address.
-    if rate_limited(f"sendotp_ip:{request.remote_addr}", 10, 3600):
-        return jsonify({"error": "Too many OTP requests from this address. Try again later."}), 429
-
-    now = datetime.now()
-
-    # Check if user is blocked
-    abuse_record = abuse_store.get(phone, {"blocked_until": None, "consecutive_failed_requests": 0, "last_requested_at": None})
-    if abuse_record["blocked_until"] and now < abuse_record["blocked_until"]:
-        delta = abuse_record["blocked_until"] - now
-        minutes_left = int(delta.total_seconds() / 60)
-        return jsonify({"error": f"Too many failed attempts. Try again in {minutes_left} minutes."}), 429
-        
-    # Enforce 90-second cooldown
-    if abuse_record["last_requested_at"]:
-        seconds_since_last = (now - abuse_record["last_requested_at"]).total_seconds()
-        if seconds_since_last < 90:
-            return jsonify({"error": f"Please wait {int(90 - seconds_since_last)} seconds before requesting another OTP."}), 429
-            
-    abuse_record["last_requested_at"] = now
-    abuse_store[phone] = abuse_record
-        
-    # Generate 6-digit OTP
-    otp = str(random.randint(100000, 999999))
-    
-    # Store OTP with a 5-minute expiration
-    otp_store[phone] = {
-        "otp": otp,
-        "expires": now + timedelta(minutes=5),
-        "incorrect_guesses": 0
-    }
-    
-    # Development: skip the SMS and print the code instead. Without this the
-    # ALLOW_DEV_OTP_BYPASS path was unreachable — verify accepted 000000, but no
-    # OTP could ever be issued without live Twilio credentials.
-    if os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true":
-        print(f"[AUTH][DEV] OTP for {phone} is {otp} (SMS skipped; 000000 also accepted)", flush=True)
-        return jsonify({"status": "success", "message": "OTP sent (dev mode)", "devMode": True})
-
-    TWILIO_ACCOUNT_SID = require_env("TWILIO_ACCOUNT_SID")
-    TWILIO_AUTH_TOKEN = require_env("TWILIO_AUTH_TOKEN")
-    TWILIO_PHONE_NUMBER = require_env("TWILIO_PHONE_NUMBER")
-
-    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
-    dest_phone = phone if phone.startswith('+') else f"+{phone}"
-        
-    payload = {
-        "To": dest_phone,
-        "From": TWILIO_PHONE_NUMBER,
-        "Body": f"Your GenGal Verification Code is: {otp}"
-    }
-    
-    print(f"[AUTH] Sending OTP to {dest_phone} via Twilio...")
-    import sys; sys.stdout.flush()
-    
-    try:
-        response = requests.post(url, data=payload, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
-        print(f"[AUTH] Twilio Response status: {response.status_code}")
-        sys.stdout.flush()
-        return jsonify({"status": "success", "message": "OTP sent"})
-    except Exception as e:
-        print(f"[AUTH] Twilio Error: {e}")
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/api/v1/auth/verify-otp', methods=['POST'])
-def verify_otp():
-    data = request.json
-    phone = data.get('phone')
-    user_otp = data.get('otp')
-    
-    if not phone or not user_otp:
-        return jsonify({"error": "Phone and OTP are required"}), 400
-        
-    phone = phone.replace(" ", "")
-    now = datetime.now()
-    
-    # Check if user is blocked
-    abuse_record = abuse_store.get(phone, {"blocked_until": None, "consecutive_failed_requests": 0, "last_requested_at": None})
-    if abuse_record["blocked_until"] and now < abuse_record["blocked_until"]:
-        delta = abuse_record["blocked_until"] - now
-        minutes_left = int(delta.total_seconds() / 60)
-        return jsonify({"error": f"Too many failed attempts. Try again in {minutes_left} minutes."}), 429
-    
-    allow_otp_bypass = os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true"
-    if not (allow_otp_bypass and user_otp == '000000'):
-        record = otp_store.get(phone)
-        if not record:
-            return jsonify({"error": "No active OTP found. Please request a new one."}), 400
-            
-        if now > record['expires']:
-            del otp_store[phone]
-            return jsonify({"error": "OTP expired. Please request a new one."}), 400
-            
-        if record['otp'] != user_otp:
-            # Incorrect guess
-            record['incorrect_guesses'] += 1
-            otp_store[phone] = record
-            
-            # 3 incorrect guesses on a single request = 5 min block (or 1hr if 3rd consecutive failed request)
-            if record['incorrect_guesses'] >= 3:
-                del otp_store[phone]
-                abuse_record['consecutive_failed_requests'] += 1
-                
-                if abuse_record['consecutive_failed_requests'] >= 3:
-                    # 3 sequential failed requests -> 1 hr block
-                    abuse_record['blocked_until'] = now + timedelta(hours=1)
-                    abuse_store[phone] = abuse_record
-                    return jsonify({"error": "You have failed too many times. You are blocked for 1 hour."}), 429
-                else:
-                    # 1 failed request (3 guesses) -> 5 min block
-                    abuse_record['blocked_until'] = now + timedelta(minutes=5)
-                    abuse_store[phone] = abuse_record
-                    return jsonify({"error": "You entered the wrong code 3 times. Please try again in 5 minutes."}), 429
-                    
-            return jsonify({"error": f"Invalid OTP. {3 - record['incorrect_guesses']} attempts remaining."}), 400
-        
-    # OTP is correct! Clear stores.
-    if phone in otp_store:
-        del otp_store[phone]
-    if phone in abuse_store:
-        # Reset consecutive failed requests on success
-        abuse_store[phone]['consecutive_failed_requests'] = 0
-        abuse_store[phone]['blocked_until'] = None
-    
-    uid = f"fast2sms:{phone}"
-    print(f"[AUTH] OTP verified for {phone}. Minting custom token for uid: {uid}")
-    
-    try:
-        custom_token = auth.create_custom_token(uid)
-        return jsonify({
-            "status": "success",
-            "token": custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
-        })
-    except Exception as e:
-        print(f"[AUTH] Token minting error: {e}")
-        return jsonify({"error": "Failed to generate auth token"}), 500
-
-def read_stored_password(db_client, uid):
-    """Password hashes live in /user_credentials, which no client can read.
-
-    Falls back to the legacy field on the public /users document so accounts
-    created before the split can still log in and be migrated.
-    """
-    cred_snap = db_client.collection('user_credentials').document(uid).get()
-    if cred_snap.exists:
-        stored = (cred_snap.to_dict() or {}).get('passwordHash')
-        if stored:
-            return stored, False
-    user_snap = db_client.collection('users').document(uid).get()
-    if not user_snap.exists:
-        return None, False
-    user_data = user_snap.to_dict() or {}
-    return user_data.get('passwordHash') or user_data.get('password'), True
-
-def write_stored_password(db_client, uid, password):
-    db_client.collection('user_credentials').document(uid).set(
-        {"passwordHash": hash_password(password), "updatedAt": firestore.SERVER_TIMESTAMP}
-    )
-    # Strip any credential material still sitting on the world-readable profile.
-    try:
-        db_client.collection('users').document(uid).update({
-            "passwordHash": firestore.DELETE_FIELD,
-            "password": firestore.DELETE_FIELD,
-        })
-    except Exception:
-        pass
-
-@app.route('/api/v1/auth/login-password', methods=['POST', 'OPTIONS'])
-def login_password():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    data = request.json or {}
-    phone = data.get('phone')
-    password = data.get('password')
-
-    if not phone or not password:
-        return jsonify({"error": "Phone and password are required"}), 400
-
-    phone = phone.replace(" ", "")
-
-    # Throttle credential stuffing per phone number and per source address.
-    if rate_limited(f"login:{phone}", 10, 900) or rate_limited(f"loginip:{request.remote_addr}", 30, 900):
-        return jsonify({"error": "Too many login attempts. Please try again later."}), 429
-
-    uid = f"fast2sms:{phone}"
-    print(f"[AUTH] Verifying password for uid: {uid}")
-
-    try:
-        db_client = firestore.client()
-        stored_password, is_legacy = read_stored_password(db_client, uid)
-
-        if stored_password is None:
-            return jsonify({"error": "Invalid phone number or password"}), 401
-        if not verify_password(password, stored_password):
-            return jsonify({"error": "Invalid phone number or password"}), 401
-
-        # Migrate legacy or plaintext credentials on first successful login.
-        if is_legacy or not stored_password.startswith("pbkdf2_sha256$"):
-            write_stored_password(db_client, uid, password)
-
-        print(f"[AUTH] Password verified for uid: {uid}. Minting custom token.")
-        custom_token = auth.create_custom_token(uid)
-        return jsonify({
-            "status": "success",
-            "token": custom_token.decode('utf-8') if isinstance(custom_token, bytes) else custom_token
-        }), 200
-    except Exception as e:
-        print(f"[AUTH] Error in login_password: {e}")
-        return jsonify({"error": "Internal server error"}), 500
-
-@app.route('/api/v1/auth/set-password', methods=['POST', 'OPTIONS'])
-def set_password():
-    if request.method == 'OPTIONS':
-        return '', 200
-    uid, error_response = require_bearer_uid()
-    if error_response:
-        return error_response
-    data = request.json or {}
-    password = data.get('password')
-    if not password or len(password) < 6:
-        return jsonify({"error": "Password must be at least 6 characters"}), 400
-    try:
-        write_stored_password(firestore.client(), uid, password)
-        return jsonify({"ok": True}), 200
-    except Exception as e:
-        print(f"[AUTH] Error setting password: {e}")
-        return jsonify({"error": "Failed to set password"}), 500
-
 @app.route('/api/v1/auth/delete-account', methods=['POST', 'OPTIONS'])
 def delete_account():
     """Removes every trace of an account, server-side.
@@ -874,36 +594,6 @@ def delete_account():
         print(f"[AUTH] Delete account error: {e}")
         return jsonify({"error": "Failed to delete account data"}), 500
 
-@app.route('/api/v1/auth/check-user', methods=['POST', 'OPTIONS'])
-def check_user():
-    if request.method == 'OPTIONS':
-        return '', 200
-
-    data = request.json or {}
-    phone = data.get('phone')
-
-    if not phone:
-        return jsonify({"error": "Phone is required"}), 400
-
-    phone = phone.replace(" ", "")
-
-    # This endpoint reveals whether a phone number is registered, so it is
-    # throttled to stop it being used to enumerate the user base.
-    if rate_limited(f"checkuser:{request.remote_addr}", 20, 900):
-        return jsonify({"error": "Too many requests. Please try again later."}), 429
-
-    try:
-        db_client = firestore.client()
-        # Phone numbers now live in /user_private, keyed by uid.
-        uid = f"fast2sms:{phone}"
-        if db_client.collection('user_private').document(uid).get().exists:
-            return jsonify({"exists": True}), 200
-        # Legacy accounts still carry phoneNumber on the profile document.
-        legacy = db_client.collection('users').where('phoneNumber', '==', phone).limit(1).stream()
-        return jsonify({"exists": any(True for _ in legacy)}), 200
-    except Exception as e:
-        print(f"[AUTH] Check user error: {e}")
-        return jsonify({"error": "Failed to check user"}), 500
 
 @app.route('/api/v1/auth/check-username', methods=['POST', 'OPTIONS'])
 def check_username():
@@ -2388,8 +2078,8 @@ def assert_safe_production_config():
     """Refuse to serve production traffic with a development escape hatch on.
 
     Each of these is fine locally and catastrophic in production:
-      * ALLOW_DEV_OTP_BYPASS lets anyone sign in as any phone number with 000000.
-      * ALLOW_LEGACY_PLAINTEXT_LOGIN compares passwords without hashing.
+      * ALLOW_DEV_OTP_BYPASS marks every SMS sign-in verified without an SMS,
+        so anyone could sign in as any phone number.
       * FLASK_DEBUG serves the Werkzeug console, which is remote code execution.
 
     Leaving one of these set is a config mistake, not a code mistake, so it has
@@ -2397,7 +2087,7 @@ def assert_safe_production_config():
     """
     # Warn at every startup (even in development) so an operator who accidentally
     # left a bypass on sees it immediately in the boot log, before any requests arrive.
-    for _flag in ("ALLOW_DEV_OTP_BYPASS", "ALLOW_LEGACY_PLAINTEXT_LOGIN"):
+    for _flag in ("ALLOW_DEV_OTP_BYPASS",):
         if os.environ.get(_flag) == "true":
             print(
                 f"[AUTH][WARNING] {_flag} is ENABLED. "
@@ -2411,7 +2101,6 @@ def assert_safe_production_config():
     unsafe = [
         name for name in (
             "ALLOW_DEV_OTP_BYPASS",
-            "ALLOW_LEGACY_PLAINTEXT_LOGIN",
             "FLASK_DEBUG",
         )
         if os.environ.get(name) == "true"

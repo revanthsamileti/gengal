@@ -7,7 +7,7 @@ Fixes covered
 -------------
 1. call-rewards: threshold comes from server settings, not the client body.
 2. call-rewards: secondsToAdd is capped at MAX_REWARDS_SECONDS.
-3. send-otp: per-IP rate limit prevents bulk SMS enumeration.
+3. (removed) send-otp no longer exists; reverse-OTP limits live in test_sms_auth_routes.py.
 4. global error handler: unhandled exceptions return a generic JSON 500.
 """
 
@@ -58,12 +58,6 @@ def rewards_store(monkeypatch):
 def clean_buckets(monkeypatch):
     """Reset the in-process rate-limit store so tests do not share state."""
     monkeypatch.setattr(app_module, "_rate_buckets", {})
-
-
-@pytest.fixture
-def clean_abuse(monkeypatch):
-    """Reset the per-phone abuse tracker."""
-    monkeypatch.setattr(app_module, "abuse_store", {})
 
 
 # ===========================================================================
@@ -182,67 +176,6 @@ class TestCallRewardsCap:
         # 90 seconds < 180-second threshold → 0 hearts, 90 seconds banked
         assert user["hearts"] == 0
         assert user["unrewardedCallSeconds"] == pytest.approx(90)
-
-
-# ===========================================================================
-# 3. send-otp: per-IP rate limit
-# ===========================================================================
-
-class TestSendOtpIpRateLimit:
-    """Bulk OTP requests from a single IP are throttled regardless of destination phone."""
-
-    UNIQUE_IP = "10.99.88.77"
-
-    def test_ip_rate_limit_fires_after_ten_requests(
-        self, client, clean_buckets, clean_abuse, monkeypatch
-    ):
-        """The 11th OTP request from the same IP in one hour is rejected.
-
-        Using different phone numbers each time so the per-phone 90-second cooldown
-        does not interfere — we are testing the IP gate only.
-        """
-        monkeypatch.setenv("ALLOW_DEV_OTP_BYPASS", "true")
-
-        def send(phone_suffix):
-            return client.post(
-                "/api/v1/auth/send-otp",
-                json={"phone": "+919900%05d" % phone_suffix},
-                environ_base={"REMOTE_ADDR": self.UNIQUE_IP},
-            )
-
-        # Requests 1–10: all should pass the IP gate (phone cooldown may 429 some,
-        # but IP gate itself is not triggered yet)
-        for i in range(10):
-            r = send(i)
-            assert r.status_code != 429 or b"Too many OTP requests from this address" not in r.data, (
-                "IP rate limit fired too early (request %d)" % (i + 1)
-            )
-
-        # Request 11: IP gate must now block it
-        r = send(99999)
-        assert r.status_code == 429
-        assert b"Too many OTP requests from this address" in r.data
-
-    def test_different_ip_is_not_blocked(self, client, clean_buckets, clean_abuse, monkeypatch):
-        """The IP rate limit is per-address; a second IP is unaffected."""
-        monkeypatch.setenv("ALLOW_DEV_OTP_BYPASS", "true")
-
-        # Exhaust the limit for IP A
-        for i in range(11):
-            client.post(
-                "/api/v1/auth/send-otp",
-                json={"phone": "+919900%05d" % i},
-                environ_base={"REMOTE_ADDR": "10.0.0.1"},
-            )
-
-        # IP B should still be able to send
-        r = client.post(
-            "/api/v1/auth/send-otp",
-            json={"phone": "+919988776655"},
-            environ_base={"REMOTE_ADDR": "10.0.0.2"},
-        )
-        # Should NOT be blocked by IP rate limit (may still 200 or per-phone 429)
-        assert b"Too many OTP requests from this address" not in r.data
 
 
 # ===========================================================================
