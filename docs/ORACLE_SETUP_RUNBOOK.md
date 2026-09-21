@@ -4,8 +4,9 @@ Rebuild the production backend from nothing on a **fresh Oracle Cloud account**,
 Written to be handed to an agent or followed by hand. Every step below was actually
 executed on 2026-09-16; the "Traps" section lists failures that happened, not theory.
 
-Target account for GenGal: **gengal.app@gmail.com**. The Oracle account used on
-2026-09-16 belongs to vegdrop and should not host this app long-term.
+Target account for GenGal: a **dedicated Oracle account** registered to the project's
+own email (ask the owner). The Oracle account used on 2026-09-16 belongs to another
+project and should not host this app long-term.
 
 ---
 
