@@ -102,6 +102,40 @@ def test_signature_rejects_when_no_key_configured():
     assert not sms_verify.verify_signature(BODY, "1000", sign(BODY, "1000"), "", now=1000)
 
 
+# --- verify_body_signature (SMS to URL Forwarder) ---------------------------
+
+def sign_body(body, key=KEY):
+    return hmac.new(key.encode(), body, hashlib.sha256).hexdigest()
+
+
+def test_body_signature_accepts_valid_lowercase_hex():
+    assert sms_verify.verify_body_signature(BODY, sign_body(BODY), KEY)
+
+
+def test_body_signature_rejects_tampered_body():
+    assert not sms_verify.verify_body_signature(BODY + b" ", sign_body(BODY), KEY)
+
+
+def test_body_signature_rejects_wrong_key():
+    assert not sms_verify.verify_body_signature(BODY, sign_body(BODY, "other"), KEY)
+
+
+@pytest.mark.parametrize("sig,key", [(None, KEY), ("", KEY), ("x", ""), ("x", None)])
+def test_body_signature_rejects_missing_parts(sig, key):
+    assert not sms_verify.verify_body_signature(BODY, sig, key)
+
+
+@pytest.mark.parametrize("value,expected", [
+    (1_700_000_000_123, 1_700_000_000.123),
+    ("1700000000000", 1_700_000_000.0),
+    (0, None),
+    (None, None),
+    ("soon", None),
+])
+def test_epoch_millis_to_seconds(value, expected):
+    assert sms_verify.epoch_millis_to_seconds(value) == expected
+
+
 # --- mask_phone / parse_received_at ------------------------------------------
 
 def test_mask_phone_keeps_country_code_and_last_four():

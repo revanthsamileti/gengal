@@ -75,6 +75,28 @@ def verify_signature(raw_body, timestamp, signature, key, now=None):
     return hmac.compare_digest(expected, signature.strip().lower())
 
 
+def verify_body_signature(raw_body, signature, key):
+    """SMS to URL Forwarder signs lowercase hex(HMAC-SHA256(key, body)), no timestamp.
+
+    With nothing time-bound in the signature, replay protection comes from the
+    caller: deliveries are de-duplicated and an SMS may not predate its session.
+    """
+    if raw_body is None or not signature or not key:
+        return False
+    body = raw_body if isinstance(raw_body, bytes) else str(raw_body).encode("utf-8")
+    expected = hmac.new(key.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature.strip().lower())
+
+
+def epoch_millis_to_seconds(value):
+    """The forwarder's %receivedStamp% (epoch millis) -> epoch seconds, else None."""
+    try:
+        millis = float(value)
+    except (TypeError, ValueError):
+        return None
+    return millis / 1000.0 if millis > 0 else None
+
+
 def mask_phone(phone):
     """'+919876543210' -> '+91******3210'. Logs must never hold a full number."""
     if not isinstance(phone, str) or len(phone) < 8:

@@ -309,6 +309,112 @@ def test_dev_bypass_verifies_immediately_without_a_gateway(client, sms, monkeypa
     assert status(client, body["sessionId"]).get_json()["status"] == "verified"
 
 
+# --- SMS to URL Forwarder (tech.bogomolov.incomingsmsgateway) -------------------
+
+def forwarder_body(sender, text, sim="sim1", received_ms=None):
+    received_ms = int(time.time() * 1000) if received_ms is None else received_ms
+    # The app's default template, byte for byte (it sends newlines and indentation).
+    return ('{\n  "from":"%s",\n  "text":"%s",\n  "sentStamp":%d,\n  "receivedStamp":%d,\n  "sim":"%s"\n}'
+            % (sender, text, received_ms - 1000, received_ms, sim)).encode()
+
+
+def forwarder(client, body, key=KEY, signature=None):
+    sig = signature if signature is not None else hmac.new(key.encode(), body, hashlib.sha256).hexdigest()
+    return client.post("/api/v1/auth/sms/forwarder", data=body, headers={
+        "Content-Type": "application/json; charset=utf-8", "X-Signature": sig,
+    })
+
+
+@pytest.fixture
+def sim1(monkeypatch):
+    monkeypatch.setenv("SMS_GATEWAY_SIM", "sim1")
+
+
+def test_forwarder_sms_verifies(client, sms, sim1):
+    body = start(client).get_json()
+    assert forwarder(client, forwarder_body(PHONE, body["message"])).status_code == 200
+    assert status(client, body["sessionId"]).get_json()["status"] == "verified"
+
+
+def test_forwarder_accepts_sender_without_country_code(client, sms, sim1):
+    body = start(client).get_json()
+    forwarder(client, forwarder_body("9876543210", body["message"]))
+    assert status(client, body["sessionId"]).get_json()["status"] == "verified"
+
+
+def test_forwarder_rejects_bad_signature(client, sms, sim1):
+    body = start(client).get_json()
+    assert forwarder(client, forwarder_body(PHONE, body["message"]), key="wrong").status_code == 401
+    assert forwarder(client, forwarder_body(PHONE, body["message"]), signature="").status_code == 401
+    assert status(client, body["sessionId"]).get_json()["status"] == "pending"
+
+
+def test_forwarder_ignores_sms_on_the_other_sim(client, sms, sim1):
+    body = start(client).get_json()
+    assert forwarder(client, forwarder_body(PHONE, body["message"], sim="sim2")).status_code == 200
+    assert status(client, body["sessionId"]).get_json()["status"] == "pending"
+
+
+def test_forwarder_accepts_any_sim_when_no_sim_is_configured(client, sms, monkeypatch):
+    monkeypatch.delenv("SMS_GATEWAY_SIM", raising=False)
+    body = start(client).get_json()
+    forwarder(client, forwarder_body(PHONE, body["message"], sim="sim2"))
+    assert status(client, body["sessionId"]).get_json()["status"] == "verified"
+
+
+def test_forwarder_retry_of_the_same_delivery_is_deduplicated(client, sms, sim1, capsys):
+    body = start(client).get_json()
+    payload = forwarder_body(PHONE, body["message"])
+    forwarder(client, payload)
+    forwarder(client, payload)
+    assert "sms_verify outcome=duplicate" in capsys.readouterr().out
+
+
+def test_forwarder_rejects_an_sms_older_than_its_session(client, sms, sim1):
+    body = start(client).get_json()
+    an_hour_ago = int((time.time() - 3600) * 1000)
+    forwarder(client, forwarder_body(PHONE, body["message"], received_ms=an_hour_ago))
+    assert status(client, body["sessionId"]).get_json()["status"] == "pending"
+
+
+def test_forwarder_from_the_wrong_sender_does_not_verify(client, sms, sim1):
+    body = start(client).get_json()
+    forwarder(client, forwarder_body("+919123456789", body["message"]))
+    assert status(client, body["sessionId"]).get_json()["status"] == "pending"
+
+
+def test_forwarder_signed_traffic_marks_the_gateway_online(client, sms, sim1, monkeypatch):
+    t = [1_000_000.0]
+    health = sms_verify.GatewayHealth(clock=lambda: t[0])
+    t[0] += 301
+    monkeypatch.setattr(app_module, "sms_gateway", health)
+    forwarder(client, forwarder_body(PHONE, "hello"))
+    assert client.get("/api/v1/auth/sms/health").get_json()["gateway"] == "online"
+
+
+# --- heartbeat with a URL token (the forwarder's heartbeat is unsigned) --------------
+
+def test_heartbeat_with_the_right_token_marks_the_gateway_online(client, sms, monkeypatch):
+    monkeypatch.setenv("SMS_GATEWAY_HEARTBEAT_TOKEN", "hb-token-123")
+    t = [1_000_000.0]
+    health = sms_verify.GatewayHealth(clock=lambda: t[0])
+    t[0] += 301
+    monkeypatch.setattr(app_module, "sms_gateway", health)
+    assert client.post("/api/v1/auth/sms/heartbeat/hb-token-123", data=b"").status_code == 200
+    assert client.get("/api/v1/auth/sms/health").get_json()["gateway"] == "online"
+
+
+@pytest.mark.parametrize("configured", ["hb-token-123", ""])
+def test_heartbeat_with_a_wrong_token_is_404_and_changes_nothing(client, sms, monkeypatch, configured):
+    monkeypatch.setenv("SMS_GATEWAY_HEARTBEAT_TOKEN", configured)
+    t = [1_000_000.0]
+    health = sms_verify.GatewayHealth(clock=lambda: t[0])
+    t[0] += 301
+    monkeypatch.setattr(app_module, "sms_gateway", health)
+    assert client.post("/api/v1/auth/sms/heartbeat/guess", data=b"").status_code == 404
+    assert client.get("/api/v1/auth/sms/health").get_json()["gateway"] == "offline"
+
+
 def test_health_does_not_touch_firestore(client, sms, monkeypatch):
     def explode(*_a, **_k):
         raise AssertionError("health must not touch Firestore")

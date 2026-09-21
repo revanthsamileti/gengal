@@ -479,15 +479,79 @@ def sms_inbound():
         return ok
 
     payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    sender = sms_verify.normalize_in_mobile(payload.get("sender") or payload.get("phoneNumber"))
-    code = sms_verify.parse_code(payload.get("message"))
+    accept_sms(
+        payload.get("sender") or payload.get("phoneNumber"),
+        payload.get("message"),
+        sms_verify.parse_received_at(payload.get("receivedAt")),
+    )
+    return ok
+
+
+def accept_sms(raw_sender, text, received_at):
+    """Shared by every gateway adapter: match an inbound SMS to a live session."""
+    sender = sms_verify.normalize_in_mobile(raw_sender)
+    code = sms_verify.parse_code(text)
     if not sender or not code:
         log_sms("unparseable", sender)
+        return
+    log_sms(sms_sessions.mark_verified(code, sender, received_at), sender)
+
+
+@app.route('/api/v1/auth/sms/forwarder', methods=['POST'])
+def sms_forwarder_inbound():
+    """Webhook from "SMS to URL Forwarder" (tech.bogomolov.incomingsmsgateway).
+
+    The app signs lowercase hex(HMAC-SHA256(key, body)) in X-Signature and sends
+    its default template: from, text, sentStamp, receivedStamp (epoch ms), sim.
+    """
+    raw = request.get_data(cache=True)
+    if not sms_verify.verify_body_signature(
+        raw, request.headers.get("X-Signature"), env_value("SMS_GATEWAY_SIGNING_KEY")
+    ):
+        log_sms("bad_signature")
+        return jsonify({"error": "invalid signature"}), 401
+
+    sms_gateway.seen()
+    ok = (jsonify({"ok": True}), 200)
+    try:
+        payload = json.loads(raw or b"{}")
+    except ValueError:
+        log_sms("bad_payload")
+        return ok
+    if not isinstance(payload, dict):
+        log_sms("bad_payload")
         return ok
 
-    outcome = sms_sessions.mark_verified(code, sender, sms_verify.parse_received_at(payload.get("receivedAt")))
-    log_sms(outcome, sender)
+    # Users are told to text one SIM's number; an SMS landing on the phone's
+    # other SIM must not count, or the advertised number would not be the only
+    # way in.
+    wanted_sim = env_value("SMS_GATEWAY_SIM").lower()
+    sim = str(payload.get("sim") or "").lower()
+    if wanted_sim and sim != wanted_sim:
+        log_sms(f"wrong_sim:{sim or '-'}")
+        return ok
+
+    # A retry resends the identical body, so its hash identifies the delivery.
+    if sms_sessions.seen_delivery("fwd:" + hashlib.sha256(raw).hexdigest()):
+        log_sms("duplicate")
+        return ok
+
+    received_at = (sms_verify.epoch_millis_to_seconds(payload.get("receivedStamp"))
+                   or sms_verify.epoch_millis_to_seconds(payload.get("sentStamp")))
+    accept_sms(payload.get("from"), payload.get("text"), received_at)
     return ok
+
+
+@app.route('/api/v1/auth/sms/heartbeat/<token>', methods=['POST', 'GET'])
+def sms_heartbeat(token):
+    """The forwarder's heartbeat is an unsigned, empty POST, so it authenticates
+    with a URL token. The token is separate from the signing key on purpose: a
+    leaked heartbeat URL can at worst fake 'online', never an SMS."""
+    expected = env_value("SMS_GATEWAY_HEARTBEAT_TOKEN")
+    if not expected or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
+        return jsonify({"error": "not found"}), 404
+    sms_gateway.seen()
+    return jsonify({"ok": True}), 200
 
 
 @app.route('/api/v1/auth/sms/status', methods=['POST', 'OPTIONS'])

@@ -233,6 +233,21 @@ phone, which forwards the SMS to the backend.
 9. Add a free uptime monitor (UptimeRobot / Better Stack) on that URL every 5 minutes with
    email alerts. It fires when the phone dies.
 
+### Alternative gateway app: SMS to URL Forwarder
+
+`tech.bogomolov.incomingsmsgateway` (GitHub releases / F-Droid) works too, through
+`/api/v1/auth/sms/forwarder`. It signs `hex(HMAC-SHA256(secret, body))` and its heartbeat
+is an unsigned empty POST, so the heartbeat authenticates with a URL token instead.
+
+1. Same phone preparation as steps 1 and 7 above.
+2. On the server, in your own SSH session: `sudo bash /opt/gengal/deploy/sms-gateway-setup.sh`.
+   It asks for the SIM number and slot, generates the HMAC secret and heartbeat token,
+   restarts the service, and prints exactly what to enter in the app. Re-running keeps the
+   secrets; `--rotate` replaces them.
+3. In the app: add a forwarding rule (sender `*`, the printed webhook URL, default
+   template, the printed HMAC secret) and set the heartbeat URL with a 1-minute interval.
+4. Check `/api/v1/auth/sms/health` shows `"gateway":"online"`.
+
 **Redeploying code** (never re-run `setup-oracle.sh`, see Trap 7):
 
 ```bash
