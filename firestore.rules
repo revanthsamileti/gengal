@@ -188,6 +188,23 @@ service cloud.firestore {
       allow read, write: if isOwner(userId);
     }
 
+    // User reports. Clients may file one about someone else and nothing more:
+    // reports are reviewed from the console, and a reporter must never be
+    // able to read (or learn about) reports filed by or against anyone.
+    match /reports/{reportId} {
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['reporterUid', 'targetUid', 'reason', 'source', 'status', 'createdAt'])
+        && request.resource.data.reporterUid == request.auth.uid
+        && request.resource.data.targetUid is string
+        && request.resource.data.targetUid != request.auth.uid
+        && request.resource.data.reason is string
+        && request.resource.data.reason.size() <= 60
+        && request.resource.data.source in ['profile', 'chat', 'call']
+        && request.resource.data.status == 'open'
+        && request.resource.data.createdAt == request.time;
+      allow read, update, delete: if false;
+    }
+
     // Password hashes. Server-side only, in both directions.
     match /user_credentials/{userId} {
       allow read, write: if false;

@@ -153,11 +153,16 @@ export default function ClubScreen({ navigate, goBack }: {
           {/* Hero */}
           <LinearGradient colors={['#2A0128', '#5B0068']} style={styles.hero}>
             <View style={styles.heroRow}>
-              <View style={styles.livePill}>
-                <View style={styles.liveDot} />
-                <Text style={styles.livePillText}>LIVE</Text>
-              </View>
-              <Text style={styles.heroRoomCount}>{rooms.length} rooms open</Text>
+              {/* "LIVE" only when something is: a live badge over "0 rooms" read as broken. */}
+              {rooms.length > 0 ? (
+                <View style={styles.livePill}>
+                  <View style={styles.liveDot} />
+                  <Text style={styles.livePillText}>LIVE</Text>
+                </View>
+              ) : null}
+              <Text style={styles.heroRoomCount}>
+                {rooms.length === 0 ? 'No rooms open right now' : `${rooms.length} ${rooms.length === 1 ? 'room' : 'rooms'} open`}
+              </Text>
             </View>
             <Text style={styles.heroTitle}>Expert Rooms</Text>
             <Text style={styles.heroSub}>Live coaching · Matchmaking · Community</Text>
@@ -201,9 +206,16 @@ export default function ClubScreen({ navigate, goBack }: {
           {/* Section header */}
           <View style={styles.sectionRow}>
             <Text style={styles.sectionTitle}>Live Now</Text>
-            <TouchableOpacity style={styles.hostBtn} onPress={handleOpenCreate}>
-              <MaterialIcons name="add" size={15} color="#FFF7FF" />
-              <Text style={styles.hostBtnText}>Host</Text>
+            {/* Locked until the hearts requirement is met; still tappable so
+                it can explain what unlocks hosting. */}
+            <TouchableOpacity
+              style={[styles.hostBtn, hearts < HEARTS_REQUIRED && styles.hostBtnLocked]}
+              onPress={handleOpenCreate}
+              accessibilityRole="button"
+              accessibilityLabel={hearts < HEARTS_REQUIRED ? 'Host a room, locked' : 'Host a room'}
+            >
+              <MaterialIcons name={hearts < HEARTS_REQUIRED ? 'lock' : 'add'} size={15} color={hearts < HEARTS_REQUIRED ? '#8A7060' : '#FFF7FF'} />
+              <Text style={[styles.hostBtnText, hearts < HEARTS_REQUIRED && styles.hostBtnTextLocked]}>Host</Text>
             </TouchableOpacity>
           </View>
 
@@ -446,7 +458,7 @@ function RoomCard({ room, index, tierColor, navigate }: {
               </View>
               <View style={[styles.ratePill, room.ratePerMin > 0 && styles.ratePillPaid]}>
                 <MaterialIcons
-                  name={room.ratePerMin > 0 ? 'monetization-on' : 'lock-open'}
+                  name={room.ratePerMin > 0 ? 'stars' : 'lock-open'}
                   size={10}
                   color={room.ratePerMin > 0 ? '#F7B500' : '#8FD98F'}
                 />
@@ -494,13 +506,13 @@ const styles = StyleSheet.create({
 
   // Hero
   hero: {
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     marginTop: 12,
     borderRadius: 22,
     padding: 20,
     paddingBottom: 22,
   },
-  heroRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  heroRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12, minHeight: 26 },
   livePill: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: 'rgba(255,253,248,0.15)', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
@@ -512,7 +524,7 @@ const styles = StyleSheet.create({
   heroSub: { color: 'rgba(255,253,248,0.65)', fontSize: 12, fontWeight: '600' },
 
   // Filters
-  filterStrip: { paddingHorizontal: 14, paddingVertical: 14, gap: 8 },
+  filterStrip: { paddingHorizontal: 16, paddingVertical: 14, gap: 8 },
   filterChip: {
     paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16,
     backgroundColor: '#FFFDF8', borderWidth: 1, borderColor: '#EEE4D8',
@@ -525,7 +537,7 @@ const styles = StyleSheet.create({
 
   // Section header
   sectionRow: {
-    paddingHorizontal: 14, marginBottom: 10,
+    paddingHorizontal: 16, marginBottom: 10,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
   },
   sectionTitle: { color: '#2A0128', fontSize: 20, fontWeight: '900', fontFamily: 'serif' },
@@ -534,10 +546,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#4B0054', paddingHorizontal: 12, paddingVertical: 7, borderRadius: 14,
   },
   hostBtnText: { color: '#FFF7FF', fontSize: 12, fontWeight: '700' },
+  hostBtnLocked: { backgroundColor: '#F3EDE4', borderWidth: 1, borderColor: '#E2D6C4' },
+  hostBtnTextLocked: { color: '#8A7060' },
 
   // Hearts bar
   heartsBar: {
-    marginHorizontal: 14, marginBottom: 12,
+    marginHorizontal: 16, marginBottom: 12,
     flexDirection: 'row', alignItems: 'center', gap: 6,
   },
   heartsBarText: { color: '#7F6808', fontSize: 11, fontWeight: '700' },
@@ -552,7 +566,7 @@ const styles = StyleSheet.create({
   emptyBtnText: { color: '#FFF', fontWeight: '900', fontSize: 13 },
 
   // Room cards
-  roomList: { paddingHorizontal: 14, gap: 10 },
+  roomList: { paddingHorizontal: 16, gap: 10 },
   roomCard: {
     borderRadius: 20, overflow: 'hidden',
     borderWidth: 1, borderColor: 'rgba(209,178,59,0.15)',

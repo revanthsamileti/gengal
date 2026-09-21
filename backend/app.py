@@ -185,6 +185,30 @@ def healthz():
     return jsonify({"status": "ok"}), 200
 
 
+# Privacy policy and terms, linked from Settings and the Play Store listing.
+# Static files read once at import; SUPPORT_EMAIL is filled in at serve time.
+_LEGAL_DIR = os.path.join(os.path.dirname(__file__), "legal")
+
+
+def _legal_page(name):
+    with open(os.path.join(_LEGAL_DIR, name), encoding="utf-8") as f:
+        page = f.read()
+    with open(os.path.join(_LEGAL_DIR, "_style.css"), encoding="utf-8") as f:
+        page = page.replace("{{STYLE}}", f.read())
+    return page
+
+
+_LEGAL_PAGES = {"privacy": _legal_page("privacy.html"), "terms": _legal_page("terms.html")}
+
+
+@app.route('/privacy', methods=['GET'])
+@app.route('/terms', methods=['GET'])
+def legal_page():
+    email = env_value("SUPPORT_EMAIL") or "gengal.app@gmail.com"
+    page = _LEGAL_PAGES[request.path.strip('/')].replace("{{EMAIL}}", email)
+    return page, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=3600"}
+
+
 
 # Selfie classification pipeline removed
 
@@ -1472,7 +1496,13 @@ def notify_incoming_call():
             return jsonify({"error": "No active call offer for this receiver"}), 403
 
         private_snap = db_client.collection('user_private').document(receiver_uid).get()
-        token = (private_snap.to_dict() or {}).get('expoPushToken') if private_snap.exists else None
+        private_data = (private_snap.to_dict() or {}) if private_snap.exists else {}
+        # A blocked caller gets the same answer as an unreachable receiver, so
+        # the block is not revealed; the receiver's app declines the offer.
+        blocked_uids = private_data.get('blockedUids')
+        if isinstance(blocked_uids, list) and uid in blocked_uids:
+            return jsonify({"ok": True, "delivered": False}), 200
+        token = private_data.get('expoPushToken')
         if not token:
             return jsonify({"ok": True, "delivered": False}), 200
 

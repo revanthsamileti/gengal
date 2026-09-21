@@ -13,12 +13,12 @@ import { Alert } from '../components/CustomAlert';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
-import BottomNav from '../components/BottomNav';
 import { useActionLock } from '../hooks/useActionLock';
 import { launchCall } from '../services/callPermissionService';
 
 import { useUser } from '../context/UserContext';
-import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, getFollowerCount, UserProfile as FirebaseUser } from '../services/userService';
+import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, getFollowerCount, isUserAvailableNow, UserProfile as FirebaseUser } from '../services/userService';
+import { blockUser, unblockUser, reportUser, REPORT_REASONS, useBlockedUids } from '../services/safetyService';
 import GengalAvatar from '../components/GengalAvatar';
 import CallPriceTag from '../components/CallPriceTag';
 import { auth } from '../config/firebase';
@@ -153,7 +153,63 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
   const targetUid = route?.params?.matchData?.uid || route?.params?.uid;
   const myFollowing: string[] = Array.isArray(myProfile?.following) ? (myProfile!.following as string[]) : [];
   const [isFollowing, setIsFollowing] = useState(() => targetUid ? myFollowing.includes(targetUid) : false);
-  const [isBlocked, setIsBlocked] = useState(false);
+  const blockedUids = useBlockedUids();
+  const isBlocked = Boolean(targetUid) && blockedUids.has(targetUid);
+
+  // Only what the app actually knows: your own visibility setting, or whether
+  // the other person is in the live online listing right now.
+  const isOnline = isCurrentUser
+    ? myProfile?.isActiveMode !== false
+    : firebaseUsers.some((u) => u.uid === profile?.uid && isUserAvailableNow(u));
+
+  const confirmBlock = () => {
+    const myUid = auth.currentUser?.uid;
+    if (!myUid || !targetUid) return;
+    if (isBlocked) {
+      unblockUser(myUid, targetUid).catch(() =>
+        Alert.alert('Could not unblock', 'Please check your connection and try again.'));
+      return;
+    }
+    Alert.alert(
+      `Block ${profile?.name ?? 'this person'}?`,
+      "They won't be able to call you or see you in lists, and their chats will be hidden. They won't be told.",
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: () => {
+            if (isFollowing) {
+              setIsFollowing(false);
+              unfollowUser(myUid, targetUid).catch(() => {});
+            }
+            blockUser(myUid, targetUid).catch(() =>
+              Alert.alert('Could not block', 'Please check your connection and try again.'));
+          },
+        },
+      ],
+    );
+  };
+
+  const openReport = () => {
+    const myUid = auth.currentUser?.uid;
+    if (!myUid || !targetUid) return;
+    Alert.alert(
+      'Report this profile',
+      'What is wrong? Our team reviews every report.',
+      [
+        ...REPORT_REASONS.map((reason) => ({
+          text: reason,
+          onPress: () => {
+            reportUser(myUid, targetUid, reason, 'profile')
+              .then(() => Alert.alert('Thanks for reporting', 'We will review this profile. You can also block them.'))
+              .catch(() => Alert.alert('Could not send report', 'Please check your connection and try again.'));
+          },
+        })),
+        { text: 'Cancel', style: 'cancel' as const },
+      ],
+    );
+  };
 
   // Followers are a subcollection now, so the count comes from an aggregate query
   // rather than the length of an array on the profile document.
@@ -279,16 +335,21 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
             ) : null}
 
             <Text style={styles.name}>
-              {profile.age ? `${profile.name}, ${profile.age}` : profile.name}
+              {(() => {
+                const shown = profile.name ? profile.name.charAt(0).toUpperCase() + profile.name.slice(1) : profile.name;
+                return profile.age ? `${shown}, ${profile.age}` : shown;
+              })()}
             </Text>
             <View style={styles.languageRow}>
               <MaterialIcons name="language" size={15} color="#B68D1C" />
               <Text style={styles.language}>{profile.lang}</Text>
             </View>
 
-            <View style={styles.statusRow}>
-              <View style={styles.onlineDot} />
-              <Text style={styles.statusText}>Online now</Text>
+            <View style={[styles.statusRow, !isOnline && styles.statusRowOffline]}>
+              <View style={[styles.onlineDot, !isOnline && styles.offlineDot]} />
+              <Text style={[styles.statusText, !isOnline && styles.statusTextOffline]}>
+                {isOnline ? 'Online now' : 'Offline'}
+              </Text>
             </View>
 
             <View style={styles.statsRow}>
@@ -307,7 +368,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
               </View>
             </View>
 
-            <Text style={styles.bio}>{profile.bio}</Text>
+            {profile.bio ? <Text style={styles.bio}>{profile.bio}</Text> : null}
           </LinearGradient>
 
           <View style={styles.actionPanel}>
@@ -380,13 +441,13 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                     </Text>
                   </TouchableOpacity>
                 </View>
-                <View style={styles.modeRow}>
+                {!isBlocked && <View style={styles.modeRow}>
                   {profile.modes.map((mode: any) => (
                     <ModeButton key={mode} mode={mode} profile={profile as any} navigate={navigate} />
                   ))}
-                </View>
+                </View>}
                 <View style={styles.secondaryActions}>
-                  <TouchableOpacity
+                  {!isBlocked && <TouchableOpacity
                     activeOpacity={0.84}
                     style={styles.chatButton}
                     hitSlop={tap42}
@@ -399,12 +460,12 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                   >
                     <MaterialIcons name="chat-bubble-outline" size={18} color="#4B0054" />
                     <Text style={styles.chatButtonText}>Chat</Text>
-                  </TouchableOpacity>
+                  </TouchableOpacity>}
                   <TouchableOpacity
                     activeOpacity={0.84}
                     style={[styles.blockButton, isBlocked && styles.blockButtonActive]}
                     hitSlop={tap42}
-                    onPress={() => setIsBlocked((value) => !value)}
+                    onPress={confirmBlock}
                   >
                     <MaterialIcons
                       name={isBlocked ? 'block' : 'person-off'}
@@ -412,31 +473,19 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                       color={isBlocked ? '#FFFFFF' : '#8B2E2E'}
                     />
                     <Text style={[styles.blockButtonText, isBlocked && styles.blockButtonTextActive]}>
-                      {isBlocked ? 'Blocked' : 'Block'}
+                      {isBlocked ? 'Unblock' : 'Block'}
                     </Text>
                   </TouchableOpacity>
                 </View>
+                <TouchableOpacity activeOpacity={0.8} style={styles.reportLink} hitSlop={tap42} onPress={openReport}>
+                  <MaterialIcons name="flag" size={16} color="#8B2E2E" />
+                  <Text style={styles.reportLinkText}>Report this profile</Text>
+                </TouchableOpacity>
               </>
             )}
           </View>
 
-          <View style={styles.infoPanel}>
-            <View style={styles.infoItem}>
-              <MaterialIcons name="verified" size={20} color="#92750B" />
-              <Text style={styles.infoText}>
-                {isCurrentUser ? 'Your profile is premium verified' : 'Premium verified member'}
-              </Text>
-            </View>
-            <View style={styles.infoItem}>
-              <MaterialIcons name="schedule" size={20} color="#92750B" />
-              <Text style={styles.infoText}>
-                {isCurrentUser ? 'Manage followers and following here' : 'Usually responds quickly'}
-              </Text>
-            </View>
-          </View>
         </ScrollView>
-
-        <BottomNav active="Home" navigate={navigate} />
       </View>
 
       {/* A native Modal, not a plain absolutely-positioned View: on Android
@@ -865,21 +914,24 @@ const styles = StyleSheet.create({
   blockButtonTextActive: {
     color: '#FFFFFF',
   },
-  infoPanel: {
-    padding: 18,
-    borderRadius: 18,
-    backgroundColor: '#FFFDF8',
-    borderWidth: 1,
-    borderColor: '#EFE4D3',
-    gap: 12,
+  statusRowOffline: {
+    backgroundColor: '#F3EFEA',
   },
-  infoItem: {
+  offlineDot: {
+    backgroundColor: '#B5AAA0',
+  },
+  statusTextOffline: {
+    color: '#8A7E74',
+  },
+  reportLink: {
+    marginTop: 14,
+    alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 6,
   },
-  infoText: {
-    color: '#74685F',
+  reportLinkText: {
+    color: '#8B2E2E',
     fontSize: 13,
     fontWeight: '800',
   },

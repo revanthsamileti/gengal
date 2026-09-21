@@ -1,6 +1,7 @@
 import React, { useMemo, useState, useEffect } from 'react';
 import { tap33, tap34, tap38 } from '../theme/touch';
 import {
+  Switch,
   Platform,
   Image,
   Modal,
@@ -774,28 +775,21 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
                 <View style={styles.activeToggleLeft}>
                   <View style={[styles.statusIndicatorDot, isMyActiveMode && styles.statusIndicatorDotOnline]} />
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.activeToggleTitle}>
-                      {isMyActiveMode ? 'Show Active to People: ON' : 'Show Active to People: OFF'}
-                    </Text>
+                    <Text style={styles.activeToggleTitle}>Show me as online</Text>
                     <Text style={styles.activeToggleSubtitle}>
                       {isMyActiveMode ? 'People can see your online status' : 'You appear offline to the community'}
                     </Text>
                   </View>
                 </View>
-                <TouchableOpacity
-                  style={[styles.activeToggleBtn, isMyActiveMode && styles.activeToggleBtnOn]}
-                  activeOpacity={0.85}
-                  onPress={handleToggleActiveMode}
-                >
-                  <MaterialIcons
-                    name={isMyActiveMode ? 'visibility' : 'visibility-off'}
-                    size={17}
-                    color={isMyActiveMode ? '#FFFFFF' : '#7A5C1F'}
-                  />
-                  <Text style={[styles.activeToggleBtnText, isMyActiveMode && styles.activeToggleBtnTextOn]}>
-                    {isMyActiveMode ? 'Active' : 'Hidden'}
-                  </Text>
-                </TouchableOpacity>
+                {/* A real switch: the old "Active" button could be read either
+                    as the current state or as the action it would take. */}
+                <Switch
+                  value={isMyActiveMode}
+                  onValueChange={handleToggleActiveMode}
+                  trackColor={{ false: '#E2D6C4', true: '#8E3A8A' }}
+                  thumbColor={isMyActiveMode ? '#FFFFFF' : '#FFFDF8'}
+                  accessibilityLabel="Show me as online"
+                />
               </View>
 
               <LanguageFilter selected={selectedLanguage} onSelect={setSelectedLanguage} languages={LANGUAGES} />
@@ -1022,8 +1016,8 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
             <View style={styles.feedEmpty}>
               <MaterialIcons
                 name={!usersLoaded ? 'hourglass-empty' : hasActiveFilters ? 'filter-alt-off' : 'person-search'}
-                size={34}
-                color="#C9BDB2"
+                size={40}
+                color="#D1B23B"
               />
               <Text style={styles.feedEmptyTitle}>
                 {!usersLoaded
@@ -1165,18 +1159,20 @@ const styles = StyleSheet.create({
     paddingTop: 48,
     gap: 8,
   },
+  // Same type scale as the other tabs' empty states (serif plum title).
   feedEmptyTitle: {
-    fontSize: 15,
-    fontWeight: '800',
-    color: '#7A6A5C',
+    fontSize: 18,
+    fontWeight: '900',
+    fontFamily: 'serif',
+    color: '#4B0054',
     textAlign: 'center',
   },
   feedEmptySub: {
-    fontSize: 12.5,
-    fontWeight: '500',
-    color: '#A99A86',
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#8A7C70',
     textAlign: 'center',
-    lineHeight: 18,
+    lineHeight: 19,
   },
   headerArea: {
     paddingHorizontal: 16,
@@ -1230,29 +1226,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#7C673E',
     marginTop: 2,
-  },
-  activeToggleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 13,
-    paddingVertical: 7,
-    borderRadius: 16,
-    backgroundColor: '#FFF8EA',
-    borderWidth: 1,
-    borderColor: '#D4B86A',
-    gap: 5,
-  },
-  activeToggleBtnOn: {
-    backgroundColor: '#52104F',
-    borderColor: '#52104F',
-  },
-  activeToggleBtnText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: '#7A5C1F',
-  },
-  activeToggleBtnTextOn: {
-    color: '#FFFFFF',
   },
   randomPill: {
     flex: 1.1,

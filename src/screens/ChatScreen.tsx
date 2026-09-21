@@ -32,6 +32,7 @@ import { auth } from '../config/firebase';
 import { useActionLock } from '../hooks/useActionLock';
 import { launchCall } from '../services/callPermissionService';
 import { Alert } from '../components/CustomAlert';
+import { useBlockedUids } from '../services/safetyService';
 
 type ChatScreenProps = {
   profileName?: string;
@@ -96,6 +97,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
   // yet" guard below. Accept both rather than making every caller conform.
   const targetUid = matchData?.uid ?? route?.params?.targetUid;
   const chatId = (currentUid && targetUid) ? getChatId(currentUid, targetUid) : '';
+  const peerBlocked = useBlockedUids().has(targetUid ?? '');
 
   // Newest peer message already marked read, so a snapshot carrying nothing new
   // from them (our own send, a typing change) costs no write.
@@ -376,6 +378,12 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
           ) : null}
         </ScrollView>
 
+        {peerBlocked ? (
+          <View style={styles.blockedBar}>
+            <MaterialIcons name="block" size={18} color="#8B2E2E" />
+            <Text style={styles.blockedText}>You blocked this person. Unblock them from their profile to chat.</Text>
+          </View>
+        ) : (<>
         <View style={styles.quickRow}>
           {quickReplies.map((reply) => (
             <TouchableOpacity hitSlop={tap34} key={reply} style={styles.quickPill} onPress={() => handleSend(reply)}>
@@ -413,6 +421,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
             <MaterialIcons name="send" size={18} color="#FFF7FF" />
           </TouchableOpacity>
         </View>
+        </>)}
       </KeyboardAvoidingView>
     </ScreenShell>
   );
@@ -673,5 +682,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '700',
     textAlign: 'center',
+  },
+  blockedBar: {
+    margin: 16,
+    padding: 14,
+    borderRadius: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    backgroundColor: '#FFF1F0',
+    borderWidth: 1,
+    borderColor: '#F0C9C6',
+  },
+  blockedText: {
+    flex: 1,
+    color: '#8B2E2E',
+    fontSize: 13,
+    fontWeight: '700',
   },
 });

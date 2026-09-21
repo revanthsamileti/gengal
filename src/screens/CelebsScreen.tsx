@@ -512,7 +512,7 @@ const stripStyles = StyleSheet.create({
   dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: '#5EBB62' },
   heading: { color: '#4B0054', fontSize: 13, fontWeight: '900', letterSpacing: 0.5 },
   count: { color: '#9A856E', fontSize: 11, fontWeight: '700' },
-  row: { paddingHorizontal: 14, gap: 10 },
+  row: { paddingHorizontal: 16, gap: 10 },
   tile: {
     width: 116,
     padding: 10,
@@ -540,6 +540,8 @@ const stripStyles = StyleSheet.create({
 // ── Main Screen ──────────────────────────────────────────────────────────────
 
 export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
+  const { profile: myProfile } = useUser();
+  const myIsVip = myProfile?.isVip === true;
   const [vipUsers, setVipUsers] = useState<UserProfile[]>([]);
   const [liveRooms, setLiveRooms] = useState<ExpertRoom[]>([]);
   const [activeChat, setActiveChat] = useState<ExpertRoom | null>(null);
@@ -588,17 +590,22 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
           {/* Hero strip */}
           <LinearGradient colors={['#2A0128', '#5B0068']} style={styles.hero}>
             <View style={styles.heroRow}>
-              <View style={styles.livePill}>
-                <View style={styles.livePillDot} />
-                <Text style={styles.livePillText}>LIVE NOW</Text>
-              </View>
-              <Text style={styles.heroCount}>{vipUsers.length} VIPs online</Text>
+              {vipUsers.length + liveRooms.length > 0 ? (
+                <View style={styles.livePill}>
+                  <View style={styles.livePillDot} />
+                  <Text style={styles.livePillText}>LIVE NOW</Text>
+                </View>
+              ) : null}
+              <Text style={styles.heroCount}>
+                {vipUsers.length === 0 ? 'No VIPs online right now' : `${vipUsers.length} ${vipUsers.length === 1 ? 'VIP' : 'VIPs'} online`}
+              </Text>
             </View>
             <Text style={styles.heroTitle}>Celebs</Text>
             <Text style={styles.heroSub}>Call · Video · Join their live</Text>
 
-            {/* The page talked about lives but offered no way to start one. */}
-            <TouchableOpacity
+            {/* Going live is for VIP celebs; everyone else only sees it as a
+                button they cannot use. */}
+            {myIsVip && <TouchableOpacity
               style={styles.goLiveBtn}
               activeOpacity={0.85}
               onPress={() => navigate('Club')}
@@ -607,7 +614,7 @@ export default function CelebsScreen({ navigate, goBack }: CelebsScreenProps) {
             >
               <MaterialIcons name="podcasts" size={14} color="#2A0128" />
               <Text style={styles.goLiveText}>Go live</Text>
-            </TouchableOpacity>
+            </TouchableOpacity>}
           </LinearGradient>
 
           <LiveNowStrip
@@ -663,7 +670,7 @@ const styles = StyleSheet.create({
   scroll: { paddingBottom: 110 },
 
   hero: {
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     marginTop: 12,
     borderRadius: 22,
     padding: 20,
@@ -709,5 +716,5 @@ const styles = StyleSheet.create({
     textAlign: 'center', lineHeight: 19,
   },
 
-  cardList: { paddingHorizontal: 14, marginTop: 16, gap: 12 },
+  cardList: { paddingHorizontal: 16, marginTop: 16, gap: 12 },
 });

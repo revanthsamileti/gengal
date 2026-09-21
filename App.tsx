@@ -25,12 +25,14 @@ import EarningsScreen from './src/screens/EarningsScreen';
 import ActiveConnectsScreen from './src/screens/ActiveConnectsScreen';
 import ActivityScreen from './src/screens/ActivityScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
+import BlockedUsersScreen from './src/screens/BlockedUsersScreen';
 import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
 import { UserProvider } from './src/context/UserContext';
 import { updateUserStatus, touchLastActive } from './src/services/userService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
 import { rejectCallOffer } from './src/services/liveRoomService';
+import { isBlocked, startBlockListSync } from './src/services/safetyService';
 import CelebsScreen from './src/screens/CelebsScreen';
 import ChillScreen from './src/screens/ChillScreen';
 import DumCharadesRoomScreen from './src/screens/DumCharadesRoomScreen';
@@ -190,6 +192,7 @@ const SCREENS = {
   ActiveConnects: ({ navigate, goBack }: ScreenContext) => <ActiveConnectsScreen navigate={navigate} goBack={goBack} />,
   Activity: ({ navigate }: ScreenContext) => <ActivityScreen navigate={navigate} />,
   Settings: ({ navigate, goBack }: ScreenContext) => <SettingsScreen navigate={navigate} goBack={goBack} />,
+  BlockedUsers: ({ navigate, goBack }: ScreenContext) => <BlockedUsersScreen navigate={navigate} goBack={goBack} />,
   AdminPanel: ({ navigate, goBack }: ScreenContext) => <AdminPanelScreen navigate={navigate} goBack={goBack} />,
   Coins: ({ navigate, goBack }: ScreenContext) => <CoinsScreen navigate={navigate} goBack={goBack} />,
   Earnings: ({ navigate, goBack }: ScreenContext) => <EarningsScreen navigate={navigate} goBack={goBack} />,
@@ -464,6 +467,16 @@ export default function App() {
      * calls survives, with no extra round-trip to agree on which.
      */
     const uid = auth.currentUser?.uid;
+    // Someone this user blocked: decline without ringing. Their side sees an
+    // ordinary declined call, so the block itself is never revealed.
+    if (isBlocked(call.callerUid)) {
+      if (uid) {
+        rejectCallOffer(uid, { callerUid: call.callerUid, roomId: call.roomId }, 'declined').catch((e) =>
+          console.warn('[App] Auto-decline blocked caller failed:', e)
+        );
+      }
+      return;
+    }
     const active = currentCallRef.current;
     const dialingEachOther =
       screenRef.current === 'Call' && active.isCaller && active.peerUid === call.callerUid;
@@ -497,6 +510,14 @@ export default function App() {
     }
     setNavStack(prev => [...prev, { ...inboundCallEntry, key: nextNavKey() }]);
   });
+
+  // The block list gates listings, chats and inbound calls, so it follows the
+  // signed-in account rather than any one screen.
+  const signedInUid = user?.uid;
+  useEffect(() => {
+    if (!signedInUid) return;
+    return startBlockListSync(signedInUid);
+  }, [signedInUid]);
 
   useEffect(() => {
     // `lastActive` used to be written only when the app came to the foreground,

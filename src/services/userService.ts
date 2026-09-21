@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { isBlocked, onBlockListChange } from './safetyService';
 import {
   doc,
   setDoc,
@@ -287,6 +288,25 @@ const placeholderAvatarData = (id: string) => {
   };
 };
 
+/**
+ * Wraps a directory listener so blocked people never reach a screen, and so a
+ * block takes effect at once instead of on the next Firestore snapshot.
+ */
+const blockAware = (callback: (users: UserProfile[]) => void) => {
+  let last: UserProfile[] | null = null;
+  const emit = () => {
+    if (last) callback(last.filter((u) => !isBlocked(u.uid)));
+  };
+  const off = onBlockListChange(emit);
+  return {
+    deliver: (users: UserProfile[]) => {
+      last = users;
+      emit();
+    },
+    off,
+  };
+};
+
 export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void, currentUid?: string, vipOnly = false) => {
   const usersRef = collection(db, 'users');
   const q = query(
@@ -296,7 +316,8 @@ export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void,
     limit(DIRECTORY_PAGE_SIZE)
   );
 
-  return onSnapshot(q, (querySnapshot) => {
+  const sink = blockAware(callback);
+  const unsub = onSnapshot(q, (querySnapshot) => {
     const users: UserProfile[] = [];
     querySnapshot.forEach((doc) => {
       const data = doc.data() as UserProfile;
@@ -314,10 +335,14 @@ export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void,
         tier: resolveTier(data),
       });
     });
-    callback(users);
+    sink.deliver(users);
   }, (error) => {
     console.error("Error subscribing to online users:", error);
   });
+  return () => {
+    unsub();
+    sink.off();
+  };
 };
 
 const normalizeVisibleUser = (id: string, data: UserProfile): UserProfile => ({
@@ -348,7 +373,8 @@ export const subscribeToAllUsers = (callback: (users: UserProfile[]) => void, cu
     limit(DIRECTORY_PAGE_SIZE)
   );
 
-  return onSnapshot(q, (querySnapshot) => {
+  const sink = blockAware(callback);
+  const unsub = onSnapshot(q, (querySnapshot) => {
     const users: UserProfile[] = [];
     querySnapshot.forEach((doc) => {
       const data = doc.data() as UserProfile;
@@ -363,10 +389,14 @@ export const subscribeToAllUsers = (callback: (users: UserProfile[]) => void, cu
     });
 
     users.sort((a, b) => toMillis(b.lastActive) - toMillis(a.lastActive));
-    callback(users);
+    sink.deliver(users);
   }, (error) => {
     console.error("Error subscribing to all users:", error);
   });
+  return () => {
+    unsub();
+    sink.off();
+  };
 };
 
 export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void, currentUid?: string) => {
@@ -380,7 +410,8 @@ export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void,
     limit(DIRECTORY_PAGE_SIZE)
   );
 
-  return onSnapshot(q, (querySnapshot) => {
+  const sink = blockAware(callback);
+  const unsub = onSnapshot(q, (querySnapshot) => {
     const users: UserProfile[] = [];
     querySnapshot.forEach((doc) => {
       const data = doc.data() as UserProfile;
@@ -398,10 +429,14 @@ export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void,
       users.push(normalizeVisibleUser(doc.id, data));
     });
 
-    callback(users);
+    sink.deliver(users);
   }, (error) => {
     console.error("Error subscribing to recent users:", error);
   });
+  return () => {
+    unsub();
+    sink.off();
+  };
 };
 
 export const subscribeToUserProfile = (uid: string, callback: (user: UserProfile | null) => void) => {

@@ -1,6 +1,7 @@
 import { Alert } from '../components/CustomAlert';
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform, Modal } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Platform, Modal, ScrollView, Linking } from 'react-native';
+import Constants from 'expo-constants';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { auth } from '../config/firebase';
@@ -9,7 +10,7 @@ import { doc, deleteDoc } from 'firebase/firestore';
 import ScreenShell from '../components/ScreenShell';
 import { useUser } from '../context/UserContext';
 import GengalAvatar from '../components/GengalAvatar';
-import { clearAuthSession, logout, purgeAccountData } from '../services/authService';
+import { BACKEND_URL, clearAuthSession, logout, purgeAccountData } from '../services/authService';
 import { checkIsAdmin } from '../services/adminService';
 import { tap40 } from '../theme/touch';
 
@@ -24,15 +25,27 @@ type MenuItem = {
   icon: string;
   color: string;
   bg: string;
-  screen: string;
+  screen?: string;
   params?: Record<string, any>;
+  /** Opened outside the app instead of navigating. */
+  url?: string;
 };
+
+export const SUPPORT_EMAIL = 'gengal.app@gmail.com';
 
 const MENU_ITEMS: MenuItem[] = [
   { key: 'avatar', label: 'Edit Avatar & Profile', icon: 'face', color: '#9333EA', bg: '#F3E8FF', screen: 'FinalizeInvite', params: { isEditMode: true } },
   { key: 'language', label: 'App Language', icon: 'language', color: '#F97316', bg: '#FFEDD5', screen: 'Language', params: { isEditMode: true, returnTo: 'Settings' } },
-  { key: 'coins', label: 'Buy Coins', icon: 'monetization-on', color: '#D49A0B', bg: '#FFF8DD', screen: 'Coins' },
+  { key: 'coins', label: 'Buy Coins', icon: 'stars', color: '#D49A0B', bg: '#FFF8DD', screen: 'Coins' },
   { key: 'earnings', label: 'Earnings', icon: 'account-balance-wallet', color: '#16A34A', bg: '#DCFCE7', screen: 'Earnings' },
+  { key: 'blocked', label: 'Blocked Users', icon: 'block', color: '#8B2E2E', bg: '#FDECEA', screen: 'BlockedUsers' },
+];
+
+// Served by the backend so they stay reachable from the Play Store listing too.
+const INFO_ITEMS: MenuItem[] = [
+  { key: 'support', label: 'Help & Support', icon: 'support-agent', color: '#0F766E', bg: '#CCFBF1', url: `mailto:${SUPPORT_EMAIL}?subject=GenGal%20support` },
+  { key: 'privacy', label: 'Privacy Policy', icon: 'privacy-tip', color: '#475569', bg: '#E2E8F0', url: `${BACKEND_URL}/privacy` },
+  { key: 'terms', label: 'Terms of Service', icon: 'gavel', color: '#475569', bg: '#E2E8F0', url: `${BACKEND_URL}/terms` },
 ];
 
 // Shown only to accounts on the backend's administrator allowlist.
@@ -52,7 +65,16 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
     return () => { active = false; };
   }, []);
 
-  const menuItems = isAdmin ? [...MENU_ITEMS, ADMIN_MENU_ITEM] : MENU_ITEMS;
+  const menuItems = [...MENU_ITEMS, ...(isAdmin ? [ADMIN_MENU_ITEM] : []), ...INFO_ITEMS];
+
+  const openItem = (item: MenuItem) => {
+    if (item.url) {
+      Linking.openURL(item.url).catch(() =>
+        Alert.alert('Could not open', item.key === 'support' ? `Email us at ${SUPPORT_EMAIL}` : 'Please try again later.'));
+      return;
+    }
+    if (item.screen) navigate(item.screen, item.params);
+  };
 
   const handleLogout = async () => {
     try {
@@ -133,13 +155,13 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
           </TouchableOpacity>
         )}
 
-        <View style={styles.content}>
+        <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
           {menuItems.map((item) => (
             <TouchableOpacity
               key={item.key}
               style={styles.menuItem}
               activeOpacity={0.75}
-              onPress={() => navigate(item.screen, item.params)}
+              onPress={() => openItem(item)}
             >
               <View style={styles.menuLeft}>
                 <View style={[styles.iconBox, { backgroundColor: item.bg }]}>
@@ -178,7 +200,9 @@ export default function SettingsScreen({ navigate, goBack }: SettingsScreenProps
               <Text style={[styles.menuText, { color: '#DC2626' }]}>Delete Account</Text>
             </View>
           </TouchableOpacity>
-        </View>
+
+          <Text style={styles.versionText}>GenGal v{Constants.expoConfig?.version ?? '1.0.0'}</Text>
+        </ScrollView>
 
         {/* Delete confirmation modal */}
         <Modal visible={showDeleteModal} transparent animationType="fade" onRequestClose={() => setShowDeleteModal(false)}>
@@ -239,7 +263,8 @@ const styles = StyleSheet.create({
   },
   tierText: { fontSize: 9, fontWeight: '900', textTransform: 'uppercase' },
 
-  content: { padding: 16, gap: 10 },
+  content: { padding: 16, gap: 10, paddingBottom: 32 },
+  versionText: { marginTop: 8, textAlign: 'center', color: '#B3A79C', fontSize: 12, fontWeight: '600' },
   menuItem: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: '#FFFFFF', padding: 14, borderRadius: 16,

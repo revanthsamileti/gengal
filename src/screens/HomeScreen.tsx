@@ -366,7 +366,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
 
             <TouchableOpacity style={[styles.tile, isSmall && styles.tileSmall]} activeOpacity={0.9} onPress={() => navigate('Chill')}>
               <View style={styles.tileIconPink}>
-                <MaterialIcons name="coffee" size={30} color="#D16CBF" />
+                <MaterialIcons name="local-cafe" size={30} color="#D16CBF" />
               </View>
               <Text style={[styles.tileTitle, styles.tileTitleMuted]}>Chill</Text>
               <Text style={styles.tileSub}>Intimate Vibes</Text>
@@ -397,7 +397,7 @@ const styles = StyleSheet.create({
   // behind BottomNav). Always reserving the larger amount costs nothing on
   // tall screens and guarantees clearance on short ones.
   scroll: {
-    paddingHorizontal: 26,
+    paddingHorizontal: 16,
     paddingTop: 20,
     paddingBottom: 130,
   },

@@ -11,8 +11,10 @@ const TABS: { id: TabId; label: string; icon: keyof typeof MaterialIcons.glyphMa
   { id: 'Home', label: 'Home', icon: 'home', screen: 'Home' },
   { id: 'Club', label: 'Club', icon: 'castle', screen: 'Club' },
   { id: 'Celebs', label: 'Celebs', icon: 'diamond', screen: 'Celebs' },
-  { id: 'Chill', label: 'Chill', icon: 'sports-esports', screen: 'Chill' },
-  { id: 'Activity', label: 'Activity', icon: 'notifications-none', screen: 'Activity' },
+  // Same cup as the Chill card on Home and the lounge hero.
+  { id: 'Chill', label: 'Chill', icon: 'local-cafe', screen: 'Chill' },
+  // Calls and messages history, not notifications.
+  { id: 'Activity', label: 'Activity', icon: 'history', screen: 'Activity' },
   { id: 'Personal', label: 'Connect', icon: 'connect-without-contact', screen: 'Personal' },
 ];
 
@@ -23,11 +25,11 @@ type BottomNavProps = {
 
 export default function BottomNav({ active, navigate }: BottomNavProps) {
   const insets = useSafeAreaInsets();
-  // Some devices (hardware/capacitive nav keys, no on-screen bar) report
-  // insets.bottom as 0, which used to fall back to a bare 16dp -- tight
-  // enough that the labels sat almost flush against the physical screen
-  // edge. 24dp is what devices *with* a real inset already get comfortably.
-  const bottomPadding = Math.max(insets.bottom, 24);
+  // Every tab screen renders inside ScreenShell's SafeAreaView, which already
+  // lifts this bar clear of the system navigation bar. Adding insets.bottom
+  // again left an empty band the height of the nav bar under the tabs. Only
+  // devices with no inset at all (hardware keys) need breathing room here.
+  const bottomPadding = insets.bottom > 0 ? 8 : 16;
 
   return (
     <View style={styles.container}>

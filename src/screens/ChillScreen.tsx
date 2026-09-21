@@ -451,7 +451,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                 colors={isCharades ? ['#FFFFFF', '#FFF0FC', '#F5E1FA'] : ['#FFFFFF', '#FFF8EA']}
                 style={StyleSheet.absoluteFill}
               />
-              {isCharades && <View style={[styles.activeIndicator, { backgroundColor: '#8B3A93' }]} />}
+              {isCharades && <MaterialIcons name="check-circle" size={20} color="#8B3A93" style={styles.activeCheck} />}
               <View style={[styles.gameIcon, { backgroundColor: '#F4E1F7' }]}>
                 <MaterialIcons name="theaters" size={30} color="#6D1673" />
               </View>
@@ -474,7 +474,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                 colors={!isCharades ? ['#FFFFFF', '#F0FAEA', '#E0F4D8'] : ['#FFFFFF', '#FFF8EA']}
                 style={StyleSheet.absoluteFill}
               />
-              {!isCharades && <View style={[styles.activeIndicator, { backgroundColor: '#609B43' }]} />}
+              {!isCharades && <MaterialIcons name="check-circle" size={20} color="#609B43" style={styles.activeCheck} />}
               <View style={[styles.gameIcon, { backgroundColor: '#E0F4D8' }]}>
                 <MaterialIcons name="casino" size={30} color="#3F7D2B" />
               </View>
@@ -497,14 +497,14 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                   <Text style={styles.actionBarTitle}>Dumb Charades</Text>
                   <Text style={styles.actionBarSub}>Act, guess, laugh, and earn coins</Text>
                 </View>
-                <TouchableOpacity
+                {charadeRooms.length > 0 && <TouchableOpacity
                   style={[styles.createBtn, { backgroundColor: '#5B0068', borderColor: 'rgba(167,139,240,0.3)' }]}
                   onPress={() => setShowCreateCharades(true)}
                   activeOpacity={0.82}
                 >
                   <MaterialIcons name="add" size={16} color="#FFFDF8" />
                   <Text style={styles.createBtnText}>Host</Text>
-                </TouchableOpacity>
+                </TouchableOpacity>}
               </View>
 
               {/* Language filter */}
@@ -570,7 +570,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                   <Text style={styles.actionBarTitle}>Ludo Live</Text>
                   <Text style={styles.actionBarSub}>Up to 4 players with voice-friendly play</Text>
                 </View>
-                <TouchableOpacity
+                {ludoRooms.length > 0 && <TouchableOpacity
                   style={[styles.createBtn, { backgroundColor: '#1A6B33', borderColor: 'rgba(94,187,98,0.3)' },
                     creatingLudo && styles.createBtnLoading]}
                   onPress={() => setLudoCreateModalVisible(true)}
@@ -583,20 +583,16 @@ export default function ChillScreen({ navigate, goBack }: Props) {
                         <MaterialIcons name="add" size={16} color="#FFFDF8" />
                         <Text style={styles.createBtnText}>Create</Text>
                       </>}
-                </TouchableOpacity>
+                </TouchableOpacity>}
               </View>
 
-              {/* How to play */}
+              {/* How to play: a caption, not a bordered card, which read as buttons. */}
               <View style={styles.howRow}>
-                {[
-                  { icon: 'casino', label: 'Roll dice' },
-                  { icon: 'directions-run', label: 'Move token' },
-                  { icon: 'emoji-events', label: 'Reach home' },
-                ].map(item => (
-                  <View key={item.label} style={styles.howItem}>
-                    <MaterialIcons name={item.icon as any} size={18} color="#5EBB62" />
-                    <Text style={styles.howLabel}>{item.label}</Text>
-                  </View>
+                {['Roll dice', 'Move token', 'Reach home'].map((label, i) => (
+                  <React.Fragment key={label}>
+                    {i > 0 && <MaterialIcons name="chevron-right" size={14} color="#9DB88F" />}
+                    <Text style={styles.howLabel}>{label}</Text>
+                  </React.Fragment>
                 ))}
               </View>
 
@@ -695,7 +691,7 @@ const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
   scroll: { paddingBottom: 110 },
   heroPanel: {
-    marginHorizontal: 14,
+    marginHorizontal: 16,
     marginTop: 14,
     padding: 16,
     borderRadius: 22,
@@ -736,7 +732,7 @@ const styles = StyleSheet.create({
   // Game picker
   gamePickerRow: {
     flexDirection: 'row', gap: 10,
-    marginHorizontal: 14, marginTop: 14,
+    marginHorizontal: 16, marginTop: 14,
   },
   gameCard: {
     flex: 1, borderRadius: 20, overflow: 'hidden',
@@ -747,10 +743,7 @@ const styles = StyleSheet.create({
   gameCardActive: {
     boxShadow: Platform.OS === 'web' ? '0 14px 28px rgba(83, 58, 29, 0.18), inset 0 1px 0 rgba(255,255,255,0.95)' : undefined,
   },
-  activeIndicator: {
-    position: 'absolute', top: 0, left: 0, right: 0,
-    height: 3, backgroundColor: '#A78BF0', borderTopLeftRadius: 20, borderTopRightRadius: 20,
-  },
+  activeCheck: { position: 'absolute', top: 10, right: 10 },
   gameIcon: {
     width: 54,
     height: 54,
@@ -772,6 +765,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
   },
   gameCountPill: {
+    marginTop: 'auto',
     paddingHorizontal: 9, paddingVertical: 4, borderRadius: 12,
     borderWidth: 1, backgroundColor: '#FFFDF8',
   },
@@ -780,7 +774,7 @@ const styles = StyleSheet.create({
   // Action bar
   actionBar: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginHorizontal: 14, marginTop: 18, marginBottom: 4,
+    marginHorizontal: 16, marginTop: 18, marginBottom: 4,
   },
   actionBarInfo: { flex: 1, gap: 2 },
   actionBarTitle: { color: skeuo.plum, fontSize: 18, fontWeight: '900', fontFamily: 'serif' },
@@ -793,7 +787,7 @@ const styles = StyleSheet.create({
   createBtnText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
 
   // Language filter
-  filterScroll: { paddingHorizontal: 14, paddingVertical: 10, gap: 7 },
+  filterScroll: { paddingHorizontal: 16, paddingVertical: 10, gap: 7 },
   filterPill: {
     paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14,
     backgroundColor: '#FFFDF8',
@@ -808,17 +802,13 @@ const styles = StyleSheet.create({
 
   // How to play (Ludo)
   howRow: {
-    flexDirection: 'row', marginHorizontal: 14, marginTop: 4, marginBottom: 4,
-    backgroundColor: '#FFFDF8',
-    borderRadius: 16, borderWidth: 1, borderColor: '#C4DDB7',
-    paddingVertical: 12,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    marginHorizontal: 16, marginTop: 2, marginBottom: 8,
   },
-  howItem: { flex: 1, alignItems: 'center', gap: 4 },
-  howLabel: { color: '#6F8E60', fontSize: 9, fontWeight: '800' },
+  howLabel: { color: '#6F8E60', fontSize: 11, fontWeight: '700' },
 
   // Room list
-  list: { paddingHorizontal: 14, gap: 10, marginTop: 4 },
+  list: { paddingHorizontal: 16, gap: 10, marginTop: 4 },
 
   // Empty state
   empty: {

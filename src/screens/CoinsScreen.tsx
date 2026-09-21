@@ -1,6 +1,7 @@
 import { Alert } from '../components/CustomAlert';
 import React, { useEffect, useState } from 'react';
-import { Platform, ActivityIndicator, KeyboardAvoidingView, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { Platform, ActivityIndicator, KeyboardAvoidingView, Linking, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { BACKEND_URL } from '../services/authService';
 import { MaterialIcons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { auth } from '../config/firebase';
@@ -11,6 +12,7 @@ import CheckoutModal from '../components/CheckoutModal';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 import { TextInput } from 'react-native';
+import { formatCoinBalance, formatInr } from '../utils/coins';
 
 type CoinsScreenProps = {
   navigation?: any;
@@ -26,7 +28,7 @@ type CoinsScreenProps = {
  * top-ups only.
  */
 const COIN_PACKAGES = [
-  { id: '1', priceInr: 89, name: 'Handful of Coins', icon: 'monetization-on' },
+  { id: '1', priceInr: 89, name: 'Handful of Coins', icon: 'stars' },
   { id: '2', priceInr: 449, name: 'Pouch of Coins', icon: 'account-balance-wallet' },
   { id: '3', priceInr: 899, name: 'Chest of Coins', icon: 'cases' },
   { id: '4', priceInr: 1799, name: 'Vault of Coins', icon: 'account-balance' },
@@ -178,7 +180,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
             {isLoading ? (
               <ActivityIndicator color={skeuo.gold} style={{ marginLeft: 16 }} />
             ) : (
-              <Text style={styles.balanceAmount}>{balance.toLocaleString()}</Text>
+              <Text style={styles.balanceAmount}>{formatCoinBalance(balance)}</Text>
             )}
           </View>
           {/* Was "1 Heart = 45 Coins" — a rate that exists nowhere in the app
@@ -210,7 +212,10 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
                 />
               </View>
               <TouchableOpacity
-                style={[styles.customBuyBtn, isPurchasing === 'custom' && { opacity: 0.7 }]}
+                style={[
+                  styles.customBuyBtn,
+                  (isPurchasing === 'custom' || !(Number(customAmount) >= (settings.minRechargeAmount || 49))) && styles.customBuyBtnIdle,
+                ]}
                 activeOpacity={0.8}
                 onPress={handleCustomPurchase}
                 disabled={isPurchasing !== null}
@@ -249,7 +254,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
               </View>
               <View style={styles.packageInfo}>
                 <Text style={styles.packageCoins}>
-                  {settings ? `${coinsFor(pkg.priceInr).toLocaleString()} Coins` : '—'}
+                  {settings ? `${formatCoinBalance(coinsFor(pkg.priceInr))} Coins` : '—'}
                 </Text>
                 <Text style={styles.packageName}>{pkg.name}</Text>
               </View>
@@ -257,12 +262,19 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
                 {isPurchasing === pkg.id ? (
                   <ActivityIndicator color={skeuo.plum} size="small" />
                 ) : (
-                  <Text style={styles.priceText}>{`₹${pkg.priceInr}`}</Text>
+                  <Text style={styles.priceText}>{formatInr(pkg.priceInr)}</Text>
                 )}
               </View>
             </TouchableOpacity>
           ))}
         </View>
+
+        <Text style={styles.legalNote}>
+          Coins have no cash value and are non-refundable except as the law requires. See the{' '}
+          <Text style={styles.legalLink} onPress={() => Linking.openURL(`${BACKEND_URL}/terms`).catch(() => {})}>
+            Terms of Service
+          </Text>.
+        </Text>
       </ScrollView>
       </KeyboardAvoidingView>
 
@@ -417,6 +429,17 @@ const styles = StyleSheet.create({
   },
   currencySymbol: { fontSize: 18, fontWeight: '700', color: '#4B0054', marginRight: 8 },
   customInput: { flex: 1, fontSize: 18, fontWeight: '700', color: '#4B0054' },
+  customBuyBtnIdle: { opacity: 0.55 },
+  legalNote: {
+    marginTop: 18,
+    marginHorizontal: 24,
+    marginBottom: 12,
+    textAlign: 'center',
+    color: '#9A8C80',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  legalLink: { color: '#6B1E6E', fontWeight: '800', textDecorationLine: 'underline' },
   customBuyBtn: {
     backgroundColor: '#EAD8A9',
     height: 52,

@@ -1,4 +1,5 @@
 import { db } from '../config/firebase';
+import { isBlocked, onBlockListChange } from './safetyService';
 import {
   collection,
   doc,
@@ -299,7 +300,13 @@ export const subscribeToConversations = (
     limit(50),
   );
 
-  return onSnapshot(
+  let last: Conversation[] | null = null;
+  const emit = () => {
+    if (last) callback(last.filter((c) => !isBlocked(c.peerUid)));
+  };
+  const off = onBlockListChange(emit);
+
+  const unsub = onSnapshot(
     q,
     (snap) => {
       const rows = snap.docs
@@ -318,10 +325,15 @@ export const subscribeToConversations = (
           } as Conversation;
         })
         .filter((c) => c.peerUid && c.lastMessage);
-      callback(rows);
+      last = rows;
+      emit();
     },
     snapshotError('chat:conversations', onError, () => callback([])),
   );
+  return () => {
+    unsub();
+    off();
+  };
 };
 
 export const MESSAGE_PAGE_SIZE = 50;

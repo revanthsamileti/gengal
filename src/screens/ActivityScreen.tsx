@@ -12,6 +12,8 @@ import { auth, db } from '../config/firebase';
 import { collection, query, where, orderBy, onSnapshot, limit } from 'firebase/firestore';
 import { subscribeToConversations, Conversation } from '../services/chatService';
 import { getUserProfile, UserProfile } from '../services/userService';
+import { formatCoinAmount } from '../utils/coins';
+import { useUser } from '../context/UserContext';
 
 type Props = { navigate: (s: string, p?: any) => void };
 
@@ -23,7 +25,6 @@ type CallRecord = {
   mode: 'call' | 'video';
   durationSeconds: number;
   coinsSpent: number;
-  heartsEarned: number;
   createdAt: any;
   role: 'caller' | 'receiver';
 };
@@ -80,10 +81,7 @@ function CallRow({ record, index }: { record: CallRecord; index: number }) {
 
         {/* Info */}
         <View style={styles.rowInfo}>
-          <View style={styles.rowNameRow}>
-            <Text style={styles.rowName}>{record.partnerName}</Text>
-            <Text style={styles.rowWhen}>{when}</Text>
-          </View>
+          <Text style={styles.rowName} numberOfLines={1}>{record.partnerName}</Text>
           <View style={styles.rowMeta}>
             <MaterialIcons
               name={isCaller ? 'call-made' : 'call-received'}
@@ -97,21 +95,15 @@ function CallRow({ record, index }: { record: CallRecord; index: number }) {
           </View>
         </View>
 
-        {/* Stats */}
+        {/* Date always top-right, cost under it, so every row lines up. */}
         <View style={styles.rowStats}>
+          <Text style={styles.rowWhen}>{when}</Text>
           {isCaller && record.coinsSpent > 0 && (
             <View style={styles.statPill}>
-              <MaterialIcons name="monetization-on" size={11} color="#D49A0B" />
-              {/* Two decimals rather than the raw float: a per-second rate
-                  yields values like 0.735632, and "-0.735632" on a call row is
-                  noise. Short calls still show a non-zero cost. */}
-              <Text style={styles.statText}>-{record.coinsSpent.toFixed(2)}</Text>
-            </View>
-          )}
-          {!isCaller && record.heartsEarned > 0 && (
-            <View style={[styles.statPill, styles.heartPill]}>
-              <MaterialIcons name="favorite" size={11} color="#C9504B" />
-              <Text style={[styles.statText, { color: '#C9504B' }]}>+{Math.round(record.heartsEarned)}</Text>
+              <MaterialIcons name="stars" size={11} color="#D49A0B" />
+              {/* Whole coins, like every other amount in the app; the ledger
+                  keeps the per-second precision. */}
+              <Text style={styles.statText}>-{formatCoinAmount(record.coinsSpent)}</Text>
             </View>
           )}
         </View>
@@ -121,6 +113,7 @@ function CallRow({ record, index }: { record: CallRecord; index: number }) {
 }
 
 export default function ActivityScreen({ navigate }: Props) {
+  const { profile: myProfile } = useUser();
   const [calls, setCalls] = useState<CallRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -212,7 +205,6 @@ export default function ActivityScreen({ navigate }: Props) {
           mode: data.mode || 'call',
           durationSeconds: data.durationSeconds || 0,
           coinsSpent: data.coinsDeducted || 0,
-          heartsEarned: 0,
           createdAt: data.createdAt,
           role: 'caller',
         };
@@ -240,7 +232,6 @@ export default function ActivityScreen({ navigate }: Props) {
             mode: data.mode || 'call',
             durationSeconds: data.durationSeconds || 0,
             coinsSpent: 0,
-            heartsEarned: data.heartsEarned || 0,
             createdAt: data.createdAt,
             role: 'receiver',
           };
@@ -267,9 +258,10 @@ export default function ActivityScreen({ navigate }: Props) {
   const totalCoins = Math.round(
     calls.filter(c => c.role === 'caller').reduce((s, c) => s + c.coinsSpent, 0),
   );
-  const totalHearts = Math.round(
-    calls.filter(c => c.role === 'receiver').reduce((s, c) => s + c.heartsEarned, 0),
-  );
+  // The profile's running total, the same number Earnings shows. Call records
+  // carry no per-call hearts, so summing them always produced 0 here while
+  // Earnings showed the real count.
+  const totalHearts = Math.floor(myProfile?.hearts ?? 0);
 
   return (
     <ScreenShell tone="light">
@@ -278,7 +270,7 @@ export default function ActivityScreen({ navigate }: Props) {
 
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           {/* Header */}
-          <Text style={styles.pageTitle}>{tab === 'calls' ? 'Recent Calls' : 'Messages'}</Text>
+          <Text style={styles.pageTitle}>Activity</Text>
 
           {/* Calls / Chats switch. Unread total sits on the tab so an unopened
               message is visible without leaving whichever tab you are on. */}
@@ -408,12 +400,12 @@ export default function ActivityScreen({ navigate }: Props) {
               <View style={styles.statCard}>
                 <MaterialIcons name="timer" size={22} color="#D49A0B" />
                 <Text style={styles.statValue}>{talkTimeLabel}</Text>
-                <Text style={styles.statLabel}>Talk Time</Text>
+                <Text style={styles.statLabel} numberOfLines={1}>Talk Time</Text>
               </View>
               <View style={styles.statCard}>
-                <MaterialIcons name="monetization-on" size={22} color="#D49A0B" />
+                <MaterialIcons name="stars" size={22} color="#D49A0B" />
                 <Text style={styles.statValue}>{totalCoins}</Text>
-                <Text style={styles.statLabel}>Coins Spent</Text>
+                <Text style={styles.statLabel} numberOfLines={1}>Spent</Text>
               </View>
               <View style={styles.statCard}>
                 <MaterialIcons name="favorite" size={22} color="#C9504B" />
@@ -538,7 +530,7 @@ const styles = StyleSheet.create({
     boxShadow: Platform.OS === 'web' ? '0 2px 8px rgba(68,44,21,0.06)' : undefined,
   },
   statValue: { fontSize: 18, fontWeight: '900', color: '#4B0054', marginTop: 4, marginBottom: 1 },
-  statLabel: { fontSize: 9, color: '#9A8772', fontWeight: '700', textTransform: 'uppercase' },
+  statLabel: { fontSize: 9, color: '#9A8772', fontWeight: '700', textTransform: 'uppercase', textAlign: 'center' },
 
   list: { gap: 8 },
 
@@ -567,28 +559,26 @@ const styles = StyleSheet.create({
   modeDotVideo: { backgroundColor: '#0284C7' },
 
   rowInfo: { flex: 1 },
-  rowNameRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  rowName: { fontSize: 14, fontWeight: '800', color: '#4B0054' },
+  rowName: { fontSize: 14, fontWeight: '800', color: '#4B0054', marginBottom: 4 },
   rowWhen: { fontSize: 11, color: '#A89A8C', fontWeight: '600' },
   rowMeta: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   rowMetaText: { fontSize: 11, color: '#8A7C70', fontWeight: '700' },
   metaDot: { width: 3, height: 3, borderRadius: 2, backgroundColor: '#CCC' },
 
-  rowStats: { alignItems: 'flex-end', gap: 4 },
+  rowStats: { alignItems: 'flex-end', alignSelf: 'stretch', justifyContent: 'space-between', gap: 6, paddingVertical: 2 },
   statPill: {
     flexDirection: 'row', alignItems: 'center', gap: 3,
     backgroundColor: '#FFF8DD', paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8,
     borderWidth: 1, borderColor: '#E5CB70',
   },
-  heartPill: { backgroundColor: '#FFF0F0', borderColor: '#ECAAA8' },
   statText: { fontSize: 11, fontWeight: '800', color: '#9A7A05' },
 
   empty: { alignItems: 'center', paddingVertical: 60, gap: 8 },
   emptyTitle: { fontSize: 18, fontWeight: '900', color: '#4B0054', fontFamily: 'serif' },
   emptySub: { fontSize: 13, color: '#8A7C70', fontWeight: '600' },
   goBtn: {
-    marginTop: 8, backgroundColor: '#4B0054', borderRadius: 14,
-    paddingHorizontal: 20, paddingVertical: 12,
+    marginTop: 8, backgroundColor: '#4B0054', borderRadius: 20,
+    paddingHorizontal: 24, paddingVertical: 12,
   },
   goBtnText: { color: '#FFFDF8', fontWeight: '800', fontSize: 14 },
 });

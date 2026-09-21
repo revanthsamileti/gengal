@@ -133,7 +133,7 @@ export default function EarningsScreen({ navigate, goBack }: any) {
               <View style={styles.statCard}>
                 <MaterialIcons name="timer" size={26} color="#D49A0B" />
                 <Text style={styles.statValue}>{totalMinutes}m</Text>
-                <Text style={styles.statLabel}>Talk Time</Text>
+                <Text style={styles.statLabel}>Calls Received</Text>
               </View>
               <View style={styles.statCard}>
                 <MaterialIcons name="favorite" size={26} color="#C9504B" />
@@ -169,10 +169,11 @@ export default function EarningsScreen({ navigate, goBack }: any) {
                 <Text style={styles.cardTitle}>How Earnings Work</Text>
               </View>
               {[
-                ['Every 3 min of received calls = 1 Heart', 'timer'],
+                [`Every ${settings?.callDurationForHeart || 3} min of received calls = 1 Heart`, 'timer'],
                 [`1 Heart = ₹${rate} in earnings`, 'favorite'],
-                ['Minimum withdrawal: 33 Hearts (₹' + minWithdraw.toFixed(0) + ')', 'account-balance'],
-                ['Paid to your UPI or bank within 24h', 'payments'],
+                [`Minimum withdrawal: ${minHearts} Hearts (₹${minWithdraw.toFixed(0)})`, 'account-balance'],
+                // Withdrawals are reviewed by hand, so no fixed turnaround is promised.
+                ['Paid to your UPI or bank once approved', 'payments'],
               ].map(([text, icon]) => (
                 <View key={text} style={styles.infoRow}>
                   <MaterialIcons name={icon as any} size={15} color="#9A7A05" />
@@ -189,7 +190,7 @@ export default function EarningsScreen({ navigate, goBack }: any) {
                   ? 'A withdrawal request is already pending review — you can submit another once this one is settled.'
                   : canWithdraw
                     ? `₹${earnings.toFixed(2)} available to withdraw`
-                    : `Need ${33 - hearts} more hearts to reach minimum (₹${minWithdraw.toFixed(0)})`}
+                    : `Need ${minHearts - hearts} more ${minHearts - hearts === 1 ? 'heart' : 'hearts'} to reach the ₹${minWithdraw.toFixed(0)} minimum`}
               </Text>
               <TouchableOpacity
                 style={[styles.withdrawBtn, (!canWithdraw || isSubmitting) && styles.withdrawBtnOff]}
@@ -206,7 +207,9 @@ export default function EarningsScreen({ navigate, goBack }: any) {
                     ? 'Submitting…'
                     : hasPendingWithdrawal
                       ? 'Withdrawal Pending'
-                      : `Withdraw ₹${earnings.toFixed(2)}`}
+                      : canWithdraw
+                        ? `Withdraw ₹${earnings.toFixed(2)}`
+                        : `Unlocks at ₹${minWithdraw.toFixed(0)}`}
                 </Text>
               </TouchableOpacity>
             </View>
