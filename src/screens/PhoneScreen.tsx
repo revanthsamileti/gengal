@@ -15,7 +15,6 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
-import { sendOTP, checkUserExists } from '../services/authService';
 import { ActivityIndicator, StatusBar } from 'react-native';
 
 type PhoneScreenProps = {
@@ -31,23 +30,14 @@ const NUMPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '', '0', 'backspace
  * anyone outside India/US/Canada to finish signing up — a UAE number is 9
  * digits and could never reach the threshold.
  */
+// Reverse-OTP sign-in only accepts Indian mobiles: the gateway SIM is Indian
+// and the backend rejects every other sender. Add a country back only with a
+// gateway that can receive from it.
 const COUNTRY_CODES = [
   { country: 'India', code: '+91', iso: 'IN', min: 10, max: 10 },
-  { country: 'United States', code: '+1', iso: 'US', min: 10, max: 10 },
-  { country: 'United Kingdom', code: '+44', iso: 'GB', min: 9, max: 10 },
-  { country: 'Australia', code: '+61', iso: 'AU', min: 9, max: 9 },
-  { country: 'France', code: '+33', iso: 'FR', min: 9, max: 9 },
-  { country: 'Germany', code: '+49', iso: 'DE', min: 10, max: 11 },
-  { country: 'United Arab Emirates', code: '+971', iso: 'AE', min: 9, max: 9 },
-  { country: 'Saudi Arabia', code: '+966', iso: 'SA', min: 9, max: 9 },
-  { country: 'Singapore', code: '+65', iso: 'SG', min: 8, max: 8 },
-  { country: 'Canada', code: '+1', iso: 'CA', min: 10, max: 10 },
 ];
 
-export let globalAuthMode: 'signup' | 'login' = 'signup';
-
 export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProps) {
-  const [authMode, setAuthMode] = useState<'signup' | 'login'>('signup');
   const [phone, setPhone] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [countryCode, setCountryCode] = useState('+91');
@@ -71,12 +61,9 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
     }
   }, [route?.params?.phone]);
 
-  useEffect(() => {
-    globalAuthMode = authMode;
-  }, [authMode]);
-
   const selectedCountry = COUNTRY_CODES.find((item) => item.iso === countryIso) || COUNTRY_CODES.find((item) => item.code === countryCode) || COUNTRY_CODES[0];
   const isPhoneComplete = phone.length >= selectedCountry.min && phone.length <= selectedCountry.max;
+  const isValidMobile = /^[6-9]\d{9}$/.test(phone);
 
   const handlePress = (val: string) => {
     if (val === '') return;
@@ -87,31 +74,14 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
     }
   };
 
-  const handleContinue = async () => {
-    if (isPhoneComplete) {
-      setIsLoading(true);
-      setErrorMsg('');
-      try {
-        const fullPhone = countryCode + phone;
-
-        try {
-          const userExists = await checkUserExists(fullPhone);
-
-          if (userExists) {
-            navigate('LoginPassword', { phone: fullPhone, authMode: 'login' });
-          } else {
-            await sendOTP(fullPhone);
-            navigate('Otp', { phone: fullPhone, authMode: 'signup' });
-          }
-        } catch (dbError: any) {
-          throw dbError;
-        }
-      } catch (error: any) {
-        setErrorMsg(error.message || "Failed to proceed");
-      } finally {
-        setIsLoading(false);
-      }
+  const handleContinue = () => {
+    if (!isPhoneComplete) return;
+    if (!isValidMobile) {
+      setErrorMsg('Enter a valid Indian mobile number starting with 6, 7, 8 or 9.');
+      return;
     }
+    setErrorMsg('');
+    navigate('VerifyBySms', { phone: countryCode + phone });
   };
 
   useEffect(() => {
@@ -136,7 +106,7 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
     return () => window.removeEventListener('keydown', handleKeyDown);
     // countryIso matters here too: selectedCountry resolves by iso first, and
     // it is what decides the accepted digit length.
-  }, [phone, isLoading, authMode, countryCode, countryIso]);
+  }, [phone, isLoading, countryCode, countryIso]);
 
   return (
     <ScreenShell tone="light">

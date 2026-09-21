@@ -10,6 +10,7 @@ import GengalAvatar, { AvatarData, DEFAULT_AVATAR_DNA } from '../components/Geng
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../config/firebase';
 import { useUser } from '../context/UserContext';
+import { completeSignup, SignupExpiredError } from '../services/signupService';
 
 type AvatarScreenProps = {
   navigate: (screen: string, params?: any) => void;
@@ -63,10 +64,22 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
         setIsSaving(false);
       }
     } else {
-      navigate('CreatePassword', {
-        ...route?.params,
-        avatar: avatarData
-      });
+      // Sign-up normally finishes in FinalizeInvite; this screen is kept for
+      // any route that still lands here, and must not point at the removed
+      // CreatePassword screen.
+      try {
+        setIsSaving(true);
+        await completeSignup({ ...route?.params, avatar: avatarData });
+        navigate('Home');
+      } catch (e: any) {
+        setIsSaving(false);
+        if (e instanceof SignupExpiredError) {
+          Alert.alert('Verification expired', e.message, [{ text: 'OK' }]);
+          navigate('Phone', { phone: route?.params?.phone });
+        } else {
+          Alert.alert('Sign-up failed', e?.message || 'Could not create your account. Please try again.', [{ text: 'OK' }]);
+        }
+      }
     }
   };
 

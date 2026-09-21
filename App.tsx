@@ -17,7 +17,7 @@ import MatchScreen from './src/screens/MatchScreen';
 import ChatScreen from './src/screens/ChatScreen';
 import LanguageScreen from './src/screens/LanguageScreen';
 import PhoneScreen from './src/screens/PhoneScreen';
-import OtpScreen from './src/screens/OtpScreen';
+import VerifyBySmsScreen from './src/screens/VerifyBySmsScreen';
 import AvatarScreen from './src/screens/AvatarScreen';
 import FinalizeInviteScreen from './src/screens/FinalizeInviteScreen';
 import ProfileDetailsScreen from './src/screens/ProfileDetailsScreen';
@@ -31,9 +31,6 @@ import { UserProvider } from './src/context/UserContext';
 import { updateUserStatus, touchLastActive } from './src/services/userService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
 import { rejectCallOffer } from './src/services/liveRoomService';
-import CreatePasswordScreen from './src/screens/CreatePasswordScreen';
-import ForgotPasswordScreen from './src/screens/ForgotPasswordScreen';
-import LoginPasswordScreen from './src/screens/LoginPasswordScreen';
 import CelebsScreen from './src/screens/CelebsScreen';
 import ChillScreen from './src/screens/ChillScreen';
 import DumCharadesRoomScreen from './src/screens/DumCharadesRoomScreen';
@@ -186,7 +183,7 @@ const SCREENS = {
   ),
   Language: ({ navigate, goBack, params }: ScreenContext) => <LanguageScreen navigate={navigate} goBack={goBack} route={{ params }} />,
   Phone: ({ navigate, goBack, params }: ScreenContext) => <PhoneScreen navigate={navigate} goBack={goBack} route={{ params }} />,
-  Otp: ({ navigate, goBack, params }: ScreenContext) => <OtpScreen navigate={navigate} goBack={goBack} route={{ params }} />,
+  VerifyBySms: ({ navigate, goBack, params }: ScreenContext) => <VerifyBySmsScreen navigate={navigate} goBack={goBack} route={{ params }} />,
   Avatar: ({ navigate, goBack, params }: ScreenContext) => <AvatarScreen navigate={navigate} goBack={goBack} route={{ params }} />,
   FinalizeInvite: ({ navigate, goBack, params }: ScreenContext) => <FinalizeInviteScreen navigate={navigate} goBack={goBack} route={{ params }} />,
   ProfileDetails: ({ navigate, goBack, params }: ScreenContext) => <ProfileDetailsScreen navigate={navigate} goBack={goBack} route={{ params }} />,
@@ -196,9 +193,6 @@ const SCREENS = {
   AdminPanel: ({ navigate, goBack }: ScreenContext) => <AdminPanelScreen navigate={navigate} goBack={goBack} />,
   Coins: ({ navigate, goBack }: ScreenContext) => <CoinsScreen navigate={navigate} goBack={goBack} />,
   Earnings: ({ navigate, goBack }: ScreenContext) => <EarningsScreen navigate={navigate} goBack={goBack} />,
-  CreatePassword: ({ navigate, goBack, params }: ScreenContext) => <CreatePasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />,
-  ForgotPassword: ({ navigate, goBack, params }: ScreenContext) => <ForgotPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />,
-  LoginPassword: ({ navigate, goBack, params }: ScreenContext) => <LoginPasswordScreen navigate={navigate} goBack={goBack} route={{ params }} />,
   Celebs: ({ navigate, goBack }: ScreenContext) => <CelebsScreen navigate={navigate} goBack={goBack} />,
   Chill: ({ navigate, goBack }: ScreenContext) => <ChillScreen navigate={navigate} goBack={goBack} />,
   DumCharadesRoom: ({ navigate, goBack, params }: ScreenContext) => <DumCharadesRoomScreen navigate={navigate} goBack={goBack} route={{ params }} />,

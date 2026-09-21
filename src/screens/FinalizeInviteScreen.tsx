@@ -20,6 +20,8 @@ import DiamondBadge from '../components/DiamondBadge';
 import GengalAvatar, { AvatarData, DEFAULT_AVATAR_DNA } from '../components/GengalAvatar';
 import { auth, db } from '../config/firebase';
 import { getUserProfile, saveUserProfile } from '../services/userService';
+import { completeSignup, SignupExpiredError } from '../services/signupService';
+import { useActionLock } from '../hooks/useActionLock';
 import { skeuo } from '../theme/skeuomorphic';
 
 type FinalizeInviteScreenProps = {
@@ -190,6 +192,7 @@ export default function FinalizeInviteScreen({ navigation, navigate: directNavig
   const { height } = useWindowDimensions();
   const navigate = directNavigate || navigation?.navigate || (() => {});
   const { params } = route || {};
+  const { run: runSignupOnce } = useActionLock();
   const [builderCategory, setBuilderCategory] = useState<BuilderCategory>('hair');
   
   const [effectiveGender, setEffectiveGender] = useState<'Masculine' | 'Feminine'>(() => {
@@ -365,7 +368,19 @@ export default function FinalizeInviteScreen({ navigation, navigate: directNavig
                 navigate(params?.returnTo || 'Settings');
               }
             } else {
-              navigate('CreatePassword', { ...params, avatar: avatarData });
+              await runSignupOnce(async () => {
+                try {
+                  await completeSignup({ ...params, avatar: avatarData });
+                  navigate('Home');
+                } catch (error: any) {
+                  if (error instanceof SignupExpiredError) {
+                    Alert.alert('Verification expired', error.message);
+                    navigate('Phone', { phone: params?.phone });
+                  } else {
+                    Alert.alert('Sign-up failed', error?.message || 'Could not create your account. Please try again.');
+                  }
+                }
+              });
             }
           }}>
             {({ pressed }) => (

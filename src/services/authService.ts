@@ -1,8 +1,4 @@
 import { auth } from '../config/firebase';
-import {
-  signInWithCustomToken,
-  User,
-} from 'firebase/auth';
 
 import { Platform } from 'react-native';
 import { logDebugEvent, setDebugContext } from './debugLogger';
@@ -103,26 +99,6 @@ export const authedGet = async <T>(path: string): Promise<T> => {
   return data as T;
 };
 
-const secureSet = async (key: string, value: string) => {
-  if (Platform.OS === 'web') return;
-  try {
-    const SecureStore = await import('expo-secure-store');
-    await SecureStore.setItemAsync(key, value);
-  } catch (error) {
-    console.warn('[Auth] Secure session storage is unavailable in this build:', error);
-  }
-};
-
-const secureGet = async (key: string) => {
-  if (Platform.OS === 'web') return null;
-  try {
-    const SecureStore = await import('expo-secure-store');
-    return await SecureStore.getItemAsync(key);
-  } catch {
-    return null;
-  }
-};
-
 const secureDelete = async (key: string) => {
   if (Platform.OS === 'web') return;
   try {
@@ -131,44 +107,8 @@ const secureDelete = async (key: string) => {
   } catch {}
 };
 
-export const saveAuthSession = async (phoneNumber: string, password: string) => {
-  await secureSet(SESSION_PHONE_KEY, phoneNumber);
-};
-
 export const clearAuthSession = async () => {
   await secureDelete(SESSION_PHONE_KEY);
-};
-
-export const restoreAuthSession = async (): Promise<User | null> => {
-  return null;
-};
-
-export const sendOTP = async (phoneNumber: string): Promise<void> => {
-  try {
-    const cleanPhone = phoneNumber.replace(/\s+/g, '');
-    const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+91${cleanPhone}`;
-    logDebugEvent('auth.sendOtp.start', { backendUrl: getBackendUrl() });
-    
-    const response = await fetch(`${getBackendUrl()}/api/v1/auth/send-otp`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Bypass-Tunnel-Reminder': 'true' // Bypass localtunnel warning page
-      },
-      body: JSON.stringify({ phone: formattedPhone }),
-    });
-
-    if (!response.ok) {
-      const data = await safeParseJson(response, 'Failed to send OTP');
-      logDebugEvent('auth.sendOtp.httpError', { status: response.status, response: data }, 'warn');
-      throw new Error(data.error || 'Failed to send OTP');
-    }
-    logDebugEvent('auth.sendOtp.success', {});
-  } catch (error) {
-    logDebugEvent('auth.sendOtp.failed', { backendUrl: BACKEND_URL || 'missing', error }, 'error');
-    console.error("Error sending Fast2SMS OTP", error);
-    throw error;
-  }
 };
 
 export const checkUsernameAvailable = async (username: string, excludeUid?: string): Promise<boolean> => {
@@ -187,146 +127,6 @@ export const checkUsernameAvailable = async (username: string, excludeUid?: stri
   return data.available;
 };
 
-export const checkUserExists = async (phoneNumber: string): Promise<boolean> => {
-  try {
-    const cleanPhone = phoneNumber.replace(/\s+/g, '');
-    const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+91${cleanPhone}`;
-    logDebugEvent('auth.checkUser.start', { backendUrl: getBackendUrl() });
-    
-    const response = await fetch(`${getBackendUrl()}/api/v1/auth/check-user`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Bypass-Tunnel-Reminder': 'true'
-      },
-      body: JSON.stringify({ phone: formattedPhone }),
-    });
-
-    if (!response.ok) {
-      const data = await safeParseJson(response, 'Failed to check user');
-      logDebugEvent('auth.checkUser.httpError', { status: response.status, response: data }, 'warn');
-      throw new Error(data.error || 'Failed to check user');
-    }
-    
-    const data = await safeParseJson(response, 'Failed to check user');
-    logDebugEvent('auth.checkUser.success', { exists: data.exists });
-    return data.exists;
-  } catch (error) {
-    logDebugEvent('auth.checkUser.failed', { backendUrl: BACKEND_URL || 'missing', error }, 'error');
-    console.error("Error checking user existence", error);
-    throw error;
-  }
-};
-
-export const verifyOTP = async (phoneNumber: string, code: string, authMode: 'signup' | 'login'): Promise<{user?: User, token?: string}> => {
-  try {
-    const cleanPhone = phoneNumber.replace(/\s+/g, '');
-    const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+91${cleanPhone}`;
-    logDebugEvent('auth.verifyOtp.start', { authMode, backendUrl: getBackendUrl() });
-
-    const response = await fetch(`${getBackendUrl()}/api/v1/auth/verify-otp`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Bypass-Tunnel-Reminder': 'true'
-      },
-      body: JSON.stringify({ phone: formattedPhone, otp: code }),
-    });
-
-    if (!response.ok) {
-      const data = await safeParseJson(response, 'Invalid OTP');
-      logDebugEvent('auth.verifyOtp.httpError', { authMode, status: response.status, response: data }, 'warn');
-      throw new Error(data.error || 'Invalid OTP');
-    }
-
-    const data = await safeParseJson(response, 'Failed to verify OTP');
-    const token = data.token;
-
-    if (authMode === 'login') {
-      const userCredential = await signInWithCustomToken(auth, token);
-      setDebugContext({ userId: userCredential.user.uid });
-      logDebugEvent('auth.verifyOtp.loginSuccess', { uid: userCredential.user.uid });
-      return { user: userCredential.user };
-    } else {
-      // In signup mode, just return the token so we can login at the VERY end
-      logDebugEvent('auth.verifyOtp.signupTokenSuccess', {});
-      return { token };
-    }
-  } catch (error) {
-    logDebugEvent('auth.verifyOtp.failed', { authMode, backendUrl: BACKEND_URL || 'missing', error }, 'error');
-    console.error("Error verifying Fast2SMS OTP", error);
-    throw error;
-  }
-};
-
-export const loginWithPassword = async (phoneNumber: string, password: string, persistSession = true): Promise<{user?: User, token?: string}> => {
-  try {
-    const cleanPhone = phoneNumber.replace(/\s+/g, '');
-    const formattedPhone = cleanPhone.startsWith('+') ? cleanPhone : `+91${cleanPhone}`;
-    logDebugEvent('auth.loginPassword.start', { persistSession, backendUrl: getBackendUrl() });
-
-    const response = await fetch(`${getBackendUrl()}/api/v1/auth/login-password`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Bypass-Tunnel-Reminder': 'true'
-      },
-      body: JSON.stringify({ phone: formattedPhone, password }),
-    });
-
-    if (!response.ok) {
-      const data = await safeParseJson(response, 'Invalid credentials');
-      logDebugEvent('auth.loginPassword.httpError', { status: response.status, response: data }, 'warn');
-      throw new Error(data.error || 'Invalid credentials');
-    }
-
-    const data = await safeParseJson(response, 'Failed to login with password');
-    const token = data.token;
-    const userCredential = await signInWithCustomToken(auth, token);
-    setDebugContext({ userId: userCredential.user.uid });
-    if (persistSession) {
-      await saveAuthSession(formattedPhone, password);
-    }
-    logDebugEvent('auth.loginPassword.success', { uid: userCredential.user.uid, persisted: persistSession });
-    return { user: userCredential.user, token };
-  } catch (error) {
-    logDebugEvent('auth.loginPassword.failed', { persistSession, backendUrl: BACKEND_URL || 'missing', error }, 'error');
-    console.error("Error logging in with password", error);
-    throw error;
-  }
-};
-
-export const setAccountPassword = async (password: string): Promise<void> => {
-  const user = auth.currentUser;
-  if (!user) throw new Error('You must be logged in to set a password.');
-
-  const idToken = await user.getIdToken();
-  const response = await fetch(`${getBackendUrl()}/api/v1/auth/set-password`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify({ password }),
-  });
-
-  if (!response.ok) {
-    const data = await safeParseJson(response, 'Failed to set password');
-    throw new Error(data.error || 'Failed to set password');
-  }
-};
-
-/**
- * Deletes server-held account data (credentials, private profile, pending call
- * offers) that security rules keep out of the client's reach.
- */
-/**
- * Deletes all server-held account data. Throws on failure — deliberately.
- *
- * This used to swallow its own error, so a failed purge was indistinguishable
- * from a successful one and the caller went on to delete the auth record
- * anyway, stranding the data with no owner left to remove it.
- */
 export const purgeAccountData = async () => {
   await authedPost('/api/v1/auth/delete-account');
 };

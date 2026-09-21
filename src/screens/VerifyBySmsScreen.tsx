@@ -21,7 +21,9 @@ type Phase = 'starting' | 'waiting' | 'expired' | 'error' | 'signingIn' | 'verif
 type Props = {
   navigate: (screen: string, params?: any) => void;
   goBack: () => void;
-  route?: { params?: { phone?: string } };
+  // The index signature matches App.tsx's NavigationParams; without it TS
+  // rejects the router's params as sharing no property with this type.
+  route?: { params?: { phone?: string; [key: string]: unknown } };
 };
 
 const formatPhone = (p: string) => (p.length === 13 ? `${p.slice(0, 3)} ${p.slice(3, 8)} ${p.slice(8)}` : p);
