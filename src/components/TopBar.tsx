@@ -113,9 +113,11 @@ const styles = StyleSheet.create({
     fontSize: 31,
     lineHeight: BRAND_LINE,
     // A script's last stroke leans past the width the font reserves for it,
-    // and Android clips text to that width: the final "l" was cut off with a
-    // straight edge. Padding both sides gives it room and keeps it centred.
-    paddingHorizontal: 6,
+    // and Android clips text to its content box, so the final "l" ended in a
+    // straight cut. Padding does not help (the clip excludes padding); a box
+    // wider than the word does, with the word centred inside it.
+    alignSelf: 'stretch',
+    textAlign: 'center',
     color: '#7A256D',
     includeFontPadding: false,
   },
