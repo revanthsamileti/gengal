@@ -37,7 +37,12 @@ export default function TopBar({ navigate, title = 'Gengal', subtitle }: TopBarP
       </TouchableOpacity>
 
       <View style={styles.centerTitle}>
-        <Text style={styles.brand} numberOfLines={1}>{title}</Text>
+        <View style={styles.lockup}>
+          {/* The heart from the GenGal logo, so the header carries the same
+              mark as the app icon and the splash. */}
+          <Image source={require('../../assets/logo-mark.png')} style={styles.mark} resizeMode="contain" />
+          <Text style={styles.brand} numberOfLines={1}>{title}</Text>
+        </View>
         {subtitle ? (
           <Text style={styles.headerSub} numberOfLines={1}>{subtitle}</Text>
         ) : null}
@@ -106,6 +111,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  lockup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  mark: {
+    width: 30,
+    height: BRAND_LINE,
+  },
   brand: {
     // Loaded in App.tsx's useFonts. No fontWeight: on Android a weight with a
     // custom family makes the system pick its own bold face instead.
@@ -115,8 +129,8 @@ const styles = StyleSheet.create({
     // A script's last stroke leans past the width the font reserves for it,
     // and Android clips text to its content box, so the final "l" ended in a
     // straight cut. Padding does not help (the clip excludes padding); a box
-    // wider than the word does, with the word centred inside it.
-    alignSelf: 'stretch',
+    // wider than the word is what gives the stroke room.
+    minWidth: 150,
     textAlign: 'center',
     color: '#7A256D',
     includeFontPadding: false,

@@ -275,24 +275,20 @@ function SplashScreen() {
   }, []);
 
   return (
-    <View style={{ flex: 1, backgroundColor: '#FFFDF8', alignItems: 'center', justifyContent: 'center' }}>
+    /* Same paper colour as the native splash, so the hand-off between them is
+       invisible rather than a flash of a different background. */
+    <View style={{ flex: 1, backgroundColor: '#F9F2E2', alignItems: 'center', justifyContent: 'center' }}>
       <Animated.View style={{ opacity: fadeAnim, transform: [{ scale: scaleAnim }], alignItems: 'center' }}>
-        {/* Logo */}
+        {/* The logo already carries the name and the line under it, so nothing
+            is repeated below it. */}
         <Animated.Image
           source={require('./assets/splash-icon.png')}
-          style={{ width: 120, height: 120, borderRadius: 30, transform: [{ scale: scaleAnim }] }}
+          style={{ width: 264, height: 264, transform: [{ scale: scaleAnim }] }}
           resizeMode="contain"
         />
 
-        <Text style={{ marginTop: 20, fontSize: 28, fontWeight: '700', color: '#1a1a1a', letterSpacing: 1 }}>
-          GenGal
-        </Text>
-        <Text style={{ marginTop: 4, fontSize: 13, color: '#999', letterSpacing: 2 }}>
-          CONNECT & VIBE
-        </Text>
-
         {/* Animated dots */}
-        <View style={{ flexDirection: 'row', marginTop: 36, columnGap: 8 }}>
+        <View style={{ flexDirection: 'row', marginTop: 24, columnGap: 8 }}>
           {[dotAnim1, dotAnim2, dotAnim3].map((dot, i) => (
             <Animated.View key={i} style={{
               width: 8, height: 8, borderRadius: 4, backgroundColor: '#D49A0B', opacity: dot,
