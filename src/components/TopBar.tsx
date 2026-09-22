@@ -129,8 +129,10 @@ const styles = StyleSheet.create({
     // A script's last stroke leans past the width the font reserves for it,
     // and Android clips text to its content box, so the final "l" ended in a
     // straight cut. Padding does not help (the clip excludes padding); a box
-    // wider than the word is what gives the stroke room.
-    minWidth: 150,
+    // wider than the word is what gives the stroke room. Only a little wider,
+    // though: at 150 the mark-plus-word pair was wider than the gap between
+    // the avatar and the coin badge and pushed up against the avatar.
+    minWidth: 112,
     textAlign: 'center',
     color: '#7A256D',
     includeFontPadding: false,
