@@ -4,23 +4,33 @@ import { getBackendUrl } from './authService';
 import { logDebugEvent, setDebugContext } from './debugLogger';
 
 /**
- * Reverse-OTP sign-in: the user proves a number by texting a code FROM it.
- * The backend matches the SMS the gateway phone forwards; this module only
- * starts a session, polls it, and exchanges the resulting custom token.
+ * Reverse-OTP sign-in: the user proves a number by sending a code FROM it, by
+ * SMS (forwarded by the gateway phone) or WhatsApp (delivered by Meta). The
+ * backend matches the message; this module only starts a session, polls it,
+ * and exchanges the resulting custom token.
  */
+
+export type SignInChannel = 'whatsapp' | 'sms';
 
 export type SmsSession = {
   sessionId: string;
   code: string;
   /** Exactly what the user must text, e.g. "GENGAL 482913". */
   message: string;
-  /** Where to text it. Empty only in local dev bypass. */
+  /** Where to text it. Empty when SMS is not on offer (or in local dev bypass). */
   gatewayNumber: string;
+  /** Where to WhatsApp it. Empty when WhatsApp is not on offer. */
+  whatsappNumber?: string;
+  /** What the server can receive right now, best first. Absent from older servers. */
+  channels?: SignInChannel[];
   expiresIn: number;
 };
 
+/** Why a session is still pending, when the server knows. */
+export type SmsPendingHint = 'sender_mismatch' | 'share_number';
+
 export type SmsPollResult =
-  | { status: 'pending'; expiresIn: number }
+  | { status: 'pending'; expiresIn: number; hint?: SmsPendingHint }
   | { status: 'expired' }
   | { status: 'verified'; token: string; isNewUser: boolean }
   /** Transient (network, throttle, 5xx): keep polling until the deadline. */
@@ -45,7 +55,7 @@ const postJson = (path: string, body: Record<string, unknown>) =>
 const startErrorMessage = (status: number, code: string): string => {
   if (code === 'invalid_phone') return 'Enter a valid Indian mobile number.';
   if (code === 'rate_limited' || status === 429) return 'Too many attempts. Please try again in a few minutes.';
-  if (code === 'sms_gateway_offline') return 'SMS sign-in is down for a few minutes. Please try again shortly.';
+  if (code === 'sms_gateway_offline') return 'Sign-in is down for a few minutes. Please try again shortly.';
   return 'Sign-in is temporarily unavailable. Please try again.';
 };
 
@@ -63,8 +73,15 @@ export const startSmsVerification = async (phone: string): Promise<SmsSession> =
     throw new SmsAuthError(startErrorMessage(response.status, code), code);
   }
   logDebugEvent('auth.sms.start.ok', {});
-  return data as SmsSession;
+  const session = data as SmsSession;
+  // An older server sends no channel list: it only ever offered SMS.
+  if (!Array.isArray(session.channels)) session.channels = session.gatewayNumber ? ['sms'] : [];
+  return session;
 };
+
+/** Opens WhatsApp with the message typed, addressed to our business number. */
+export const whatsappLink = (number: string, message: string) =>
+  `https://wa.me/${number.replace(/\D/g, '')}?text=${encodeURIComponent(message)}`;
 
 export const pollSmsVerification = async (sessionId: string): Promise<SmsPollResult> => {
   try {
@@ -74,7 +91,10 @@ export const pollSmsVerification = async (sessionId: string): Promise<SmsPollRes
     if (data?.status === 'verified' && typeof data.token === 'string') {
       return { status: 'verified', token: data.token, isNewUser: Boolean(data.isNewUser) };
     }
-    if (data?.status === 'pending') return { status: 'pending', expiresIn: Number(data.expiresIn) || 0 };
+    if (data?.status === 'pending') {
+      const hint = data.hint === 'sender_mismatch' || data.hint === 'share_number' ? data.hint : undefined;
+      return { status: 'pending', expiresIn: Number(data.expiresIn) || 0, hint };
+    }
     if (data?.status === 'expired') return { status: 'expired' };
     return { status: 'retry' };
   } catch {
