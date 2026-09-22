@@ -284,7 +284,8 @@ are free. Design: `docs/superpowers/specs/2026-09-22-reverse-otp-whatsapp-design
    `messages` field.
 6. **Go live.** *App settings → Basic*: Privacy policy URL
    `https://<host>/privacy`, Terms URL `https://<host>/terms`; then switch the app from
-   Development to **Live**. A Development app only receives messages from its own testers.
+   Development to **Live** ("Publish"). Until it is published Meta delivers **no** real
+   messages, not even from the app's own admins or testers, only the dashboard's test webhooks.
 7. **Check.** `curl -s https://<host>/api/v1/auth/sms/health` shows `"whatsapp":"configured"`.
    Sign in once with WhatsApp; `journalctl -u gengal-backend | grep wa_verify` shows
    `outcome=verified`.
