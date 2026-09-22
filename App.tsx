@@ -7,6 +7,7 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import { useFonts } from 'expo-font';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
+import { DancingScript_700Bold } from '@expo-google-fonts/dancing-script';
 import HomeScreen from './src/screens/HomeScreen';
 import ExpertRoomScreen from './src/screens/ExpertRoomScreen';
 import ClubScreen from './src/screens/ClubScreen';
@@ -31,6 +32,8 @@ import CoinsScreen from './src/screens/CoinsScreen';
 import { UserProvider } from './src/context/UserContext';
 import { updateUserStatus, touchLastActive } from './src/services/userService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
+import { useMessageNotificationTaps } from './src/hooks/useMessageNotificationTaps';
+import { isPushReachable } from './src/services/notificationService';
 import { rejectCallOffer } from './src/services/liveRoomService';
 import { isBlocked, startBlockListSync } from './src/services/safetyService';
 import CelebsScreen from './src/screens/CelebsScreen';
@@ -304,6 +307,8 @@ function SplashScreen() {
 export default function App() {
   const [fontsLoaded] = useFonts({
     ...MaterialIcons.font,
+    // The "Gengal" wordmark in TopBar.
+    DancingScript_700Bold,
   });
 
   /**
@@ -433,6 +438,14 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // A tapped message notification opens that conversation.
+  useMessageNotificationTaps(user, (message) => {
+    navigate('Chat', {
+      profileName: message.senderName,
+      matchData: { uid: message.senderUid, name: message.senderName },
+    });
+  });
+
   // Inbound calls push a Call screen with the offer already attached.
   useIncomingCallWatcher(user, (call) => {
     const inboundCallEntry = {
@@ -520,29 +533,22 @@ export default function App() {
   }, [signedInUid]);
 
   useEffect(() => {
+    if (!signedInUid) return;
+    const uid = signedInUid;
+
     // `lastActive` used to be written only when the app came to the foreground,
     // but the directory hides anyone whose lastActive is older than
-    // ONLINE_FRESHNESS_MS (5 minutes). Sitting on a screen without
-    // backgrounding the app therefore made you disappear from everyone's
-    // "Online Now" after five minutes -- still signed in, still isOnline: true,
-    // still looking at the app -- and nobody could call you. This beats well
-    // inside that window so an open app stays reachable.
+    // ONLINE_FRESHNESS_MS (5 minutes) unless their phone can get calls as
+    // notifications. Sitting on a screen without backgrounding the app
+    // therefore made you disappear from everyone's "Online Now" after five
+    // minutes and nobody could call you. This beats well inside that window so
+    // an open app stays reachable.
     const HEARTBEAT_MS = 2 * 60 * 1000;
     let timer: ReturnType<typeof setInterval> | null = null;
 
-    const beat = () => {
-      const uid = auth.currentUser?.uid;
-      if (uid) touchLastActive(uid);
-    };
-
     const startBeating = () => {
       if (timer) return;
-      // Beat straight away, not only after the first interval: on a cold start
-      // no AppState 'change' fires, so without this the app writes nothing for
-      // two minutes and a session resumed on a stale record stays invisible
-      // for that whole window.
-      beat();
-      timer = setInterval(beat, HEARTBEAT_MS);
+      timer = setInterval(() => touchLastActive(uid), HEARTBEAT_MS);
     };
 
     const stopBeating = () => {
@@ -552,24 +558,35 @@ export default function App() {
       }
     };
 
-    if (AppState.currentState === 'active') startBeating();
+    // Opening the app says "I'm here" -- on a cold start too. It used to be
+    // said only on a background-to-foreground *change*, which a cold start
+    // never fires: after swiping GenGal away, the offline flag written on the
+    // way out stuck, and reopening the app left you invisible with the switch
+    // still showing on. updateUserStatus keeps isOnline in step with the
+    // switch, so this never turns on someone who switched it off.
+    if (AppState.currentState === 'active') {
+      updateUserStatus(uid, true);
+      startBeating();
+    }
 
     const subscription = AppState.addEventListener('change', (nextState) => {
-      const uid = auth.currentUser?.uid;
-      if (!uid) return;
       if (nextState === 'active') {
         updateUserStatus(uid, true);
         startBeating();
       } else if (nextState === 'background' || nextState === 'inactive') {
         stopBeating();
-        updateUserStatus(uid, false);
+        // Leaving the app no longer takes you offline when calls can reach
+        // this phone as notifications: the "Show me as online" switch is what
+        // decides. Without push -- web, or a phone whose push setup failed --
+        // nobody could reach you once you leave, so you still go offline.
+        if (!isPushReachable()) updateUserStatus(uid, false);
       }
     });
     return () => {
       stopBeating();
       subscription.remove();
     };
-  }, []);
+  }, [signedInUid]);
 
   if (isLoading || !fontsLoaded) {
     return <SplashScreen />;

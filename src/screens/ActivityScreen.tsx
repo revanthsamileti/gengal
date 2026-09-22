@@ -525,7 +525,9 @@ const styles = StyleSheet.create({
 
   statsRow: { flexDirection: 'row', gap: 8, marginBottom: 20 },
   statCard: {
-    flex: 1, backgroundColor: '#FFFDF8', borderRadius: 16, padding: 12, alignItems: 'center',
+    // Narrow side padding: four cards share the row, and 12px each side left
+    // "TALK TIME" 52px, so it showed as "TALK TI...".
+    flex: 1, backgroundColor: '#FFFDF8', borderRadius: 16, paddingVertical: 12, paddingHorizontal: 4, alignItems: 'center',
     borderWidth: 1, borderColor: '#EAD8A9',
     boxShadow: Platform.OS === 'web' ? '0 2px 8px rgba(68,44,21,0.06)' : undefined,
   },

@@ -15,7 +15,8 @@ import {
   serverTimestamp,
   getCountFromServer,
   arrayUnion,
-  arrayRemove
+  arrayRemove,
+  deleteField
 } from 'firebase/firestore';
 
 /**
@@ -125,6 +126,12 @@ export interface UserProfile {
   isOnline?: boolean;
   isActiveMode?: boolean;
   isSessionActive?: boolean;
+  /**
+   * This person's phone can get a call as a notification while GenGal is not
+   * on screen. Set by the app once its Firebase token is stored; cleared by the
+   * backend when that token stops working, and on sign-out. See isListedOnline.
+   */
+  pushReachable?: boolean;
   /** Server-stamped on every billing tick while on a call. See isUserInCall. */
   inCallSince?: any;
   isDeleted?: boolean;
@@ -142,6 +149,8 @@ export interface UserProfile {
 export interface UserPrivateData {
   phoneNumber?: string;
   expoPushToken?: string;
+  /** Firebase Cloud Messaging token; what backend/push.py sends to. */
+  fcmToken?: string;
 }
 
 export const savePrivateUserData = async (uid: string, data: Partial<UserPrivateData>) => {
@@ -159,7 +168,7 @@ export const getPrivateUserData = async (uid: string): Promise<UserPrivateData |
  * silently failing against the security rules at write time.
  */
 const SERVER_OWNED_KEYS = ['coins', 'hearts', 'respectBadges', 'password', 'passwordHash'] as const;
-const PRIVATE_KEYS = ['phoneNumber', 'expoPushToken'] as const;
+const PRIVATE_KEYS = ['phoneNumber', 'expoPushToken', 'fcmToken'] as const;
 
 const splitProfileData = (profileData: Record<string, any>) => {
   const publicData: Record<string, any> = {};
@@ -234,15 +243,34 @@ const toMillis = (value: any): number => {
  * online lists. Kept here rather than in a screen so the rule has one home.
  */
 export const isUserAvailableNow = (user: UserProfile): boolean => {
-  if (user.isOnline !== true) return false;
-  if (user.isActiveMode === false) return false;
-  if ((user as any).isSessionActive === false) return false;
   // Someone mid-call is online but not reachable. Showing them as "Available
   // now" invites a call that cannot be answered, and the caller pays the full
   // ring timeout to discover it.
-  if (isUserInCall(user)) return false;
+  return isListedOnline(user) && !isUserInCall(user);
+};
+
+/**
+ * Whether someone shows as online: their "Show me as online" switch is on,
+ * they are signed in, and a call can reach them.
+ *
+ * A call reaches them either because GenGal is open (a heartbeat inside
+ * ONLINE_FRESHNESS_MS) or because their phone gets calls as notifications
+ * (`pushReachable`). The second is what keeps someone online after they press
+ * Home or swipe the app away: leaving the app used to write isOnline: false,
+ * so the switch looked on while nobody could see or call them. The switch is
+ * what decides now.
+ *
+ * Records with neither -- web sessions that ended, installs from before push
+ * worked -- still age out after ONLINE_FRESHNESS_MS, so people nobody can
+ * reach do not pile up in the list.
+ */
+export const isListedOnline = (user: UserProfile, now: number = Date.now()): boolean => {
+  if (user.isOnline !== true) return false;
+  if (user.isActiveMode === false) return false;
+  if (user.isSessionActive === false) return false;
+  if (user.pushReachable === true) return true;
   const lastActiveMs = toMillis(user.lastActive);
-  return lastActiveMs > 0 && Date.now() - lastActiveMs <= ONLINE_FRESHNESS_MS;
+  return lastActiveMs > 0 && now - lastActiveMs <= ONLINE_FRESHNESS_MS;
 };
 
 export const getUserProfile = async (uid: string): Promise<UserProfile | null> => {
@@ -323,10 +351,7 @@ export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void,
       const data = doc.data() as UserProfile;
       if (currentUid && doc.id === currentUid) return;
       if (vipOnly && data.isVip !== true) return;
-      if (data.isActiveMode === false) return;
-
-      const lastActiveMs = toMillis(data.lastActive);
-      if (!lastActiveMs || Date.now() - lastActiveMs > ONLINE_FRESHNESS_MS) return;
+      if (!isListedOnline(data)) return;
 
       users.push({
         ...data,
@@ -421,10 +446,7 @@ export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void,
       const hasProfileIdentity = Boolean(data.nickname || data.username);
       if (!hasProfileIdentity) return;
 
-      if (data.isSessionActive === false) return;
-
-      const lastActiveMs = toMillis(data.lastActive);
-      if (!lastActiveMs || Date.now() - lastActiveMs > ONLINE_FRESHNESS_MS) return;
+      if (!isListedOnline(data)) return;
 
       users.push(normalizeVisibleUser(doc.id, data));
     });
@@ -525,6 +547,38 @@ export const touchLastActive = async (uid: string) => {
   } catch (error) {
     console.warn('Error refreshing lastActive:', error);
   }
+};
+
+/** Records whether this phone can get calls as notifications. See isListedOnline. */
+export const setPushReachable = async (uid: string, reachable: boolean) => {
+  const userRef = doc(db, 'users', uid);
+  const userSnap = await getDoc(userRef);
+  // Same race as touchLastActive: a brand-new account may not have its profile
+  // document yet. Registration runs again on the next launch.
+  if (!userSnap.exists()) return;
+  await updateDoc(userRef, { pushReachable: reachable });
+};
+
+/**
+ * Takes a signing-out account offline and off this phone.
+ *
+ * Staying online outside the app depends on push, so a signed-out account
+ * must also drop its tokens: otherwise it would still be listed as online and
+ * its calls and messages would keep ringing whoever uses this phone next.
+ */
+export const markSignedOut = async (uid: string) => {
+  await Promise.all([
+    updateDoc(doc(db, 'users', uid), {
+      isOnline: false,
+      isSessionActive: false,
+      pushReachable: false,
+    }),
+    setDoc(
+      doc(db, 'user_private', uid),
+      { fcmToken: deleteField(), expoPushToken: deleteField() },
+      { merge: true },
+    ),
+  ]);
 };
 
 export const updateUserStatus = async (uid: string, isOnline: boolean) => {

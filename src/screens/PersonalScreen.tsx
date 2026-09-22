@@ -755,7 +755,7 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
               <View style={styles.pillsRow}>
                 <TouchableOpacity style={styles.randomPill} activeOpacity={0.86} onPress={handleRandomMatch}>
                   <MaterialIcons name={isSearching ? 'close' : 'bolt'} size={21} color="#B8820B" />
-                  <Text style={styles.randomPillText}>{isSearching ? 'Cancel Search' : 'Random Match'}</Text>
+                  <Text style={styles.randomPillText} numberOfLines={1}>{isSearching ? 'Cancel Search' : 'Random Match'}</Text>
                 </TouchableOpacity>
 
                 <TouchableOpacity
@@ -766,7 +766,7 @@ export default function PersonalScreen({ navigate }: PersonalScreenProps) {
                   accessibilityLabel="More connects, browse and search all profiles"
                 >
                   <MaterialIcons name="groups" size={19} color="#B8820B" />
-                  <Text style={styles.connectsPillText}>More Connects</Text>
+                  <Text style={styles.connectsPillText} numberOfLines={1}>More Connects</Text>
                 </TouchableOpacity>
               </View>
 
@@ -1228,7 +1228,10 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   randomPill: {
-    flex: 1.1,
+    // Equal halves. It was 1.1 : 0.9, which gave the longer label, "More
+    // Connects", the narrower button, and its text ran to the border.
+    flex: 1,
+    paddingHorizontal: 12,
     height: 46,
     borderRadius: 23,
     backgroundColor: '#FFFBF0',
@@ -1249,7 +1252,8 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   connectsPill: {
-    flex: 0.9,
+    flex: 1,
+    paddingHorizontal: 12,
     height: 46,
     borderRadius: 23,
     // Same surface, border and label colour as randomPill: these are two peer
@@ -1305,10 +1309,14 @@ const styles = StyleSheet.create({
   sortPillsContainer: {
     marginTop: 12,
     maxHeight: 38,
+    // Runs to the screen edges. Inside headerArea's 16px padding the row was
+    // clipped 16px short of the edge, cutting "Recently Joined" off mid-word
+    // so it did not look scrollable.
+    marginHorizontal: -16,
   },
   sortPillsScroll: {
     gap: 8,
-    paddingHorizontal: 2,
+    paddingHorizontal: 16,
   },
   sortPill: {
     height: 34,

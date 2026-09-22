@@ -9,10 +9,11 @@ type TabId = 'Home' | 'Club' | 'Personal' | 'Activity' | 'Celebs' | 'Chill';
 
 const TABS: { id: TabId; label: string; icon: keyof typeof MaterialIcons.glyphMap; screen?: string }[] = [
   { id: 'Home', label: 'Home', icon: 'home', screen: 'Home' },
-  { id: 'Club', label: 'Club', icon: 'castle', screen: 'Club' },
+  { id: 'Club', label: 'Club', icon: 'groups', screen: 'Club' },
   { id: 'Celebs', label: 'Celebs', icon: 'diamond', screen: 'Celebs' },
-  // Same cup as the Chill card on Home and the lounge hero.
-  { id: 'Chill', label: 'Chill', icon: 'local-cafe', screen: 'Chill' },
+  // Same controller as the Chill card on Home and the lounge hero: the lounge
+  // is games (Ludo, Dumb Charades).
+  { id: 'Chill', label: 'Chill', icon: 'sports-esports', screen: 'Chill' },
   // Calls and messages history, not notifications.
   { id: 'Activity', label: 'Activity', icon: 'history', screen: 'Activity' },
   { id: 'Personal', label: 'Connect', icon: 'connect-without-contact', screen: 'Personal' },

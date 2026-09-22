@@ -134,6 +134,18 @@ export const purgeAccountData = async () => {
 export const logout = async () => {
   try {
     logDebugEvent('auth.logout.start', {});
+    const uid = auth.currentUser?.uid;
+    if (uid) {
+      // Must happen while still signed in: the rules only let an account write
+      // its own records. Bounded, because Firestore holds a write until the
+      // server acknowledges it, and an offline phone must still be able to
+      // sign out.
+      const { markSignedOut } = await import('./userService');
+      await Promise.race([
+        markSignedOut(uid).catch((e) => console.warn('[Auth] Could not mark signed out:', e)),
+        new Promise((resolve) => setTimeout(resolve, 3000)),
+      ]);
+    }
     await clearAuthSession();
     await auth.signOut();
     setDebugContext({ userId: null });

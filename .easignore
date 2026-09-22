@@ -44,3 +44,7 @@ log*.txt
 # environment variables, not from a committed dotfile.
 .env
 .env.*
+
+# Firebase Android config: EAS supplies it through the GOOGLE_SERVICES_JSON
+# file variable (app.config.js), so a local copy is never uploaded.
+/google-services.json

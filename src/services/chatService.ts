@@ -138,10 +138,38 @@ export const sendMessage = async (
     );
 
     await batch.commit();
+
+    // Fire-and-forget: the message is already sent, and a failed notification
+    // must not look like a failed send.
+    notifyNewMessage(chatId, messageRef.id).catch((e) =>
+      console.warn('[Chat] Could not notify the recipient:', e)
+    );
   } catch (error) {
     console.error('[Chat] sendMessage failed:', error);
     throw error;
   }
+};
+
+/**
+ * Asks the backend to notify the other person. It reads the message back from
+ * Firestore itself, so only the ids are sent (see notify_new_message).
+ */
+const notifyNewMessage = async (chatId: string, messageId: string) => {
+  const [{ auth }, { getBackendUrl }] = await Promise.all([
+    import('../config/firebase'),
+    import('./authService'),
+  ]);
+  const user = auth.currentUser;
+  if (!user) return;
+  const idToken = await user.getIdToken();
+  await fetch(`${getBackendUrl()}/api/v1/chats/notify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ chatId, messageId }),
+  });
 };
 
 /**

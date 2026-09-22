@@ -55,6 +55,9 @@ export default function TopBar({ navigate, title = 'Gengal', subtitle }: TopBarP
   );
 }
 
+/** Height of the wordmark's line; the header row is centred on it. */
+const BRAND_LINE = 40;
+
 const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
@@ -98,26 +101,29 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     marginHorizontal: 10,
+    height: BRAND_LINE,
     alignItems: 'center',
-    flexDirection: 'column',
+    justifyContent: 'center',
   },
   brand: {
-    // Outfit was referenced here but never loaded (App.tsx registers only the
-    // MaterialIcons glyphs), so this silently fell back to the system face with
-    // different metrics. Install @expo-google-fonts/outfit and load it in
-    // useFonts if the Outfit look is wanted.
-    fontSize: 24,
-    fontWeight: '800',
+    // Loaded in App.tsx's useFonts. No fontWeight: on Android a weight with a
+    // custom family makes the system pick its own bold face instead.
+    fontFamily: 'DancingScript_700Bold',
+    fontSize: 31,
+    lineHeight: BRAND_LINE,
     color: '#7A256D',
-    letterSpacing: -0.5,
     includeFontPadding: false,
   },
   headerSub: {
+    // Hangs below the wordmark instead of stacking with it. Stacked, the
+    // subtitle pushed "Gengal" 17px higher on Club, Celebs and Chill than on
+    // the other tabs, so the logo jumped every time you switched tabs.
+    position: 'absolute',
+    top: BRAND_LINE - 4,
     fontSize: 10,
     fontWeight: '600',
     color: '#C08AA8',
     letterSpacing: 1.2,
-    marginTop: -2,
     includeFontPadding: false,
   },
 });

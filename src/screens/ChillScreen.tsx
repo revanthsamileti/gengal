@@ -432,7 +432,7 @@ export default function ChillScreen({ navigate, goBack }: Props) {
         <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
           <View style={styles.heroPanel}>
             <View style={styles.heroIconCup}>
-              <MaterialIcons name="local-cafe" size={30} color="#8B6F09" />
+              <MaterialIcons name="sports-esports" size={30} color="#8B6F09" />
             </View>
             <View style={styles.heroCopy}>
               <Text style={styles.heroTitle}>Chill Lounge</Text>

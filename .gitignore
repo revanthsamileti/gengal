@@ -162,3 +162,7 @@ backend/debug_events.log
 # Point-in-time snapshots of deployed rules. Never current; check live state
 # with the Firebase CLI instead of trusting a file on disk.
 firestore.rules.snapshot-*
+
+# Firebase Android config: supplied to EAS builds as the GOOGLE_SERVICES_JSON
+# file variable, never committed (see app.config.js).
+google-services.json

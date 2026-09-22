@@ -358,7 +358,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
           <View style={styles.tileGrid}>
             <TouchableOpacity style={[styles.tile, isSmall && styles.tileSmall]} activeOpacity={0.9} onPress={() => navigate('Club')}>
               <View style={styles.tileIconGold}>
-                <MaterialIcons name="castle" size={30} color="#A78312" />
+                <MaterialIcons name="groups" size={30} color="#A78312" />
               </View>
               <Text style={styles.tileTitle}>Club</Text>
               <Text style={styles.tileSub}>Expert Rooms</Text>
@@ -366,7 +366,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
 
             <TouchableOpacity style={[styles.tile, isSmall && styles.tileSmall]} activeOpacity={0.9} onPress={() => navigate('Chill')}>
               <View style={styles.tileIconPink}>
-                <MaterialIcons name="local-cafe" size={30} color="#D16CBF" />
+                <MaterialIcons name="sports-esports" size={30} color="#D16CBF" />
               </View>
               <Text style={[styles.tileTitle, styles.tileTitleMuted]}>Chill</Text>
               <Text style={styles.tileSub}>Intimate Vibes</Text>

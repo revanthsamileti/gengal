@@ -19,6 +19,7 @@ import { MaterialIcons } from '@expo/vector-icons';
 import CallPriceTag from '../components/CallPriceTag';
 import GengalAvatar from '../components/GengalAvatar';
 import ScreenShell from '../components/ScreenShell';
+import { dismissChatNotifications, setOpenChat } from '../services/notificationService';
 import {
   clearTyping,
   getChatId,
@@ -98,6 +99,15 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
   const targetUid = matchData?.uid ?? route?.params?.targetUid;
   const chatId = (currentUid && targetUid) ? getChatId(currentUid, targetUid) : '';
   const peerBlocked = useBlockedUids().has(targetUid ?? '');
+
+  // While this conversation is on screen its messages are right here, so no
+  // banner for them, and any already in the tray are cleared.
+  useEffect(() => {
+    if (!chatId) return;
+    setOpenChat(chatId);
+    dismissChatNotifications(chatId).catch(() => {});
+    return () => setOpenChat(null);
+  }, [chatId]);
 
   // Newest peer message already marked read, so a snapshot carrying nothing new
   // from them (our own send, a typing change) costs no write.
