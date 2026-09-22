@@ -112,6 +112,10 @@ const styles = StyleSheet.create({
     fontFamily: 'DancingScript_700Bold',
     fontSize: 31,
     lineHeight: BRAND_LINE,
+    // A script's last stroke leans past the width the font reserves for it,
+    // and Android clips text to that width: the final "l" was cut off with a
+    // straight edge. Padding both sides gives it room and keeps it centred.
+    paddingHorizontal: 6,
     color: '#7A256D',
     includeFontPadding: false,
   },
