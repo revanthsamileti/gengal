@@ -200,9 +200,16 @@ def _legal_page(name):
     return page
 
 
-_LEGAL_PAGES = {"privacy": _legal_page("privacy.html"), "terms": _legal_page("terms.html")}
+_LEGAL_PAGES = {
+    "": _legal_page("home.html"),
+    "privacy": _legal_page("privacy.html"),
+    "terms": _legal_page("terms.html"),
+}
 
 
+# The homepage exists for Meta's WhatsApp business review and anyone following
+# the app's links; the API itself lives under /api/v1.
+@app.route('/', methods=['GET'])
 @app.route('/privacy', methods=['GET'])
 @app.route('/terms', methods=['GET'])
 def legal_page():
