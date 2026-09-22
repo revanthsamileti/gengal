@@ -15,6 +15,7 @@ import {
   increment,
   Timestamp,
   getDoc,
+  runTransaction,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
 
@@ -433,26 +434,49 @@ export const buyLudoTicket = async (
   hostUid: string,
   targetColor: TokenColor
 ) => {
-  const { deductUserCoinsWithCommission } = await import('./coinService');
-  const commission = Math.floor(ticketPrice * 0.1);
-  await deductUserCoinsWithCommission(uid, ticketPrice, hostUid, commission);
-
-  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
-  const room = snap.data() as LudoRoom;
-  
-  if (room.players.find(p => p.color === targetColor)) {
-    throw new Error('Color already taken');
-  }
-
+  const roomRef = doc(db, 'ludo_rooms', roomId);
   const newPlayer: LudoPlayer = {
     uid, nickname, avatarData: avatarData || null,
     color: targetColor, isHost: false, isOnline: true, score: 0,
   };
 
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    players: [...room.players, newPlayer],
-    activeMemberCount: increment(1),
+  // Seat first, pay second. This used to charge and only then check the
+  // colour, so two people tapping the same seat both paid and one was told
+  // "Color already taken" with the coins already gone. The transaction makes
+  // the claim atomic: exactly one of them gets the seat, and only they pay.
+  await runTransaction(db, async (tx) => {
+    const snap = await tx.get(roomRef);
+    if (!snap.exists()) throw new Error('This table has closed.');
+    const room = snap.data() as LudoRoom;
+    if (room.phase !== 'waiting') throw new Error('This game has already started.');
+    if (room.players.some((p) => p.uid === uid)) throw new Error('You already have a seat.');
+    if (room.players.length >= 4) throw new Error('The table is full.');
+    if (room.players.some((p) => p.color === targetColor)) throw new Error('Color already taken');
+    tx.update(roomRef, {
+      players: [...room.players, newPlayer],
+      activeMemberCount: increment(1),
+    });
   });
+
+  const { deductUserCoinsWithCommission } = await import('./coinService');
+  const commission = Math.floor(ticketPrice * 0.1);
+  try {
+    await deductUserCoinsWithCommission(uid, ticketPrice, hostUid, commission);
+  } catch (e) {
+    // Not charged (too few coins, network): give the seat back.
+    await runTransaction(db, async (tx) => {
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) return;
+      const room = snap.data() as LudoRoom;
+      if (!room.players.some((p) => p.uid === uid)) return;
+      tx.update(roomRef, {
+        players: room.players.filter((p) => p.uid !== uid),
+        activeMemberCount: increment(-1),
+      });
+    }).catch((releaseError) => console.warn('[Ludo] Could not release an unpaid seat:', releaseError));
+    throw e;
+  }
+
   await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: `bought a ticket and joined the table!` });
 };
 

@@ -350,7 +350,11 @@ export default function ChillScreen({ navigate, goBack }: Props) {
   const [allCharadeRooms, setAllCharadeRooms] = useState<ChillRoom[]>([]);
   // Rooms whose host stopped heartbeating are abandoned, whatever `status` says.
   const charadeRooms = useLiveRooms(allCharadeRooms);
-  const [ludoRooms, setLudoRooms] = useState<LudoRoom[]>([]);
+  const [allLudoRooms, setLudoRooms] = useState<LudoRoom[]>([]);
+  // Same filter as the charades list and LudoScreen. Without it this lobby
+  // listed a table whose host had left nine hours earlier as "1 live", and
+  // everyone who joined waited for a game nobody could start.
+  const ludoRooms = useLiveRooms(allLudoRooms);
   const [showCreateCharades, setShowCreateCharades] = useState(false);
   const [ludoCreateModalVisible, setLudoCreateModalVisible] = useState(false);
   const [creatingLudo, setCreatingLudo] = useState(false);
