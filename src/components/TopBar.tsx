@@ -69,7 +69,8 @@ const styles = StyleSheet.create({
     // stack on top of that inset instead of replacing it, leaving a large
     // dead gap above the header on any phone with a tall status bar.
     paddingTop: 14,
-    paddingBottom: 14,
+    // Room for the subtitle that hangs below the wordmark (see headerSub).
+    paddingBottom: 18,
     backgroundColor: '#FFFDF8',
     borderBottomWidth: 1,
     borderBottomColor: '#F7E7EE',
@@ -119,7 +120,9 @@ const styles = StyleSheet.create({
     // subtitle pushed "Gengal" 17px higher on Club, Celebs and Chill than on
     // the other tabs, so the logo jumped every time you switched tabs.
     position: 'absolute',
-    top: BRAND_LINE - 4,
+    // Clear of the script's descenders: the tail of the "g" reaches the
+    // bottom of the line, and at BRAND_LINE - 4 it cut through the subtitle.
+    top: BRAND_LINE + 1,
     fontSize: 10,
     fontWeight: '600',
     color: '#C08AA8',
