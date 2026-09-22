@@ -162,30 +162,60 @@ class SessionStore:
                 "expires_at": now + self._ttl,
                 "verified_at": now if verified else None,
                 "last_poll": None,
+                "channel": None,
+                "hint": None,
             }
             self._sessions[session["id"]] = session
             self._by_code[code] = session["id"]
             self._by_phone[phone] = session["id"]
-            return {k: v for k, v in session.items() if k != "last_poll"}
+            return {k: v for k, v in session.items() if k not in ("last_poll", "channel", "hint")}
 
-    def mark_verified(self, code, sender, received_at=None):
+    def mark_verified(self, code, sender, received_at=None, channel="sms"):
         with self._lock:
-            now = self._clock()
-            self._purge(now)
-            session_id = self._by_code.get(code)
-            if not session_id:
-                return "no_session"
-            session = self._sessions[session_id]
-            # The gateway retries for about two days, so an old queued SMS can
-            # arrive long after its session died. It must not verify a newer
-            # session that happened to draw the same code.
-            if received_at is not None and received_at < session["created_at"] - RECEIVED_AT_SKEW_SECONDS:
-                return "stale"
+            session, outcome = self._live_session_for(code, received_at)
+            if not session:
+                return outcome
             if sender != session["phone"]:
+                # Common with WhatsApp on a second SIM: tell the waiting app,
+                # rather than leaving it spinning until the code expires.
+                session["hint"] = "sender_mismatch"
                 return "sender_mismatch"
             if session["verified_at"] is None:
-                session["verified_at"] = now
+                session["verified_at"] = self._clock()
+                session["channel"] = channel
             return "verified"
+
+    def note_hint(self, code, hint, received_at=None):
+        """Attach a hint for the waiting app without verifying anything."""
+        with self._lock:
+            session, outcome = self._live_session_for(code, received_at)
+            if not session:
+                return outcome
+            session["hint"] = hint
+            return "ok"
+
+    def info(self, session_id):
+        """{hint, channel} of a live session, or None."""
+        with self._lock:
+            self._purge(self._clock())
+            session = self._sessions.get(session_id) if session_id else None
+            if not session:
+                return None
+            return {"hint": session["hint"], "channel": session["channel"]}
+
+    def _live_session_for(self, code, received_at):
+        """(session, "ok") for a live code, else (None, "no_session" | "stale")."""
+        self._purge(self._clock())
+        session_id = self._by_code.get(code)
+        if not session_id:
+            return None, "no_session"
+        session = self._sessions[session_id]
+        # Gateways retry for days (SMS ~2 days, Meta 36 h), so an old queued
+        # message can arrive long after its session died. It must not verify a
+        # newer session that happened to draw the same code.
+        if received_at is not None and received_at < session["created_at"] - RECEIVED_AT_SKEW_SECONDS:
+            return None, "stale"
+        return session, "ok"
 
     def seen_delivery(self, delivery_id):
         if not delivery_id:

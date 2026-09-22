@@ -10,6 +10,7 @@ except ImportError:
 import hashlib
 import hmac
 import math
+import threading
 import time
 import sys
 import traceback
@@ -20,6 +21,7 @@ import firebase_admin
 from firebase_admin import credentials, auth, firestore
 from agora_token_builder import RtcTokenBuilder
 import sms_verify
+import whatsapp_verify
 
 app = Flask(__name__)
 
@@ -417,6 +419,16 @@ def generate_zego_token():
 # app's poll must land on the same process. Single waitress process only.
 sms_sessions = sms_verify.SessionStore()
 sms_gateway = sms_verify.GatewayHealth()
+whatsapp_shares = whatsapp_verify.PendingShares()
+
+WHATSAPP_SETTINGS = ("WHATSAPP_NUMBER", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_APP_SECRET",
+                     "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_ACCESS_TOKEN")
+
+
+def whatsapp_configured():
+    """WhatsApp is offered only when every setting is present; half a setup
+    would accept messages it can never answer."""
+    return all(env_value(name) for name in WHATSAPP_SETTINGS)
 
 
 def client_ip():
@@ -440,13 +452,18 @@ def sms_start():
 
     dev_bypass = os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true"
     gateway_number = env_value("SMS_GATEWAY_NUMBER")
-    if not dev_bypass:
-        if not (gateway_number and env_value("SMS_GATEWAY_SIGNING_KEY")):
+    sms_configured = bool(gateway_number and env_value("SMS_GATEWAY_SIGNING_KEY"))
+    health, _ = sms_gateway.status()
+    sms_up = sms_configured and health not in ("offline", "misconfigured")
+    if sms_configured and not sms_up:
+        log_sms("gateway_" + health, phone)
+    # WhatsApp lands on Meta's servers, not on the gateway phone, so it keeps
+    # sign-in working while that phone is down.
+    channels = (["whatsapp"] if whatsapp_configured() else []) + (["sms"] if sms_up else [])
+    if not dev_bypass and not channels:
+        if not sms_configured:
             return jsonify({"error": "SMS sign-in is not configured", "code": "sms_not_configured"}), 503
-        health, _ = sms_gateway.status()
-        if health in ("offline", "misconfigured"):
-            log_sms("gateway_" + health, phone)
-            return jsonify({"error": "SMS sign-in is temporarily unavailable", "code": "sms_gateway_offline"}), 503
+        return jsonify({"error": "SMS sign-in is temporarily unavailable", "code": "sms_gateway_offline"}), 503
 
     if rate_limited(f"sms-start:ip:{client_ip()}", 20, 3600):
         return jsonify({"error": "Too many attempts. Try again later.", "code": "rate_limited"}), 429
@@ -465,7 +482,10 @@ def sms_start():
         "sessionId": session["id"],
         "code": session["code"],
         "message": f"{sms_verify.CODE_PREFIX} {session['code']}",
-        "gatewayNumber": gateway_number,
+        # Empty when SMS is not on offer, so no build tells a user to text a dead phone.
+        "gatewayNumber": gateway_number if (sms_up or dev_bypass) else "",
+        "whatsappNumber": env_value("WHATSAPP_NUMBER") if "whatsapp" in channels else "",
+        "channels": channels,
         "expiresIn": sms_verify.SESSION_TTL_SECONDS,
     }), 200
 
@@ -598,10 +618,15 @@ def sms_status():
     if state == "expired":
         return jsonify({"status": "expired"}), 200
     if state == "pending":
-        return jsonify({"status": "pending", "expiresIn": value}), 200
+        pending = {"status": "pending", "expiresIn": value}
+        hint = (sms_sessions.info(session_id) or {}).get("hint")
+        if hint:
+            pending["hint"] = hint
+        return jsonify(pending), 200
 
     phone = value
     uid = f"fast2sms:{phone}"
+    channel = (sms_sessions.info(session_id) or {}).get("channel")
     # Look up and mint BEFORE consuming, so a Firestore or token failure leaves
     # the session verified and the app's next poll can simply retry.
     try:
@@ -626,7 +651,7 @@ def sms_status():
         firestore.client().collection('auth_events').document().set({
             "uid": uid,
             "phoneMasked": sms_verify.mask_phone(phone),
-            "method": "reverse_sms",
+            "method": "reverse_whatsapp" if channel == "whatsapp" else "reverse_sms",
             "isNewUser": is_new_user,
             "ip": client_ip(),
             "at": firestore.SERVER_TIMESTAMP,
@@ -643,7 +668,124 @@ def sms_status():
 def sms_health():
     """For an external uptime monitor: 503 when the gateway phone has gone quiet."""
     state, age = sms_gateway.status()
-    return jsonify({"gateway": state, "lastSeenSecondsAgo": age}), (200 if state in ("online", "starting") else 503)
+    # The status code tracks the SMS gateway alone: WhatsApp covering for a dead
+    # gateway phone must not hide that the phone needs attention.
+    return jsonify({
+        "gateway": state,
+        "lastSeenSecondsAgo": age,
+        "whatsapp": "configured" if whatsapp_configured() else "off",
+    }), (200 if state in ("online", "starting") else 503)
+
+
+# ------------------------------------------
+# Reverse-OTP over WhatsApp (Meta Cloud API webhook)
+# Design: docs/superpowers/specs/2026-09-22-reverse-otp-whatsapp-design.md
+# ------------------------------------------
+
+def log_wa(outcome, phone=None):
+    """Like log_sms: never a full number, a code, a user id or message text."""
+    masked = sms_verify.mask_phone(phone) if phone else "-"
+    print(f"[AUTH] wa_verify outcome={outcome} phone={masked}", flush=True)
+
+
+def post_whatsapp_message(message):
+    """One Graph API send. Failures are logged, never raised: a reply is a
+    courtesy, and the sign-in it confirms has already happened."""
+    url = (f"https://graph.facebook.com/{whatsapp_verify.GRAPH_API_VERSION}/"
+           f"{env_value('WHATSAPP_PHONE_NUMBER_ID')}/messages")
+    try:
+        response = requests.post(url, json=message, timeout=5, headers={
+            "Authorization": f"Bearer {env_value('WHATSAPP_ACCESS_TOKEN')}"})
+        if not response.ok:
+            print(f"[AUTH] WhatsApp reply rejected: HTTP {response.status_code} {response.text[:300]}", flush=True)
+            log_wa("reply_failed")
+    except requests.RequestException as e:
+        print(f"[AUTH] WhatsApp reply failed: {type(e).__name__}", flush=True)
+        log_wa("reply_failed")
+
+
+def send_whatsapp_message(message):
+    """Off the request thread: Meta retries a webhook that answers slowly, and a
+    slow Graph API must not turn one message into several."""
+    threading.Thread(target=post_whatsapp_message, args=(message,), daemon=True).start()
+
+
+def reply_on_whatsapp(inbound, outcome):
+    reply_to = inbound["reply_to"]
+    if not reply_to or outcome not in whatsapp_verify.REPLIES:
+        return
+    # A sender who keeps messaging gets at most five answers per 10 minutes.
+    sender_key = reply_to.get("to") or reply_to.get("recipient")
+    if rate_limited("wa-reply:" + hashlib.sha256(sender_key.encode("utf-8")).hexdigest(), 5, 600):
+        return
+    body = whatsapp_verify.REPLIES[outcome]
+    if outcome == "share_number":
+        send_whatsapp_message(whatsapp_verify.share_number_request(reply_to, body))
+    else:
+        send_whatsapp_message(whatsapp_verify.text_reply(reply_to, body))
+
+
+def accept_whatsapp(inbound):
+    """Match one inbound WhatsApp message to a session; returns the outcome."""
+    if inbound["kind"] == "contact_share":
+        held = whatsapp_shares.take(inbound["user_id"])
+        if not held:
+            return "unrequested_share"
+        return sms_sessions.mark_verified(held["code"], inbound["phone"], held["received_at"], channel="whatsapp")
+    if inbound["kind"] != "text":
+        return "ignored"
+    code = sms_verify.parse_code(inbound["text"])
+    if not code:
+        return "no_code"
+    if inbound["phone"]:
+        return sms_sessions.mark_verified(code, inbound["phone"], inbound["sent_at"], channel="whatsapp")
+    if not inbound["number_hidden"]:
+        return "unsupported_number"
+    if not inbound["user_id"]:
+        return "ignored"
+    # The sender hid their number behind a WhatsApp username: hold the code and
+    # ask them to share the number with Meta's button.
+    outcome = sms_sessions.note_hint(code, "share_number", inbound["sent_at"])
+    if outcome != "ok":
+        return outcome
+    whatsapp_shares.hold(inbound["user_id"], code, inbound["sent_at"])
+    return "share_number"
+
+
+@app.route('/api/v1/auth/whatsapp/webhook', methods=['GET', 'POST'])
+def whatsapp_webhook():
+    if request.method == 'GET':
+        # Meta's one-time subscription handshake.
+        expected = env_value("WHATSAPP_VERIFY_TOKEN")
+        given = request.args.get("hub.verify_token") or ""
+        if (request.args.get("hub.mode") == "subscribe" and expected
+                and hmac.compare_digest(given.encode("utf-8"), expected.encode("utf-8"))):
+            return request.args.get("hub.challenge") or "", 200, {"Content-Type": "text/plain"}
+        return jsonify({"error": "forbidden"}), 403
+
+    raw = request.get_data(cache=True)
+    if not whatsapp_verify.verify_meta_signature(
+        raw, request.headers.get("X-Hub-Signature-256"), env_value("WHATSAPP_APP_SECRET")
+    ):
+        log_wa("bad_signature")
+        return jsonify({"error": "invalid signature"}), 401
+
+    # From here on always 200: Meta retries anything else for 36 hours.
+    ok = (jsonify({"ok": True}), 200)
+    try:
+        payload = json.loads(raw or b"{}")
+    except ValueError:
+        log_wa("bad_payload")
+        return ok
+
+    for inbound in whatsapp_verify.parse_webhook(payload, env_value("WHATSAPP_PHONE_NUMBER_ID")):
+        if not inbound["id"] or sms_sessions.seen_delivery("wa:" + inbound["id"]):
+            log_wa("duplicate")
+            continue
+        outcome = accept_whatsapp(inbound)
+        log_wa(outcome, inbound["phone"])
+        reply_on_whatsapp(inbound, outcome)
+    return ok
 
 
 @app.route('/api/v1/auth/delete-account', methods=['POST', 'OPTIONS'])

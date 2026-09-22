@@ -318,3 +318,52 @@ def test_misconfigured_wins_over_online():
     health.seen()
     health.flag_misconfigured()
     assert health.status()[0] == "misconfigured"
+
+
+# --- channels and hints (WhatsApp design §3.2) --------------------------------------
+
+def test_info_records_which_channel_verified():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    assert store.info(s["id"]) == {"hint": None, "channel": None}
+    assert store.mark_verified(s["code"], PHONE, channel="whatsapp") == "verified"
+    assert store.info(s["id"])["channel"] == "whatsapp"
+
+
+def test_channel_defaults_to_sms():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    store.mark_verified(s["code"], PHONE)
+    assert store.info(s["id"])["channel"] == "sms"
+
+
+def test_sender_mismatch_leaves_a_hint_for_the_poller():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    store.mark_verified(s["code"], OTHER, channel="whatsapp")
+    assert store.info(s["id"]) == {"hint": "sender_mismatch", "channel": None}
+
+
+def test_note_hint_sets_a_hint_on_a_live_session():
+    store, _ = make_store()
+    s = store.start(PHONE)
+    assert store.note_hint(s["code"], "share_number") == "ok"
+    assert store.info(s["id"])["hint"] == "share_number"
+    assert store.poll(s["id"])[0] == "pending"
+
+
+def test_note_hint_for_an_unknown_code_is_no_session():
+    store, _ = make_store()
+    assert store.note_hint("123456", "share_number") == "no_session"
+
+
+def test_note_hint_applies_the_stale_rule():
+    store, clock = make_store()
+    s = store.start(PHONE)
+    assert store.note_hint(s["code"], "share_number", received_at=clock.t - 3600) == "stale"
+    assert store.info(s["id"])["hint"] is None
+
+
+def test_info_for_an_unknown_session_is_none():
+    store, _ = make_store()
+    assert store.info("nope") is None
