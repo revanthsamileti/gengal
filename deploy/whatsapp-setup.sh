@@ -60,28 +60,39 @@ if ! printf '%s' "$phone_number_id" | grep -Eq '^[0-9]{6,}$'; then
     exit 1
 fi
 
-ask_secret() {  # ask_secret NAME "prompt" -> prints the kept or typed value
-    local name="$1" prompt="$2" value typed state
+# ask_secret NAME "prompt" REGEX "what it should look like" -> prints the value.
+# Input is hidden, so say what arrived (its length, never the value) and ask
+# again rather than quitting when a paste did not land.
+ask_secret() {
+    local name="$1" prompt="$2" pattern="$3" shape="$4" value typed state try
     value="$(current "$name")"
-    state="$([ -n "$value" ] && echo "set, Enter keeps it" || echo "not set")"
-    read -rsp "$prompt [$state]: " typed
-    echo >&2
-    # Ctrl+V in some terminals wraps a paste in ^V and bracketed-paste markers
-    # (ESC[200~ ... ESC[201~). Hidden input would store them silently.
-    typed="$(printf '%s' "$typed" | tr -d '[:cntrl:][:space:]' | sed -e 's/\[20[01]~//g')"
-    printf '%s' "${typed:-$value}"
+    for try in 1 2 3; do
+        state="$([ -n "$value" ] && echo "set, Enter keeps it" || echo "not set")"
+        read -rsp "$prompt [$state]: " typed
+        echo >&2
+        # Ctrl+V in some terminals wraps a paste in ^V and bracketed-paste
+        # markers (ESC[200~ ... ESC[201~); strip them with any whitespace.
+        typed="$(printf '%s' "$typed" | tr -d '[:cntrl:][:space:]' | sed -e 's/\[20[01]~//g')"
+        typed="${typed:-$value}"
+        if printf '%s' "$typed" | grep -Eq "$pattern"; then
+            echo "    received ${#typed} characters, looks right." >&2
+            printf '%s' "$typed"
+            return 0
+        fi
+        if [ -z "$typed" ]; then
+            echo "    Nothing arrived. Paste with right-click or Ctrl+Shift+V (nothing shows), then press Enter." >&2
+        else
+            echo "    Received ${#typed} characters, but it should be $shape." >&2
+        fi
+    done
+    echo "Nothing was saved. Run the script again when you have the value." >&2
+    return 1
 }
 
-app_secret="$(ask_secret WHATSAPP_APP_SECRET "App secret (App settings > Basic), paste with right-click, hidden")"
-if ! printf '%s' "$app_secret" | grep -Eq '^[0-9a-f]{32}$'; then
-    echo "That is not an app secret: it should be 32 characters of 0-9 and a-f." >&2
-    exit 1
-fi
-access_token="$(ask_secret WHATSAPP_ACCESS_TOKEN "System user access token, paste with right-click, hidden")"
-if ! printf '%s' "$access_token" | grep -Eq '^EAA[A-Za-z0-9]{50,}$'; then
-    echo "That is not an access token: it should start with EAA and be one long line of letters and digits." >&2
-    exit 1
-fi
+app_secret="$(ask_secret WHATSAPP_APP_SECRET "App secret (App settings > Basic), hidden" \
+    '^[0-9a-f]{32}$' "32 characters of 0-9 and a-f")" || exit 1
+access_token="$(ask_secret WHATSAPP_ACCESS_TOKEN "System user access token, hidden" \
+    '^EAA[A-Za-z0-9]{50,}$' "one long line starting with EAA")" || exit 1
 
 verify_token="$(current WHATSAPP_VERIFY_TOKEN)"
 if $ROTATE || [ -z "$verify_token" ]; then
