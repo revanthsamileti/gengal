@@ -32,8 +32,8 @@ const toMs = (value: any): number => {
 const STATUS_KEYS = ['ALL', 'ACTIVE', 'INACTIVE'];
 const STATUS_LABELS: Record<string, string> = {
   ALL: 'All Status',
-  ACTIVE: 'Active',
-  INACTIVE: 'Inactive',
+  ACTIVE: 'Online',
+  INACTIVE: 'Offline',
 };
 
 const labelFor = (kind: 'language' | 'status' | 'state', value: string) => {
@@ -100,22 +100,27 @@ function UserCard({
         {/* Info */}
         <View style={styles.cardInfo}>
           <View style={styles.nameRow}>
-            <Text style={styles.cardName}>{profile.name}, {profile.age}</Text>
-            <View style={[styles.tierPill, { backgroundColor: tierColor + '20', borderColor: tierColor + '55' }]}>
-              <MaterialIcons name="diamond" size={9} color={tierColor} />
-              <Text style={[styles.tierText, { color: tierColor }]}>{tier}</Text>
-            </View>
+            {/* Shrinks and truncates: unbounded, a long name pushed the badge
+                on top of the call button. */}
+            <Text style={styles.cardName} numberOfLines={1}>{profile.name}, {profile.age}</Text>
+            {/* Only VIP is marked. Every other profile carried a STANDARD
+                badge, which told nobody anything and cost the name its room. */}
+            {tier === 'VIP' ? (
+              <View style={[styles.tierPill, { backgroundColor: tierColor + '20', borderColor: tierColor + '55' }]}>
+                <MaterialIcons name="diamond" size={9} color={tierColor} />
+                <Text style={[styles.tierText, { color: tierColor }]}>{tier}</Text>
+              </View>
+            ) : null}
           </View>
           <View style={styles.metaRow}>
             <MaterialIcons name="language" size={12} color="#9A7A05" />
-            <Text style={styles.metaText}>{profile.lang}</Text>
+            <Text style={[styles.metaText, styles.metaShrink]} numberOfLines={1}>{profile.lang}</Text>
             <View style={styles.dot} />
-            <MaterialIcons name="circle" size={8} color={isActive ? '#10B981' : '#B0A49A'} />
-            <Text
-              numberOfLines={1}
-              style={[styles.metaText, { color: isActive ? '#10B981' : '#8A7C70', flexShrink: 1 }]}
-            >
-              {isActive ? 'Available now' : 'Inactive'}
+            {/* One short word, coloured, next to the dot on the avatar. It was
+                an extra status icon plus "Available now" / "Inactive", which
+                did not fit beside the call buttons and read "Inacti...". */}
+            <Text style={[styles.metaText, { color: isActive ? '#10B981' : '#8A7C70' }]}>
+              {isActive ? 'Online' : 'Offline'}
             </Text>
           </View>
         </View>
@@ -281,7 +286,7 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
             <View>
               <Text style={styles.pageTitle}>More Connects</Text>
               <Text style={styles.pageCount}>
-                {displayProfiles.length} {displayProfiles.length === 1 ? 'profile' : 'profiles'} · {activeCount} active
+                {displayProfiles.length} {displayProfiles.length === 1 ? 'profile' : 'profiles'} · {activeCount} online
               </Text>
             </View>
           </View>
@@ -388,11 +393,11 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
           <View style={styles.legend}>
             <View style={styles.legendItem}>
               <View style={[styles.legendDot, { backgroundColor: '#10B981' }]} />
-              <Text style={styles.legendText}>Active profile</Text>
+              <Text style={styles.legendText}>Online</Text>
             </View>
             <View style={styles.legendItem}>
               <View style={[styles.legendDot, { backgroundColor: '#B0A49A' }]} />
-              <Text style={styles.legendText}>Inactive profile</Text>
+              <Text style={styles.legendText}>Offline</Text>
             </View>
           </View>
 
@@ -588,14 +593,16 @@ const styles = StyleSheet.create({
   // its intrinsic width and runs underneath the price labels.
   cardInfo: { flex: 1, minWidth: 0 },
   nameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 5 },
-  cardName: { fontSize: 15, fontWeight: '900', color: '#4B0054' },
+  cardName: { fontSize: 15, fontWeight: '900', color: '#4B0054', flexShrink: 1 },
   tierPill: {
+    flexShrink: 0,
     flexDirection: 'row', alignItems: 'center', gap: 3,
     paddingHorizontal: 6, paddingVertical: 2, borderRadius: 7, borderWidth: 1,
   },
   tierText: { fontSize: 8, fontWeight: '900', textTransform: 'uppercase' },
   metaRow: { flexDirection: 'row', alignItems: 'center', gap: 5, flexShrink: 1 },
   metaText: { fontSize: 11, color: '#8A7C70', fontWeight: '700' },
+  metaShrink: { flexShrink: 1 },
   dot: { width: 3, height: 3, borderRadius: 2, backgroundColor: '#CCC' },
 
   actions: { flexDirection: 'row', gap: 8, alignItems: 'flex-start' },
