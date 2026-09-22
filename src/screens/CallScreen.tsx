@@ -6,7 +6,7 @@ import { Platform, Image,
   TouchableOpacity,
   View, } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import GengalAvatar from '../components/GengalAvatar';
 import { RtcSurfaceView } from '../hooks/AgoraViews';
@@ -613,7 +613,11 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
         if (isMounted) {
           setJoinPhase('joining');
-          await connectSeat(roomId, connectionToken, extraParam);
+          // A video call belongs on the loudspeaker: the phone is held away
+          // from the ear to see the other person. This argument was never
+          // passed, so every video call started on the earpiece and sounded
+          // silent until the user found the speaker button.
+          await connectSeat(roomId, connectionToken, extraParam, undefined, mode === 'video');
           if (isMounted) setIsConnecting(false);
         }
       };
@@ -1307,7 +1311,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                 disabled={isGifting}
               >
                 <View style={[styles.voiceControlButton, { borderColor: '#E8CA58', borderWidth: 2 }]}>
-                  <MaterialIcons name="card-giftcard" size={21} color="#E8CA58" />
+                  <MaterialCommunityIcons name="gift" size={21} color="#E8CA58" />
                 </View>
                 <Text style={styles.voiceControlLabel}>{isGifting ? "Sending..." : "100G Rose"}</Text>
               </TouchableOpacity>

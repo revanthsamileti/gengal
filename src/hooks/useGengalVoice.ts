@@ -320,6 +320,10 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
     const newSpeakerState = !speakerOn;
     setSpeakerOn(newSpeakerState);
     if (provider === 'agora' && agoraEngineRef.current) {
+      // Both, not just setEnableSpeakerphone: the default route is what Agora
+      // falls back to whenever the route changes during a call (a headset
+      // unplugged, video starting), which silently undid the user's choice.
+      agoraEngineRef.current.setDefaultAudioRouteToSpeakerphone(newSpeakerState);
       agoraEngineRef.current.setEnableSpeakerphone(newSpeakerState);
     }
     console.log(`[Audio Layer] Speaker state: ${newSpeakerState}`);

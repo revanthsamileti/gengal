@@ -1,6 +1,6 @@
 import React from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
-import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from '../GengalAvatar';
 import { numeric, RoomTone, roomPalette, roomRadius, ROOM_CHROME } from '../../theme/roomTheme';
 import { tap38 } from '../../theme/touch';
@@ -122,6 +122,8 @@ export type RailItem = {
   badge?: number;
   active?: boolean;
   ionicon?: boolean;
+  /** Icon comes from MaterialCommunityIcons (e.g. the wrapped-present gift). */
+  community?: boolean;
   disabled?: boolean;
 };
 
@@ -130,7 +132,7 @@ export function RoomRail({ tone, items }: { tone: RoomTone; items: RailItem[] })
   return (
     <View style={[s.rail, { height: ROOM_CHROME.rail }]}>
       {items.map((item) => {
-        const Icon: any = item.ionicon ? Ionicons : MaterialIcons;
+        const Icon: any = item.ionicon ? Ionicons : item.community ? MaterialCommunityIcons : MaterialIcons;
         return (
           <Pressable
             key={item.key}

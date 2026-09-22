@@ -629,7 +629,8 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
               },
               {
                 key: 'gift',
-                icon: 'card-giftcard',
+                icon: 'gift',
+                community: true,
                 label: 'Gift',
                 onPress: () => {
                   if (!giftRecipient) setGiftRecipient({ uid: room.hostUid, name: room.hostNickname });

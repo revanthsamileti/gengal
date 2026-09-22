@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { tap42 } from '../theme/touch';
-import { MaterialIcons } from '@expo/vector-icons';
+import { MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from '../components/GengalAvatar';
 import { Alert } from '../components/CustomAlert';
 import ScreenShell from '../components/ScreenShell';
@@ -594,7 +594,7 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
                     accessibilityLabel="Send a gift to the actor"
                     style={({ pressed }) => [styles.headerBtn, pressed && { opacity: 0.7 }]}
                   >
-                    <MaterialIcons name="card-giftcard" size={18} color={C.accent} />
+                    <MaterialCommunityIcons name="gift" size={18} color={C.accent} />
                   </Pressable>
                 )}
               </View>

@@ -43,7 +43,10 @@ export function useRoomVoice(roomId: string | undefined, role: VoiceRole, enable
           roomId,
           creds.token,
           creds.uid != null ? String(creds.uid) : undefined,
-          roleRef.current
+          roleRef.current,
+          // Rooms are group audio, listened to like a speakerphone call; the
+          // earpiece default left every room sounding empty.
+          true
         );
         if (!active) return;
         setConnected(true);

@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Ionicons, MaterialIcons } from '@expo/vector-icons';
+import { Ionicons, MaterialCommunityIcons, MaterialIcons } from '@expo/vector-icons';
 
 import GengalAvatar from '../components/GengalAvatar';
 import { LudoPawn } from '../components/ludo/LudoPawn';
@@ -502,7 +502,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             onPress={() => setSheet('chat')}
           />
           <RailButton
-            icon="card-giftcard"
+            icon="gift"
+            community
             label="Gift"
             onPress={() => {
               setGiftTarget(room.players.find((p) => p.uid !== myUid)?.uid ?? null);
@@ -710,12 +711,12 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
 }
 
 function RailButton({
-  icon, label, onPress, badge, active, ionicon,
+  icon, label, onPress, badge, active, ionicon, community,
 }: {
   icon: string; label: string; onPress: () => void;
-  badge?: number; active?: boolean; ionicon?: boolean;
+  badge?: number; active?: boolean; ionicon?: boolean; community?: boolean;
 }) {
-  const Icon: any = ionicon ? Ionicons : MaterialIcons;
+  const Icon: any = ionicon ? Ionicons : community ? MaterialCommunityIcons : MaterialIcons;
   return (
     <Pressable
       onPress={onPress}
