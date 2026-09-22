@@ -66,13 +66,20 @@ ask_secret() {  # ask_secret NAME "prompt" -> prints the kept or typed value
     state="$([ -n "$value" ] && echo "set, Enter keeps it" || echo "not set")"
     read -rsp "$prompt [$state]: " typed
     echo >&2
+    # Ctrl+V in some terminals wraps a paste in ^V and bracketed-paste markers
+    # (ESC[200~ ... ESC[201~). Hidden input would store them silently.
+    typed="$(printf '%s' "$typed" | tr -d '[:cntrl:][:space:]' | sed -e 's/\[20[01]~//g')"
     printf '%s' "${typed:-$value}"
 }
 
-app_secret="$(ask_secret WHATSAPP_APP_SECRET "App secret (App settings > Basic), typed hidden")"
-access_token="$(ask_secret WHATSAPP_ACCESS_TOKEN "System user access token (never expires), typed hidden")"
-if [ -z "$app_secret" ] || [ -z "$access_token" ]; then
-    echo "Both the app secret and the access token are required." >&2
+app_secret="$(ask_secret WHATSAPP_APP_SECRET "App secret (App settings > Basic), paste with right-click, hidden")"
+if ! printf '%s' "$app_secret" | grep -Eq '^[0-9a-f]{32}$'; then
+    echo "That is not an app secret: it should be 32 characters of 0-9 and a-f." >&2
+    exit 1
+fi
+access_token="$(ask_secret WHATSAPP_ACCESS_TOKEN "System user access token, paste with right-click, hidden")"
+if ! printf '%s' "$access_token" | grep -Eq '^EAA[A-Za-z0-9]{50,}$'; then
+    echo "That is not an access token: it should start with EAA and be one long line of letters and digits." >&2
     exit 1
 fi
 
