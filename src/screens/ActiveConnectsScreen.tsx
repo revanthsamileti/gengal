@@ -79,21 +79,25 @@ function UserCard({
         onPress={() => navigate('Profile', { profileName: profile.name, matchData: profile })}
       >
         {/* Avatar */}
-        <View style={[styles.avatarRing, { borderColor: tierColor }]}>
-          {profile.avatarData ? (
-            // App avatar builder — preferred; always present for users who
-            // completed AvatarScreen during onboarding.
-            <GengalAvatar data={profile.avatarData} size={52} />
-          ) : profile.uri ? (
-            // Real avatarUrl or the sample profile's Unsplash image.
-            <Image source={{ uri: profile.uri }} style={styles.avatarImg} />
-          ) : (
-            // No avatar and no URL. source={{ uri: '' }} warns on every render
-            // and draws a blank box — show a person icon instead.
-            <View style={[styles.avatarImg, styles.avatarFallback]}>
-              <MaterialIcons name="person" size={28} color="#C9BDB2" />
-            </View>
-          )}
+        {/* The dot sits on this wrapper, outside the ring's circular clip,
+            which used to cut it in half. */}
+        <View style={styles.avatarWrap}>
+          <View style={[styles.avatarRing, { borderColor: tierColor }]}>
+            {profile.avatarData ? (
+              // App avatar builder — preferred; always present for users who
+              // completed AvatarScreen during onboarding.
+              <GengalAvatar data={profile.avatarData} size={52} />
+            ) : profile.uri ? (
+              // Real avatarUrl or the sample profile's Unsplash image.
+              <Image source={{ uri: profile.uri }} style={styles.avatarImg} />
+            ) : (
+              // No avatar and no URL. source={{ uri: '' }} warns on every render
+              // and draws a blank box — show a person icon instead.
+              <View style={[styles.avatarImg, styles.avatarFallback]}>
+                <MaterialIcons name="person" size={28} color="#C9BDB2" />
+              </View>
+            )}
+          </View>
           <View style={[styles.onlineDot, !isActive && styles.inactiveDot]} />
         </View>
 
@@ -569,9 +573,13 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: '#EEE4D8',
     boxShadow: Platform.OS === 'web' ? '0 2px 8px rgba(68,44,21,0.06)' : undefined,
   },
+  avatarWrap: { width: 60, height: 60, flexShrink: 0 },
   avatarRing: {
     width: 60, height: 60, borderRadius: 30,
-    borderWidth: 2, overflow: 'hidden', position: 'relative', flexShrink: 0,
+    borderWidth: 2, overflow: 'hidden',
+    // Centred: the 52px avatar sat in the top-left of the 56px inside the
+    // border, leaving all the slack on the right and bottom.
+    alignItems: 'center', justifyContent: 'center',
   },
   avatarImg: { width: '100%', height: '100%', borderRadius: 28 },
   // Shown when both avatarData and uri are absent (source={{ uri: '' }} warns).
@@ -581,7 +589,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#F5ECE1',
   },
   onlineDot: {
-    position: 'absolute', bottom: 2, right: 2,
+    position: 'absolute', bottom: 1, right: 1,
     width: 12, height: 12, borderRadius: 6,
     backgroundColor: '#10B981', borderWidth: 2, borderColor: '#FFFDF8',
   },
