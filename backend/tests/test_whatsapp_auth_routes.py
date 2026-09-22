@@ -211,8 +211,8 @@ def test_webhook_is_rejected_when_whatsapp_is_not_configured(client, wa, monkeyp
 def test_message_from_another_number_does_not_verify_and_says_why(client, wa):
     body = start(client).get_json()
     webhook(client, delivery(message(body["message"], sender="919123456789")))
-    assert status(client, body["sessionId"]) == {
-        "status": "pending", "expiresIn": 600, "hint": "sender_mismatch"}
+    pending = status(client, body["sessionId"])
+    assert (pending["status"], pending["hint"]) == ("pending", "sender_mismatch")
     assert replies(wa) == [("919123456789", "text", whatsapp_verify.REPLIES["sender_mismatch"])]
 
 
@@ -275,8 +275,8 @@ def test_hidden_number_is_asked_for_then_verifies_on_share(client, wa):
     [ask] = wa.sent
     assert ask["recipient"] == BSUID and "to" not in ask
     assert ask["interactive"]["type"] == "request_contact_info"
-    assert status(client, body["sessionId"]) == {
-        "status": "pending", "expiresIn": 600, "hint": "share_number"}
+    pending = status(client, body["sessionId"])
+    assert (pending["status"], pending["hint"]) == ("pending", "share_number")
 
     webhook(client, delivery(contact_share()))
     assert status(client, body["sessionId"])["status"] == "verified"

@@ -39,6 +39,9 @@ def test_env_template_lists_the_gateway_settings_and_nothing_dead():
     env = (ROOT / "deploy" / "gengal.env.example").read_text(encoding="utf-8")
     assert "SMS_GATEWAY_NUMBER=" in env
     assert "SMS_GATEWAY_SIGNING_KEY=" in env
+    for name in ("WHATSAPP_NUMBER", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_APP_SECRET",
+                 "WHATSAPP_ACCESS_TOKEN", "WHATSAPP_VERIFY_TOKEN"):
+        assert name + "=" in env
     for dead in ("ALLOW_LEGACY_PLAINTEXT_LOGIN", "TWILIO_", "FAST2SMS"):
         assert dead not in env
 

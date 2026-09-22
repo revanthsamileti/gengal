@@ -253,6 +253,46 @@ is an unsigned empty POST, so the heartbeat authenticates with a URL token inste
    template, the printed HMAC secret) and set the heartbeat URL with a 1-minute interval.
 4. Check `/api/v1/auth/sms/health` shows `"gateway":"online"`.
 
+### WhatsApp sign-in (Meta WhatsApp Cloud API)
+
+Users can send the same `GENGAL <code>` on WhatsApp instead of SMS. It goes to Meta, which
+posts it to `/api/v1/auth/whatsapp/webhook`, so WhatsApp sign-in keeps working while the
+gateway phone is offline. Messages users send to a business, and our replies within 24 h,
+are free. Design: `docs/superpowers/specs/2026-09-22-reverse-otp-whatsapp-design.md`.
+
+1. **Meta app.** At developers.facebook.com: *My Apps → Create app → Business*, then add
+   the **WhatsApp** product. This creates a WhatsApp Business Account.
+2. **Number.** *WhatsApp → API Setup → Add phone number.* A number registered here
+   **cannot also be on the WhatsApp app**; delete the WhatsApp account on that SIM first,
+   or use another SIM. It can be the gateway SIM, so users see one number for both. Verify
+   it by SMS or call, then register it for the Cloud API with a 6-digit PIN you choose:
+   ```bash
+   curl -X POST "https://graph.facebook.com/v26.0/<PHONE_NUMBER_ID>/register" \
+     -H "Authorization: Bearer <TOKEN>" -H "Content-Type: application/json" \
+     -d '{"messaging_product":"whatsapp","pin":"<6 digits>"}'
+   ```
+3. **Permanent token.** business.facebook.com → *Settings → Users → System users → Add*
+   (Admin). *Assign assets*: the app and the WhatsApp account, full control. *Generate
+   token* for the app, expiry **Never**, permissions `whatsapp_business_messaging` and
+   `whatsapp_business_management`.
+4. **Server.** In your own SSH session: `sudo bash /opt/gengal/deploy/whatsapp-setup.sh`.
+   It asks for the number, the phone number ID (API Setup), the app secret (*App settings →
+   Basic*) and the token, typing secrets hidden. It restarts the backend, checks the token
+   with Meta, and prints the webhook URL and verify token.
+5. **Webhook.** *WhatsApp → Configuration → Webhook → Edit*: paste the printed callback URL
+   and verify token (Meta calls the server to check them), then **Subscribe** to the
+   `messages` field.
+6. **Go live.** *App settings → Basic*: Privacy policy URL
+   `https://<host>/privacy`, Terms URL `https://<host>/terms`; then switch the app from
+   Development to **Live**. A Development app only receives messages from its own testers.
+7. **Check.** `curl -s https://<host>/api/v1/auth/sms/health` shows `"whatsapp":"configured"`.
+   Sign in once with WhatsApp; `journalctl -u gengal-backend | grep wa_verify` shows
+   `outcome=verified`.
+
+Keep **Contact Book** on (*Business settings → WhatsApp*, on by default). Users who hide
+their number behind a WhatsApp username are asked to tap *Share phone number*; Contact
+Book then keeps sending their number, so they are only asked once.
+
 **Redeploying code** (never re-run `setup-oracle.sh`, see Trap 7):
 
 ```bash
