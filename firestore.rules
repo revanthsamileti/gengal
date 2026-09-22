@@ -71,6 +71,7 @@ service cloud.firestore {
         'isOnline',
         'isActiveMode',
         'isSessionActive',
+        'pushReachable',
         'following',
         'createdAt',
         'lastActive'
@@ -94,13 +95,14 @@ service cloud.firestore {
         'isOnline',
         'isActiveMode',
         'isSessionActive',
+        'pushReachable',
         'following',
         'lastActive'
       ];
     }
 
     function privilegedFields() {
-      return ['password', 'passwordHash', 'phoneNumber', 'expoPushToken'];
+      return ['password', 'passwordHash', 'phoneNumber', 'expoPushToken', 'fcmToken'];
     }
 
     // On create, the document must not contain any privileged field at all.

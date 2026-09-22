@@ -18,8 +18,9 @@ import requests
 from datetime import datetime, timedelta, timezone
 from google.api_core.exceptions import Aborted as FirestoreAborted
 import firebase_admin
-from firebase_admin import credentials, auth, firestore
+from firebase_admin import credentials, auth, firestore, messaging
 from agora_token_builder import RtcTokenBuilder
+import push
 import sms_verify
 import whatsapp_verify
 
@@ -1556,8 +1557,11 @@ def get_online_users_admin():
             u_data = serialize_doc(raw_dict)
             if not u_data.get('nickname') and not u_data.get('username'):
                 continue
+            # Out of the app for a while: still listed if a call can reach
+            # them as a notification (see pushReachable in userService.ts).
             last_act = u_data.get('lastActive', 0)
-            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms):
+            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms) \
+                    and u_data.get('pushReachable') is not True:
                 continue
             if vip_only and not u_data.get('avatarUrl'):
                 continue
@@ -1595,8 +1599,11 @@ def get_recent_users_admin():
             u_data = serialize_doc(raw_dict)
             if not u_data.get('nickname') and not u_data.get('username'):
                 continue
+            # Out of the app for a while: still listed if a call can reach
+            # them as a notification (see pushReachable in userService.ts).
             last_act = u_data.get('lastActive', 0)
-            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms):
+            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms) \
+                    and u_data.get('pushReachable') is not True:
                 continue
             u_data['uid'] = d.id
             u_data['tier'] = 'VIP' if u_data.get('avatarUrl') else 'Advance'
@@ -1610,11 +1617,103 @@ def get_recent_users_admin():
 # CALL SIGNALLING
 # ==========================================
 
+def send_fcm(token, data, ttl_seconds):
+    """Sends one FCM data message (see push.py). Raises push.TokenGone when
+    the phone no longer answers to the token."""
+    message = messaging.Message(
+        token=token,
+        data=data,
+        android=messaging.AndroidConfig(priority='high', ttl=ttl_seconds),
+    )
+    try:
+        messaging.send(message)
+    except (messaging.UnregisteredError, messaging.SenderIdMismatchError) as e:
+        raise push.TokenGone(token) from e
+
+
+def send_expo(token, data, ttl_seconds):
+    """Expo's push service, for an install that only ever stored an Expo token.
+
+    Expo answers 200 even when it could not deliver; the verdict is in the
+    ticket, so read that rather than the status code.
+    """
+    response = requests.post(
+        'https://exp.host/--/api/v2/push/send',
+        json={
+            "to": token,
+            "title": data["title"],
+            "body": data["message"],
+            "data": json.loads(data["body"]),
+            "priority": "high",
+            "channelId": data["channelId"],
+            "ttl": ttl_seconds,
+        },
+        timeout=10,
+    )
+    ticket = (response.json() or {}).get("data") or {}
+    if (ticket.get("details") or {}).get("error") == "DeviceNotRegistered":
+        raise push.TokenGone(token)
+    return response.status_code == 200 and ticket.get("status") == "ok"
+
+
+def forget_push_token(uid, field, token):
+    """Drops a token the phone no longer answers to.
+
+    Compared before deleting, so a token the app re-registered in the meantime
+    is not the one thrown away. Without an FCM token the person cannot be
+    reached outside the app, so they stop being listed as online while away.
+    """
+    db_client = firestore.client()
+    try:
+        private_ref = db_client.collection('user_private').document(uid)
+        snap = private_ref.get()
+        if not snap.exists or (snap.to_dict() or {}).get(field) != token:
+            return
+        private_ref.update({field: firestore.DELETE_FIELD})
+        if field == 'fcmToken':
+            db_client.collection('users').document(uid).update({'pushReachable': False})
+    except Exception as e:
+        print(f"[PUSH] Could not forget a dead {field}: {e}")
+
+
+def deliver_push(receiver_uid, private_data, data, ttl_seconds):
+    """Pushes to the receiver's phone. True when a transport accepted it."""
+    fcm_token = private_data.get('fcmToken')
+    if fcm_token:
+        try:
+            send_fcm(fcm_token, data, ttl_seconds)
+            return True
+        except push.TokenGone:
+            forget_push_token(receiver_uid, 'fcmToken', fcm_token)
+        except Exception as e:
+            print(f"[PUSH] FCM send failed: {e}")
+    expo_token = private_data.get('expoPushToken')
+    if expo_token:
+        try:
+            return bool(send_expo(expo_token, data, ttl_seconds))
+        except push.TokenGone:
+            forget_push_token(receiver_uid, 'expoPushToken', expo_token)
+        except Exception as e:
+            print(f"[PUSH] Expo send failed: {e}")
+    return False
+
+
+def blocked_by(private_data, uid):
+    blocked_uids = private_data.get('blockedUids')
+    return isinstance(blocked_uids, list) and uid in blocked_uids
+
+
+def display_name(db_client, uid):
+    snap = db_client.collection('users').document(uid).get()
+    data = (snap.to_dict() or {}) if snap.exists else {}
+    return data.get('nickname') or data.get('username') or 'Someone'
+
+
 @app.route('/api/v1/calls/notify', methods=['POST', 'OPTIONS'])
 def notify_incoming_call():
     """Delivers the incoming-call push.
 
-    Runs server-side because the receiver's Expo token is private: the caller
+    Runs server-side because the receiver's push token is private: the caller
     must not be able to read other users' push tokens (which also made push
     spam trivial).
     """
@@ -1644,49 +1743,113 @@ def notify_incoming_call():
         if not offer_snap.exists or (offer_snap.to_dict() or {}).get('callerUid') != uid:
             return jsonify({"error": "No active call offer for this receiver"}), 403
 
+        # The receiver's "Show me as online" switch is what decides whether
+        # calls reach them outside the app.
+        receiver_snap = db_client.collection('users').document(receiver_uid).get()
+        receiver = (receiver_snap.to_dict() or {}) if receiver_snap.exists else {}
+        if receiver.get('isActiveMode') is False:
+            return jsonify({"ok": True, "delivered": False}), 200
+
         private_snap = db_client.collection('user_private').document(receiver_uid).get()
         private_data = (private_snap.to_dict() or {}) if private_snap.exists else {}
         # A blocked caller gets the same answer as an unreachable receiver, so
         # the block is not revealed; the receiver's app declines the offer.
-        blocked_uids = private_data.get('blockedUids')
-        if isinstance(blocked_uids, list) and uid in blocked_uids:
-            return jsonify({"ok": True, "delivered": False}), 200
-        token = private_data.get('expoPushToken')
-        if not token:
+        if blocked_by(private_data, uid):
             return jsonify({"ok": True, "delivered": False}), 200
 
-        caller_snap = db_client.collection('users').document(uid).get()
-        caller_data = caller_snap.to_dict() or {}
-        caller_name = caller_data.get('nickname') or caller_data.get('username') or 'Someone'
-        offer = offer_snap.to_dict() or {}
-
-        response = requests.post(
-            'https://exp.host/--/api/v2/push/send',
-            json={
-                "to": token,
-                "title": f"Incoming {'Video' if mode == 'video' else 'Voice'} Call",
-                "body": f"{caller_name} is calling you...",
-                "sound": "default",
-                "priority": "high",
-                # Must match CALL_CHANNEL_ID in src/services/notificationService.ts.
-                # The old 'calls' channel was created with a custom sound name
-                # that did not exist in the app, so Android gave it no sound and
-                # every call notification arrived silently; channels are
-                # immutable, hence the new id rather than a fix in place.
-                "channelId": "calls_v2",
-                "data": {
-                    "roomId": offer.get('roomId'),
-                    "mode": mode,
-                    "callerUid": uid,
-                    "callerName": caller_name,
-                    "isIncomingPending": True,
-                },
+        caller_name = display_name(db_client, uid)
+        room_id = (offer_snap.to_dict() or {}).get('roomId')
+        payload = push.expo_data(
+            f"Incoming {'Video' if mode == 'video' else 'Voice'} Call",
+            f"{caller_name} is calling you...",
+            {
+                "type": "call",
+                "roomId": room_id,
+                "mode": mode,
+                "callerUid": uid,
+                "callerName": caller_name,
+                "isIncomingPending": True,
             },
-            timeout=10,
+            push.CALL_CHANNEL,
+            tag=f"call_{room_id}",
         )
-        return jsonify({"ok": True, "delivered": response.status_code == 200}), 200
+        delivered = deliver_push(receiver_uid, private_data, payload, push.CALL_TTL_SECONDS)
+        return jsonify({"ok": True, "delivered": delivered}), 200
     except Exception as e:
         print(f"[CALLS] Notify error: {e}")
+        return jsonify({"error": "Failed to deliver notification"}), 500
+
+
+# A message is only announced while it is fresh. The app asks right after
+# sending, so this only turns away a replay of an old message.
+MESSAGE_NOTIFY_WINDOW_SECONDS = 5 * 60
+
+
+@app.route('/api/v1/chats/notify', methods=['POST', 'OPTIONS'])
+def notify_new_message():
+    """Tells the other person in a chat about a message just sent.
+
+    The sender's app calls this after the message is written. Everything in
+    the notification is read back from Firestore rather than taken from the
+    request, so a client can only announce a message it really sent, into a
+    conversation it is really part of, once.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    chat_id = str(data.get('chatId') or '')
+    message_id = str(data.get('messageId') or '')
+    if not message_id or '/' in message_id:
+        return jsonify({"error": "Missing messageId"}), 400
+    peer_uid = push.chat_peer(chat_id, uid)
+    if not peer_uid:
+        return jsonify({"error": "Not a participant in this chat"}), 403
+
+    if rate_limited(f"chat-notify:{uid}", 60, 300):
+        return jsonify({"error": "Too many message notifications"}), 429
+
+    try:
+        db_client = firestore.client()
+        message_snap = (
+            db_client.collection('chats').document(chat_id)
+            .collection('messages').document(message_id).get()
+        )
+        if not message_snap.exists:
+            return jsonify({"error": "No such message"}), 404
+        message = message_snap.to_dict() or {}
+        if message.get('senderId') != uid:
+            return jsonify({"error": "Not your message"}), 403
+
+        sent_at = message.get('timestamp')
+        if not hasattr(sent_at, 'timestamp') or time.time() - sent_at.timestamp() > MESSAGE_NOTIFY_WINDOW_SECONDS:
+            return jsonify({"ok": True, "delivered": False}), 200
+        # Once per message, however many times the app asks.
+        if rate_limited(f"chat-notify-msg:{chat_id}/{message_id}", 1, 2 * MESSAGE_NOTIFY_WINDOW_SECONDS):
+            return jsonify({"ok": True, "delivered": False}), 200
+
+        private_snap = db_client.collection('user_private').document(peer_uid).get()
+        private_data = (private_snap.to_dict() or {}) if private_snap.exists else {}
+        if blocked_by(private_data, uid):
+            return jsonify({"ok": True, "delivered": False}), 200
+
+        sender_name = display_name(db_client, uid)
+        payload = push.expo_data(
+            sender_name,
+            push.preview(message.get('text')),
+            {"type": "message", "chatId": chat_id, "senderUid": uid, "senderName": sender_name},
+            push.MESSAGE_CHANNEL,
+            # One tray entry per conversation, showing its latest message.
+            tag=f"chat_{chat_id}",
+        )
+        delivered = deliver_push(peer_uid, private_data, payload, push.MESSAGE_TTL_SECONDS)
+        return jsonify({"ok": True, "delivered": delivered}), 200
+    except Exception as e:
+        print(f"[CHAT] Notify error: {e}")
         return jsonify({"error": "Failed to deliver notification"}), 500
 
 # ==========================================

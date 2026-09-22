@@ -75,6 +75,46 @@ class FakeDocRef:
     def delete(self):
         self._store.pop(self._path, None)
 
+    def collection(self, name):
+        """A subcollection, e.g. chats/{id}/messages."""
+        return FakeCollection(self._store, "%s/%s" % (self._path, name), self._reads)
+
+
+class FakeQueryDoc(FakeSnapshot):
+    def __init__(self, doc_id, data):
+        super().__init__(data)
+        self.id = doc_id
+
+
+class FakeQuery:
+    """Equality filters and a limit, which is all the listing endpoints use."""
+
+    def __init__(self, store, name, filters=(), cap=None):
+        self._store = store
+        self._name = name
+        self._filters = list(filters)
+        self._cap = cap
+
+    def where(self, field, op, value):
+        if op != "==":
+            raise NotImplementedError("fake supports == only")
+        return FakeQuery(self._store, self._name, self._filters + [(field, value)], self._cap)
+
+    def limit(self, n):
+        return FakeQuery(self._store, self._name, self._filters, n)
+
+    def stream(self):
+        prefix = self._name + "/"
+        out = []
+        for path, data in self._store.items():
+            rest = path[len(prefix):] if path.startswith(prefix) else None
+            # Direct children only: chats/x/messages/y is not a document of chats.
+            if not rest or "/" in rest:
+                continue
+            if all(data.get(f) == v for f, v in self._filters):
+                out.append(FakeQueryDoc(rest, data))
+        return out[: self._cap] if self._cap is not None else out
+
 
 class FakeCollection:
     def __init__(self, store, name, reads=None):
@@ -88,6 +128,12 @@ class FakeCollection:
         if doc_id is None:
             doc_id = "auto_%d" % next(_auto_ids)
         return FakeDocRef(self._store, "%s/%s" % (self._name, doc_id), self._reads)
+
+    def where(self, field, op, value):
+        return FakeQuery(self._store, self._name).where(field, op, value)
+
+    def limit(self, n):
+        return FakeQuery(self._store, self._name).limit(n)
 
 
 class FakeTransaction:
