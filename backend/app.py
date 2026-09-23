@@ -1809,6 +1809,81 @@ def notify_incoming_call():
         return jsonify({"error": "Failed to deliver notification"}), 500
 
 
+@app.route('/api/v1/calls/cancel-notify', methods=['POST', 'OPTIONS'])
+def notify_missed_call():
+    """Replaces a ringing call notification with a swipeable "Missed call".
+
+    The ringing notification is posted sticky, so it cannot be swiped away.
+    That is the point while a call is live, and a trap once it is not: a call
+    that dies while the receiver's app is closed would leave a notification
+    nothing on the phone can remove. Android replaces a notification carrying
+    the same tag, so this posts the same tag without sticky.
+
+    The live offer is the caller's proof of standing, which is why the app
+    calls this *before* it deletes the offer.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    receiver_uid = data.get('receiverUid')
+    if not receiver_uid:
+        return jsonify({"error": "Missing receiverUid"}), 400
+    if receiver_uid == uid:
+        return jsonify({"ok": True, "delivered": False}), 200
+
+    if rate_limited(f"notify:{uid}", 30, 300):
+        return jsonify({"error": "Too many call notifications"}), 429
+
+    try:
+        db_client = firestore.client()
+
+        offer_snap = db_client.collection('incoming_calls').document(receiver_uid).get()
+        offer = (offer_snap.to_dict() or {}) if offer_snap.exists else {}
+        if not offer or offer.get('callerUid') != uid:
+            return jsonify({"error": "No active call offer for this receiver"}), 403
+
+        # Picked up, or already declined: the receiver's own app has dealt with
+        # the notification, and "Missed call" would simply be untrue.
+        if offer.get('status', 'calling') != 'calling':
+            return jsonify({"ok": True, "delivered": False}), 200
+
+        private_snap = db_client.collection('user_private').document(receiver_uid).get()
+        private_data = (private_snap.to_dict() or {}) if private_snap.exists else {}
+        # A blocked caller never rang, so there is nothing of theirs to replace
+        # -- and without this the endpoint would hand them a way to put a
+        # notification on a phone that blocked them.
+        if blocked_by(private_data, uid):
+            return jsonify({"ok": True, "delivered": False}), 200
+
+        # Deliberately not gated on isActiveMode. Clearing a notification that
+        # is already on the phone has to work even if presence was switched off
+        # after it arrived, or the sticky one would be stranded there.
+        caller_name = display_name(db_client, uid)
+        room_id = offer.get('roomId')
+        payload = push.expo_data(
+            "Missed call",
+            f"{caller_name} called you",
+            {
+                "type": "call_missed",
+                "roomId": room_id,
+                "callerUid": uid,
+                "callerName": caller_name,
+            },
+            push.MESSAGE_CHANNEL,
+            tag=f"call_{room_id}",
+        )
+        delivered = deliver_push(receiver_uid, private_data, payload, push.MESSAGE_TTL_SECONDS)
+        return jsonify({"ok": True, "delivered": delivered}), 200
+    except Exception as e:
+        print(f"[CALLS] Missed-call notify error: {e}")
+        return jsonify({"error": "Failed to deliver notification"}), 500
+
+
 # A message is only announced while it is fresh. The app asks right after
 # sending, so this only turns away a replay of an old message.
 MESSAGE_NOTIFY_WINDOW_SECONDS = 5 * 60

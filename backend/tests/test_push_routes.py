@@ -261,3 +261,60 @@ def test_a_message_can_still_be_swiped_away(client, store, sent):
     message(client)
 
     assert "sticky" not in sent[0][2]
+
+
+# --- a dead call's notification --------------------------------------------
+
+def cancel(client):
+    return client.post("/api/v1/calls/cancel-notify", json={"receiverUid": PEER, "roomId": "room_1"})
+
+
+def test_a_missed_call_replaces_the_ringing_notification(client, store, sent):
+    r = cancel(client)
+
+    assert r.status_code == 200 and r.get_json()["delivered"] is True
+    (transport, token, data, ttl), = sent
+    # Same tag is the whole mechanism: Android replaces the sticky notification
+    # instead of stacking a second one beside it.
+    assert data["tag"] == "call_room_1"
+    assert data["channelId"] == push.MESSAGE_CHANNEL
+    assert "sticky" not in data
+    assert data["title"] == "Missed call"
+    assert json.loads(data["body"])["type"] == "call_missed"
+
+
+def test_only_the_caller_can_announce_a_missed_call(client, store, sent):
+    store["incoming_calls/%s" % PEER]["callerUid"] = "someoneElse03"
+
+    assert cancel(client).status_code == 403
+    assert sent == []
+
+
+def test_no_offer_means_nothing_to_replace(client, store, sent):
+    del store["incoming_calls/%s" % PEER]
+
+    assert cancel(client).status_code == 403
+    assert sent == []
+
+
+def test_a_call_that_was_picked_up_is_not_a_missed_call(client, store, sent):
+    store["incoming_calls/%s" % PEER]["status"] = "accepted"
+
+    r = cancel(client)
+
+    assert r.status_code == 200 and r.get_json()["delivered"] is False
+    assert sent == []
+
+
+def test_a_declined_call_is_not_a_missed_call(client, store, sent):
+    store["incoming_calls/%s" % PEER]["status"] = "rejected"
+
+    assert cancel(client).get_json()["delivered"] is False
+    assert sent == []
+
+
+def test_a_blocked_caller_cannot_announce_a_missed_call(client, store, sent):
+    store["user_private/%s" % PEER]["blockedUids"] = [ME]
+
+    assert cancel(client).get_json()["delivered"] is False
+    assert sent == []
