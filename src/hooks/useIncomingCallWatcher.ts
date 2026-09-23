@@ -127,6 +127,10 @@ export function useIncomingCallWatcher(
      * we can construct a complete IncomingCall without a round-trip.
      */
     const callFromNotificationData = (data: any): IncomingCall | null => {
+      // A "Missed call" notification carries the same roomId and callerUid as
+      // the ringing one it replaced. Without this, tapping it would navigate
+      // into a call that is already over.
+      if (data?.type && data.type !== 'call') return null;
       if (!data?.roomId || !data?.callerUid) return null;
       return {
         callerUid: String(data.callerUid),
