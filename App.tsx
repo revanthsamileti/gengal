@@ -490,11 +490,13 @@ export default function App() {
     const dialingEachOther =
       screenRef.current === 'Call' && active.isCaller && active.peerUid === call.callerUid;
 
-    if (dialingEachOther && uid && uid > call.callerUid) {
-      // We yield. Replacing this screen unmounts the outbound call, whose own
-      // cleanup withdraws the offer we placed, so the other side is not left
-      // ringing an abandoned call.
-      setNavStack(prev => [...prev.slice(0, -1), { ...inboundCallEntry, key: nextNavKey() }]);
+    if (dialingEachOther) {
+      // Higher UID yields to the peer's inbound offer. Lower UID keeps its
+      // outbound call and must not fall through to the busy reject — that
+      // raced the yield and produced mutual "Line busy" with no surviving call.
+      if (uid && uid > call.callerUid) {
+        setNavStack(prev => [...prev.slice(0, -1), { ...inboundCallEntry, key: nextNavKey() }]);
+      }
       return;
     }
 

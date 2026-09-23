@@ -47,7 +47,10 @@ interface AlertButton {
 }
 
 interface AlertOptions {
-  /** Tapping the scrim or pressing back dismisses. Defaults to true. */
+  /**
+   * Scrim / back dismissal. Defaults to true only when a cancel button exists,
+   * so forced confirmations cannot be dismissed by tapping outside.
+   */
   cancelable?: boolean;
   /** Icon + tint. Inferred as 'danger' when a destructive button is present. */
   variant?: AlertVariant;
@@ -246,8 +249,9 @@ export const CustomAlert = () => {
    */
   const handleDismiss = useCallback(() => {
     if (!current) return;
-    if (current.options?.cancelable === false) return;
     const cancelBtn = current.buttons.find((b) => b.style === 'cancel');
+    const cancelable = current.options?.cancelable ?? Boolean(cancelBtn);
+    if (!cancelable) return;
     close(cancelBtn?.onPress);
   }, [current, close]);
 

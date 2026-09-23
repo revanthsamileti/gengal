@@ -175,6 +175,10 @@ function UserCard({
 
 export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
   const [firebaseUsers, setFirebaseUsers] = useState<FirebaseUser[]>([]);
+  // Distinguishes "still waiting on the first snapshot" from "directory is
+  // genuinely empty" — without it a cold start flashes the empty state until
+  // Firestore answers, which reads as "nobody is here" on slow networks.
+  const [usersLoaded, setUsersLoaded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [language, setLanguage] = useState('ALL');
   const [status, setStatus] = useState('ALL');
@@ -199,7 +203,11 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
   }, []);
 
   useEffect(() => {
-    const unsub = subscribeToAllUsers((users) => setFirebaseUsers(users), myProfile?.uid);
+    setUsersLoaded(false);
+    const unsub = subscribeToAllUsers((users) => {
+      setFirebaseUsers(users);
+      setUsersLoaded(true);
+    }, myProfile?.uid);
     return unsub;
   }, [myProfile?.uid]);
 
@@ -407,7 +415,13 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
 
           {/* List */}
           <View style={styles.list}>
-            {ordered.length === 0 ? (
+            {!usersLoaded ? (
+              <View style={styles.empty}>
+                <MaterialIcons name="hourglass-empty" size={48} color="#D1B23B" />
+                <Text style={styles.emptyTitle}>Loading people…</Text>
+                <Text style={styles.emptySub}>Fetching the latest profiles</Text>
+              </View>
+            ) : ordered.length === 0 ? (
               <View style={styles.empty}>
                 <MaterialIcons name="people-outline" size={48} color="#D1B23B" />
                 <Text style={styles.emptyTitle}>

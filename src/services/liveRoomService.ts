@@ -467,6 +467,11 @@ export const openCallRecord = async (
     durationSeconds: 0,
     coinsDeducted: 0,
     heartsEarned: 0,
+    // Heart awards are capped to server-billed duration minus these counters
+    // (see /api/v1/coins/call-rewards). Seeded at zero so the first tick has
+    // a definite baseline rather than treating a missing field as untrusted.
+    callerRewardedSeconds: 0,
+    receiverRewardedSeconds: 0,
     createdAt: serverTimestamp(),
   });
 };

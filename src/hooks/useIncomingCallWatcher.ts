@@ -99,10 +99,14 @@ export function useIncomingCallWatcher(
      */
     const handleCall = (call: IncomingCall | null) => {
       if (!call) {
+        const hadHandled = handledRef.current != null;
         handledRef.current = null;
-        // The offer vanished (caller cancelled, timed out, or was answered).
-        // Dismiss any notification in the tray so it doesn't linger as a ghost.
-        dismissCallNotification().catch(() => {});
+        // Only dismiss tray noise when we had previously surfaced a call.
+        // A null snapshot on cold start (no offer yet) must not wipe an
+        // unrelated notification the OS may still be delivering.
+        if (hadHandled) {
+          dismissCallNotification().catch(() => {});
+        }
         return;
       }
       const key = `${call.callerUid}:${call.roomId}`;

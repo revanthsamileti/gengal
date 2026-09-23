@@ -231,10 +231,8 @@ export const clearTyping = async (chatId: string, uid: string) => {
 /**
  * Whether the *other* participant is typing.
  *
- * Re-evaluates on a timer as well as on each snapshot, because the assertion
- * expires with the passage of time rather than with a write — without the
- * timer, a sender who simply stopped typing would leave the indicator up until
- * they next touched the document.
+ * TTL uses receipt time on this device, not the sender's `at` timestamp —
+ * skewed clocks made the indicator vanish instantly or stick for the full TTL.
  */
 export const subscribeToTyping = (
   chatId: string,
@@ -242,21 +240,32 @@ export const subscribeToTyping = (
   callback: (isTyping: boolean) => void,
   onError?: (error: Error) => void,
 ) => {
-  let latest: number[] = [];
+  const receiptById = new Map<string, number>();
   const emit = () => {
     const now = Date.now();
-    callback(latest.some((t) => now - t <= TYPING_TTL_MS));
+    let typing = false;
+    for (const receivedAt of receiptById.values()) {
+      if (now - receivedAt <= TYPING_TTL_MS) {
+        typing = true;
+        break;
+      }
+    }
+    callback(typing);
   };
 
   const unsubscribe = onSnapshot(
     collection(db, 'chats', chatId, 'typing'),
     (snap) => {
-      latest = snap.docs
-        .filter((d) => d.id !== selfUid)
-        .map((d) => {
-          const at = d.data()?.at;
-          return typeof at?.toMillis === 'function' ? at.toMillis() : 0;
-        });
+      for (const change of snap.docChanges()) {
+        const id = change.doc.id;
+        if (id === selfUid) continue;
+        if (change.type === 'removed') {
+          receiptById.delete(id);
+          continue;
+        }
+        // Refresh from when we saw it so heartbeats extend local TTL.
+        receiptById.set(id, Date.now());
+      }
       emit();
     },
     snapshotError('chat:typing', onError, () => callback(false)),

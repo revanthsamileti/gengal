@@ -51,9 +51,11 @@ export async function ensureCallPermissions(
 
   const results = await PermissionsAndroid.requestMultiple(wanted);
 
-  // "Never ask again" means requestMultiple returns without showing anything,
-  // so telling the user to tap Call again would loop forever with no dialog.
-  if (results[MIC] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) {
+  // Mic is the hard gate; camera denial must not block placing a call.
+  const micOk = hasMic || results[MIC] === PermissionsAndroid.RESULTS.GRANTED;
+
+  // NEVER_ASK_AGAIN returns without a dialog — prompting "try again" would loop.
+  if (!micOk && results[MIC] === PermissionsAndroid.RESULTS.NEVER_ASK_AGAIN) {
     Alert.alert(
       'Microphone blocked',
       'GenGal needs microphone access to place calls. Turn it on in Settings, then try again.',
@@ -65,7 +67,7 @@ export async function ensureCallPermissions(
     return 'blocked';
   }
 
-  return 'requested';
+  return micOk ? 'granted' : 'requested';
 }
 
 /**

@@ -6,12 +6,11 @@ here should prompt the question: "is the corresponding fix still in place?"
 Fixes covered
 -------------
 1. call-rewards: threshold comes from server settings, not the client body.
-2. call-rewards: secondsToAdd is capped at MAX_REWARDS_SECONDS.
+2. call-rewards: hearts are awarded from the server-billed call duration.
 3. (removed) send-otp no longer exists; reverse-OTP limits live in test_sms_auth_routes.py.
 4. global error handler: unhandled exceptions return a generic JSON 500.
 """
 
-import os
 import pytest
 import app as app_module
 from conftest import TEST_UID
@@ -22,7 +21,11 @@ from fake_firestore import FakeFirestoreModule
 # Helpers
 # ---------------------------------------------------------------------------
 
-def rewards_post(client, seconds_to_add, threshold_minutes=3, is_receiver=False):
+OTHER_UID = "other_participant"
+CALL_ID = "call_rewards_1"
+
+
+def rewards_post(client, seconds_to_add, threshold_minutes=3, is_receiver=False, room_id=CALL_ID):
     return client.post(
         "/api/v1/coins/call-rewards",
         json={
@@ -30,8 +33,20 @@ def rewards_post(client, seconds_to_add, threshold_minutes=3, is_receiver=False)
             "secondsToAdd": seconds_to_add,
             "thresholdMinutes": threshold_minutes,
             "isReceiver": is_receiver,
+            "roomId": room_id,
         },
     )
+
+
+def seed_call(store, duration_seconds, caller_rewarded=0, receiver_rewarded=0):
+    store["calls/%s" % CALL_ID] = {
+        "callerUid": TEST_UID,
+        "receiverUid": OTHER_UID,
+        "durationSeconds": duration_seconds,
+        "callerRewardedSeconds": caller_rewarded,
+        "receiverRewardedSeconds": receiver_rewarded,
+        "status": "active",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +55,12 @@ def rewards_post(client, seconds_to_add, threshold_minutes=3, is_receiver=False)
 
 @pytest.fixture
 def rewards_store(monkeypatch):
-    """User with empty stats; server has callDurationForHeart = 3 (minutes)."""
+    """User with empty stats; server has callDurationForHeart = 3 (minutes).
+
+    Duration is seeded high enough that every legacy threshold/cap case can
+    still exercise its secondsToAdd path — the new ceiling is remaining
+    uncredited billed time, so a tiny duration would mask those checks.
+    """
     data = {
         "settings/pricing": {"callDurationForHeart": 3},
         "users/%s" % TEST_UID: {
@@ -48,6 +68,14 @@ def rewards_store(monkeypatch):
             "unrewardedCallSeconds": 0,
             "hearts": 0,
             "totalReceivedCallSeconds": 0,
+        },
+        "calls/%s" % CALL_ID: {
+            "callerUid": TEST_UID,
+            "receiverUid": OTHER_UID,
+            "durationSeconds": 100000,
+            "callerRewardedSeconds": 0,
+            "receiverRewardedSeconds": 0,
+            "status": "active",
         },
     }
     monkeypatch.setattr(app_module, "firestore", FakeFirestoreModule(data))
@@ -129,46 +157,47 @@ class TestCallRewardsThresholdServerSide:
 
 
 # ===========================================================================
-# 2. call-rewards: secondsToAdd is capped at MAX_REWARDS_SECONDS
+# 2. call-rewards: seconds are bound to server-billed call duration
 # ===========================================================================
 
 class TestCallRewardsCap:
-    """An absurd secondsToAdd cannot bypass the threshold fix or inflate balances."""
+    """Rewards cannot exceed what the billing tick has already measured."""
 
-    def test_huge_seconds_are_capped(self, client, as_user, rewards_store):
-        """secondsToAdd=10^9 is silently capped to MAX_REWARDS_SECONDS (7200).
+    def test_huge_seconds_are_capped_to_uncredited_duration(
+        self, client, as_user, rewards_store
+    ):
+        """secondsToAdd=10^9 cannot invent more time than the call has billed.
 
-        Even after the threshold fix, an uncapped secondsToAdd would still let a
-        patched client farm 7200/180 = 40 hearts per API call (≈120 INR at default
-        heartToInrRate).  The cap prevents that inflation.
+        The call is seeded with only 90 billed seconds, so even an absurd
+        client hint credits at most 90 — not MAX_REWARDS_SECONDS.
         """
-        MAX = app_module.MAX_REWARDS_SECONDS  # 7200
+        seed_call(rewards_store, duration_seconds=90)
 
         response = rewards_post(client, seconds_to_add=10 ** 9, threshold_minutes=3)
 
         assert response.status_code == 200
         user = rewards_store["users/%s" % TEST_UID]
-        # Hearts = floor(MAX / 180) = 40; remainder = MAX % 180 = 0
-        expected_hearts = int(MAX // (3 * 60))
-        assert user["hearts"] == expected_hearts
-        stored_unawarded = user["unrewardedCallSeconds"]
-        assert stored_unawarded <= MAX, (
-            "unrewardedCallSeconds must not exceed the per-increment cap"
-        )
+        assert user["hearts"] == 0
+        assert user["unrewardedCallSeconds"] == pytest.approx(90)
+        assert rewards_store["calls/%s" % CALL_ID]["callerRewardedSeconds"] == pytest.approx(90)
 
-    def test_seconds_at_cap_boundary_are_accepted(self, client, as_user, rewards_store):
-        """MAX_REWARDS_SECONDS itself is not capped further (boundary is inclusive)."""
-        MAX = app_module.MAX_REWARDS_SECONDS
+    def test_cannot_double_credit_the_same_billed_seconds(
+        self, client, as_user, rewards_store
+    ):
+        """A second post after the duration is fully credited awards nothing."""
+        seed_call(rewards_store, duration_seconds=90)
 
-        response = rewards_post(client, seconds_to_add=MAX, threshold_minutes=3)
+        first = rewards_post(client, seconds_to_add=90)
+        second = rewards_post(client, seconds_to_add=90)
 
-        assert response.status_code == 200
-        # Should behave identically to the cap-exceeded case above
+        assert first.status_code == 200
+        assert second.status_code == 200
         user = rewards_store["users/%s" % TEST_UID]
-        assert user["hearts"] == int(MAX // (3 * 60))
+        assert user["unrewardedCallSeconds"] == pytest.approx(90)
+        assert rewards_store["calls/%s" % CALL_ID]["callerRewardedSeconds"] == pytest.approx(90)
 
-    def test_seconds_below_cap_are_unchanged(self, client, as_user, rewards_store):
-        """Legitimate values below MAX_REWARDS_SECONDS pass through unchanged."""
+    def test_seconds_below_remaining_pass_through(self, client, as_user, rewards_store):
+        """Legitimate values below remaining uncredited time pass through unchanged."""
         response = rewards_post(client, seconds_to_add=90, threshold_minutes=3)
 
         assert response.status_code == 200
@@ -176,6 +205,29 @@ class TestCallRewardsCap:
         # 90 seconds < 180-second threshold → 0 hearts, 90 seconds banked
         assert user["hearts"] == 0
         assert user["unrewardedCallSeconds"] == pytest.approx(90)
+
+    def test_missing_room_id_is_rejected(self, client, as_user, rewards_store):
+        response = client.post(
+            "/api/v1/coins/call-rewards",
+            json={
+                "userId": TEST_UID,
+                "secondsToAdd": 30,
+                "thresholdMinutes": 3,
+            },
+        )
+        assert response.status_code == 400
+
+    def test_non_participant_is_forbidden(self, client, as_user, rewards_store):
+        rewards_store["calls/%s" % CALL_ID] = {
+            "callerUid": "alice",
+            "receiverUid": "bob",
+            "durationSeconds": 500,
+            "callerRewardedSeconds": 0,
+            "receiverRewardedSeconds": 0,
+            "status": "active",
+        }
+        response = rewards_post(client, seconds_to_add=30)
+        assert response.status_code == 403
 
 
 # ===========================================================================

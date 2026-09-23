@@ -53,32 +53,80 @@ const safeParseJson = async (response: Response, defaultError: string): Promise<
   }
 };
 
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+const AUTH_MAX_ATTEMPTS = 3;
+
+function isRetryableStatus(status: number): boolean {
+  return RETRYABLE_STATUSES.has(status);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
- * POSTs to the backend with the caller's Firebase ID token attached. Endpoints
- * that mint RTC tokens or read private data require this.
+ * Retries transient network / gateway failures a couple of times. On a flaky
+ * mobile link a single dropped handshake used to fail token mint, billing
+ * ticks, and call setup even though the next attempt would succeed.
+ * 4xx responses are never retried (they are authoritative).
  */
+async function withAuthRetry<T>(
+  path: string,
+  execute: () => Promise<Response>,
+  attachErrorFields?: (error: Error, data: any) => void,
+): Promise<T> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= AUTH_MAX_ATTEMPTS; attempt++) {
+    try {
+      const response = await execute();
+      const data = await safeParseJson(response, `Request to ${path} failed`);
+      if (!response.ok) {
+        if (isRetryableStatus(response.status) && attempt < AUTH_MAX_ATTEMPTS) {
+          await sleep(400 * attempt);
+          continue;
+        }
+        const error = new Error(data.error || `Request to ${path} failed`);
+        (error as any).status = response.status;
+        attachErrorFields?.(error, data);
+        throw error;
+      }
+      return data as T;
+    } catch (e: any) {
+      lastError = e;
+      // Auth / validation errors must not be retried.
+      if (e?.status && e.status < 500) throw e;
+      if (attempt >= AUTH_MAX_ATTEMPTS) throw e;
+      await sleep(400 * attempt);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error(`Request to ${path} failed`);
+}
+
+/** POSTs to the backend with the caller's Firebase ID token attached. */
 export const authedPost = async <T>(path: string, body: Record<string, unknown> = {}): Promise<T> => {
   const user = auth.currentUser;
   if (!user) throw new Error('You must be logged in.');
 
   const idToken = await user.getIdToken();
-  const response = await fetch(`${getBackendUrl()}${path}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${idToken}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const url = `${getBackendUrl()}${path}`;
 
-  const data = await safeParseJson(response, `Request to ${path} failed`);
-  if (!response.ok) {
-    const error = new Error(data.error || `Request to ${path} failed`);
-    (error as any).code = data.code;
-    (error as any).status = response.status;
-    throw error;
-  }
-  return data as T;
+  return withAuthRetry(
+    path,
+    () =>
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
+        body: JSON.stringify(body),
+      }),
+    (error, data) => {
+      (error as any).code = data.code;
+    },
+  );
 };
 
 export const authedGet = async <T>(path: string): Promise<T> => {
@@ -86,17 +134,13 @@ export const authedGet = async <T>(path: string): Promise<T> => {
   if (!user) throw new Error('You must be logged in.');
 
   const idToken = await user.getIdToken();
-  const response = await fetch(`${getBackendUrl()}${path}`, {
-    headers: { Authorization: `Bearer ${idToken}` },
-  });
+  const url = `${getBackendUrl()}${path}`;
 
-  const data = await safeParseJson(response, `Request to ${path} failed`);
-  if (!response.ok) {
-    const error = new Error(data.error || `Request to ${path} failed`);
-    (error as any).status = response.status;
-    throw error;
-  }
-  return data as T;
+  return withAuthRetry(path, () =>
+    fetch(url, {
+      headers: { Authorization: `Bearer ${idToken}` },
+    }),
+  );
 };
 
 const secureDelete = async (key: string) => {

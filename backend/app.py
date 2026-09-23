@@ -1416,32 +1416,54 @@ def call_rewards_endpoint():
     user_id = data.get("userId")
     if user_id != uid:
         return jsonify({"error": "Cannot update rewards for another user"}), 403
+    room_id = data.get("roomId")
+    if not isinstance(room_id, str) or not room_id.strip():
+        return jsonify({"error": "Missing roomId"}), 400
+    room_id = room_id.strip()
     try:
-        seconds_to_add = parse_positive_number(data.get("secondsToAdd"), "secondsToAdd")
-        # Cap: one reward increment cannot represent more than a full 2-hour call.
-        # A patched client could otherwise submit secondsToAdd=10^9 to farm hearts
-        # even after the threshold fix below.
-        seconds_to_add = min(seconds_to_add, MAX_REWARDS_SECONDS)
+        # Client secondsToAdd is a hint only. Hard ceiling is server-billed
+        # duration minus seconds already credited for this participant.
+        requested = None
+        if data.get("secondsToAdd") is not None:
+            requested = parse_positive_number(data.get("secondsToAdd"), "secondsToAdd")
         # Threshold comes from server pricing settings, NOT the client body.
-        # A patched client that sends thresholdMinutes=0.001 would otherwise
-        # turn a single second of call time into tens of thousands of hearts,
-        # each redeemable for real money via heartToInrRate.  The client-supplied
-        # field (thresholdMinutes) is intentionally ignored here.
         settings = pricing_settings()
         threshold_minutes = float(settings.get(
             'callDurationForHeart', DEFAULT_SETTINGS['callDurationForHeart']
         ))
-        is_receiver = bool(data.get("isReceiver"))
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
+        call_ref = db_client.collection('calls').document(room_id)
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
-            snap = user_ref.get(transaction=transaction)
-            if not snap.exists:
+            call_snap = call_ref.get(transaction=transaction)
+            user_snap = user_ref.get(transaction=transaction)
+            if not call_snap.exists:
+                raise ValueError("Call does not exist")
+            if not user_snap.exists:
                 raise ValueError("User does not exist")
-            user_data = snap.to_dict() or {}
+            call = call_snap.to_dict() or {}
+            caller_id = call.get('callerUid')
+            receiver_id = call.get('receiverUid')
+            if not caller_id or not receiver_id or caller_id == receiver_id:
+                raise ValueError("Invalid call participants")
+            if uid not in (caller_id, receiver_id):
+                raise PermissionError("Not a participant in this call")
+            is_receiver = uid == receiver_id
+            reward_key = (
+                'receiverRewardedSeconds' if is_receiver else 'callerRewardedSeconds'
+            )
+            already = float(call.get(reward_key) or 0)
+            remaining = max(0.0, float(call.get('durationSeconds') or 0) - already)
+            seconds_to_add = min(remaining, float(MAX_REWARDS_SECONDS))
+            if requested is not None:
+                seconds_to_add = min(seconds_to_add, requested)
+            if seconds_to_add <= 0:
+                return 0.0
+
+            user_data = user_snap.to_dict() or {}
             current_seconds = float(user_data.get("unrewardedCallSeconds") or 0) + seconds_to_add
             hearts = int(user_data.get("hearts") or 0)
             total_received = float(user_data.get("totalReceivedCallSeconds") or 0)
@@ -1459,9 +1481,14 @@ def call_rewards_endpoint():
             if is_receiver:
                 update_data["totalReceivedCallSeconds"] = total_received
             transaction.update(user_ref, update_data)
+            transaction.update(call_ref, {reward_key: already + seconds_to_add})
+            return seconds_to_add
 
-        apply(transaction)
-        return jsonify({"ok": True}), 200
+        try:
+            credited = apply(transaction)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        return jsonify({"ok": True, "creditedSeconds": credited}), 200
     except (TypeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -2190,11 +2217,13 @@ def resolve_withdrawal():
                 raise ValueError("User does not exist")
             user_data = user_snap.to_dict() or {}
 
-            user_update = {'pendingWithdrawalId': firestore.DELETE_FIELD}
-            # Refund only what was actually taken. Requests predating this
-            # endpoint were written straight from the client and never debited
-            # the balance, so paying them back would mint hearts — and hearts
-            # are convertible to rupees, so that is minting money.
+            user_update = {}
+            # Only clear when the marker still points at this request — a newer
+            # pending claim must keep its lock.
+            if user_data.get('pendingWithdrawalId') == request_id:
+                user_update['pendingWithdrawalId'] = firestore.DELETE_FIELD
+            # Refund only when hearts were actually debited (pre-endpoint
+            # client writes never deducted, so refunding those would mint).
             if new_status == 'rejected' and req.get('heartsDeducted'):
                 refund = int(req.get('hearts') or 0)
                 user_update['hearts'] = int(user_data.get('hearts') or 0) + refund
@@ -2204,7 +2233,8 @@ def resolve_withdrawal():
                 'resolvedAt': firestore.SERVER_TIMESTAMP,
                 'resolvedBy': admin_id,
             })
-            transaction.update(user_ref, user_update)
+            if user_update:
+                transaction.update(user_ref, user_update)
             return target_uid
 
         target_uid = apply(transaction)

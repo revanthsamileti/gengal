@@ -14,7 +14,7 @@ import { skeuo } from '../theme/skeuomorphic';
 import { useGengalVoice, FreeProvider } from '../hooks/useGengalVoice';
 import { auth, db } from '../config/firebase';
 import { doc, onSnapshot, updateDoc } from 'firebase/firestore';
-import { transferCoins, processCallBilling } from '../services/coinService';
+import { transferCoins, processCallBilling, updateCallRewards } from '../services/coinService';
 import { subscribeToGlobalSettings, GlobalSettings } from '../services/adminService';
 import ConnectingOverlay, { CallStage } from '../components/ConnectingOverlay';
 import { createCallOffer, acceptCallOffer, rejectCallOffer, subscribeToOutboundCallStatus, clearCallOffer, openCallRecord, closeCallRecord, ReceiverBusyError, CallSetupTimeoutError, CallGoneError, OFFER_EXPIRY_MS } from '../services/liveRoomService';
@@ -45,14 +45,31 @@ const CALL_SETUP_TIMEOUT_MS = 20000;
  * How long to wait, after our own Agora join resolves, for the peer to show
  * up as a `remoteUid` before giving up on the connection.
  *
- * This used to be 10 s and it was a false-positive machine: on real hardware
- * over real networks, one side's engine joining does not mean the other
- * side's join + ICE negotiation + Agora's own channel propagation finishes
- * within 10 s of that instant, especially on a cold SDK (first call of the
- * session). Measured failures on live devices where both legs connected
- * fine at 11-14 s. 20 s matches CALL_SETUP_TIMEOUT_MS above.
+ * Generous on purpose: on real hardware over flaky networks, one side's
+ * engine joining does not mean the other side's join + ICE negotiation +
+ * Agora channel propagation finishes quickly — especially on a cold SDK.
+ * Ending at 20 s produced false hangups that both legs would have healed.
  */
-const PEER_JOIN_TIMEOUT_MS = 20000;
+const PEER_JOIN_TIMEOUT_MS = 45000;
+
+/**
+ * How long the RTC join itself may take before we retry / fail. 7 s was too
+ * short on 3G and congested Wi-Fi — the join often succeeded a beat later.
+ */
+const PROVIDER_CONNECT_TIMEOUT_MS = 25000;
+
+/**
+ * Heartbeat silence before the call is torn down. Longer than the old 45 s so
+ * brief cellular handoffs and Agora reconnect windows do not kill a live call.
+ */
+const HEARTBEAT_HANGUP_MS = 75000;
+const HEARTBEAT_UNSTABLE_MS = 20000;
+
+function voiceLinkLabel(isReconnecting: boolean, isPeerUnstable: boolean): string {
+  if (isReconnecting) return 'Reconnecting…';
+  if (isPeerUnstable) return 'Weak connection…';
+  return 'Talking...';
+}
 
 /**
  * Providers the app can actually carry a call on, in preference order.
@@ -133,6 +150,8 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [isPeerUnstable, setIsPeerUnstable] = useState(false);
   /** Same value, readable from inside long-lived interval callbacks. */
   const isPeerUnstableRef = React.useRef(false);
+  /** Local Agora reconnect — same ref pattern as peer-unstable above. */
+  const isReconnectingRef = React.useRef(false);
   /**
    * Whether the RTC peer has ever actually shown up (`remoteUids` non-empty).
    *
@@ -388,7 +407,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const initialProvider = (matchData?.audioProvider || 'agora') as FreeProvider;
   const audioToken = matchData?.audioTokenOrUrl || '';
   const [currentProvider, setCurrentProvider] = useState<FreeProvider>(initialProvider);
-  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn, toggleCamera, cameraOn, flipCamera, localUid, remoteUids } = useGengalVoice(currentProvider);
+  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn, toggleCamera, cameraOn, flipCamera, localUid, remoteUids, isReconnecting } = useGengalVoice(currentProvider);
 
   /**
    * The RTC token round-trip used to start only *after* the call was answered,
@@ -616,16 +635,38 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           // A video call belongs on the loudspeaker: the phone is held away
           // from the ear to see the other person. This argument was never
           // passed, so every video call started on the earpiece and sounded
-          // silent until the user found the speaker button.
-          await connectSeat(roomId, connectionToken, extraParam, undefined, mode === 'video');
+          // silent until the user found the speaker button. `isVideo` rather
+          // than the mode prop, so a call that fell back to voice is not put
+          // on the loudspeaker.
+          await connectSeat(roomId, connectionToken, extraParam, undefined, isVideo);
           if (isMounted) setIsConnecting(false);
         }
       };
 
+      const raceConnect = () =>
+        Promise.race([
+          connectionPromise(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('Connection Timeout')), PROVIDER_CONNECT_TIMEOUT_MS)
+          ),
+        ]);
+
       try {
-        // Enforce a strict 7-second timeout for the provider to connect
-        const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error("Connection Timeout")), 7000));
-        await Promise.race([connectionPromise(), timeoutPromise]);
+        try {
+          await raceConnect();
+        } catch (firstError: any) {
+          // One retry after a soft timeout; tear down any half-joined channel first.
+          if (firstError?.message !== 'Connection Timeout' || !isMounted) {
+            throw firstError;
+          }
+          console.warn('[Waterfall] First connect timed out; retrying once…');
+          try {
+            await disconnectSeat();
+          } catch {
+            // Best-effort teardown before the retry.
+          }
+          await raceConnect();
+        }
       } catch (error: any) {
         // A denied microphone is not a connection failure to route around —
         // there is no provider that makes a call work without one. Previously
@@ -909,9 +950,15 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     if (remoteUids.length > 0) setPeerEverConnected(true);
   }, [remoteUids.length]);
 
-  // 2e. Auto-hangup if peer is offline on Agora for more than PEER_JOIN_TIMEOUT_MS
+  // Keep reconnect readable from billing / heartbeat intervals.
   React.useEffect(() => {
-    if (isPending || isConnecting || remoteUids.length > 0) return;
+    isReconnectingRef.current = isReconnecting;
+  }, [isReconnecting]);
+
+  // Hang up if the peer never appears. Paused while we are reconnecting so a
+  // local blip that clears remoteUids does not end a call Agora is still healing.
+  React.useEffect(() => {
+    if (isPending || isConnecting || remoteUids.length > 0 || isReconnecting) return;
 
     const timeout = setTimeout(() => {
       console.log("[CallScreen] Peer connection timeout. Terminating call.");
@@ -919,7 +966,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     }, PEER_JOIN_TIMEOUT_MS);
 
     return () => clearTimeout(timeout);
-  }, [isPending, isConnecting, remoteUids.length]);
+  }, [isPending, isConnecting, remoteUids.length, isReconnecting]);
 
   // 3. Fetch global billing settings
   React.useEffect(() => {
@@ -958,16 +1005,17 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       const lastTime = isCaller ? lastObservedReceiverTimeRef.current : lastObservedCallerTimeRef.current;
       const elapsed = now - lastTime;
 
-      const unstable = elapsed > 20000;
+      const unstable = elapsed > HEARTBEAT_UNSTABLE_MS;
       setIsPeerUnstable(unstable);
-      // Mirrored into a ref because the billing loop below reads it from inside
-      // a `setInterval` callback that is created once and never re-created --
-      // it closed over the value at the moment the call started, which is
-      // always `false`. The pause it is supposed to apply therefore never
-      // happened, and both parties kept paying through an outage.
+      // Mirrored into a ref because the billing loop reads it from a long-lived
+      // setInterval that closed over the mount-time `false` value.
       isPeerUnstableRef.current = unstable;
 
-      if (elapsed > 45000) {
+      // Do not hang up on silence while Agora is reconnecting — heartbeats
+      // cannot land on a dead uplink either.
+      if (isReconnectingRef.current) return;
+
+      if (elapsed > HEARTBEAT_HANGUP_MS) {
         console.log(`[CallScreen] Heartbeat timed out after ${elapsed}ms. Ending call.`);
         endCallWithNotice(
           'Call ended',
@@ -1028,9 +1076,9 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       const user = auth.currentUser;
       if (!user) return;
 
-      // Pause ticks while the peer link is down so neither side pays for dead air.
-      if (isPeerUnstableRef.current) {
-        console.log("[CallScreen] Peer connection is unstable. Pausing billing ticks.");
+      // Pause ticks while the peer link is down or we are reconnecting.
+      if (isPeerUnstableRef.current || isReconnectingRef.current) {
+        console.log("[CallScreen] Connection unstable/reconnecting. Pausing billing ticks.");
         return;
       }
 
@@ -1076,8 +1124,13 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         // transaction on the same user document.
         setTimeout(async () => {
           try {
-            const { updateCallRewards } = await import('../services/coinService');
-            await updateCallRewards(user.uid, secondsInThisBatch, globalSettings.callDurationForHeart, !isCaller);
+            await updateCallRewards(
+              user.uid,
+              secondsInThisBatch,
+              globalSettings.callDurationForHeart,
+              roomId,
+              !isCaller
+            );
           } catch (e) {
             console.warn("[Rewards Engine] Failed to update call rewards", e);
           }
@@ -1097,25 +1150,24 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       syncIntervalRef.current = 0;
       const user = auth.currentUser;
 
-      // Final tick so the last partial interval is charged from the server
-      // clock. Unconditional on purpose: this is also the call that releases
-      // the server-side busy marker, and skipping it would leave both parties
-      // advertised as mid-call until the marker aged out. The effect only runs
-      // once the peer has actually connected, so a call that never carried
-      // audio never reaches this teardown in the first place.
+      // Final billing tick also releases the busy marker. Rewards wait until
+      // billing settles — hearts are capped to durationSeconds.
+      const shouldFlushRewards = remainingSeconds > 0 && user && roomId;
       processCallBilling(roomId)
-        .catch(e => console.warn('[Billing Engine] Final flush failed:', e));
-
-      if (remainingSeconds > 0 && user) {
-        import('../services/coinService')
-          .then(({ updateCallRewards }) =>
-            updateCallRewards(user.uid, remainingSeconds, globalSettings.callDurationForHeart, !isCaller)
-          )
-          // Chained rather than nested: the inner .catch() covered the call but
-          // not the import that produces it, so a failed chunk load rejected
-          // with nothing attached to it.
-          .catch(e => console.warn("[Rewards Engine] Final flush failed", e));
-      }
+        .catch(e => {
+          console.warn('[Billing Engine] Final flush failed:', e);
+        })
+        .then(() => {
+          if (!shouldFlushRewards) return;
+          return updateCallRewards(
+            user.uid,
+            remainingSeconds,
+            globalSettings.callDurationForHeart,
+            roomId,
+            !isCaller
+          );
+        })
+        .catch(e => console.warn('[Rewards Engine] Final flush failed', e));
     };
   }, [roomId, matchData?.uid, globalSettings, currentUserProfile, isCaller, isVideo, isCallActive, peerEverConnected]);
 
@@ -1275,8 +1327,8 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             </View>
 
             <Text style={styles.voiceName}>{profile.age ? `${profile.name}, ${profile.age}` : profile.name}</Text>
-            <Text style={[styles.voiceStatus, isPeerUnstable && { color: '#B30005', fontWeight: '800' }]}>
-              {isPeerUnstable ? 'Reconnecting peer...' : 'Talking...'}
+            <Text style={[styles.voiceStatus, (isPeerUnstable || isReconnecting) && { color: '#B30005', fontWeight: '800' }]}>
+              {voiceLinkLabel(isReconnecting, isPeerUnstable)}
             </Text>
             <Text style={{ fontSize: 24, fontWeight: '700', color: '#4B0054', marginTop: 12 }}>{formatTimer(callDurationSeconds)}</Text>
             
@@ -1353,7 +1405,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         />
       )}
       <View style={styles.videoPhone}>
-        {isPeerUnstable && (
+        {(isPeerUnstable || isReconnecting) && (
           <View style={{
             position: 'absolute',
             top: 100,
@@ -1369,7 +1421,9 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           }}>
             <MaterialIcons name="wifi-off" size={20} color="#FFFFFF" style={{ marginRight: 8 }} />
             <Text style={{ color: '#FFFFFF', fontWeight: 'bold', fontSize: 15 }}>
-              Connection unstable. Reconnecting...
+              {isReconnecting
+                ? 'Reconnecting your connection…'
+                : 'Connection unstable. Reconnecting…'}
             </Text>
           </View>
         )}

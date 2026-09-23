@@ -311,12 +311,34 @@ service cloud.firestore {
         && (resource == null
             || resource.data.callerUid == request.auth.uid
             || resource.data.receiverUid == request.auth.uid);
+      // Billing / reward counters are server-owned; create must seed them at 0.
       allow create: if signedIn()
-        && request.resource.data.callerUid == request.auth.uid;
+        && request.resource.data.callerUid == request.auth.uid
+        && request.resource.data.receiverUid is string
+        && request.resource.data.receiverUid != request.auth.uid
+        // Absent is fine, non-zero is not: rules apply to every installed
+        // build, and an older app that never wrote the reward counters would
+        // otherwise be unable to start a call at all.
+        && request.resource.data.get('durationSeconds', 0) == 0
+        && request.resource.data.get('coinsDeducted', 0) == 0
+        && request.resource.data.get('heartsEarned', 0) == 0
+        && request.resource.data.get('callerRewardedSeconds', 0) == 0
+        && request.resource.data.get('receiverRewardedSeconds', 0) == 0
+        && !request.resource.data.keys().hasAny(['lastBilledAt']);
+      // Counters stay Admin SDK-only. endedAt must be request.time so clients
+      // cannot backdate hang-up to shrink what they owe.
       allow update: if signedIn()
         && (resource.data.callerUid == request.auth.uid
             || resource.data.receiverUid == request.auth.uid)
-        && !changedKeys().hasAny(['callerUid', 'receiverUid', 'createdAt']);
+        && !changedKeys().hasAny([
+          'callerUid', 'receiverUid', 'createdAt',
+          'lastBilledAt', 'durationSeconds', 'coinsDeducted', 'heartsEarned',
+          'callerRewardedSeconds', 'receiverRewardedSeconds'
+        ])
+        && (
+          !changedKeys().hasAny(['endedAt'])
+          || request.resource.data.endedAt == request.time
+        );
       allow delete: if false;
     }
 
