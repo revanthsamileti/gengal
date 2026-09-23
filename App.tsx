@@ -443,7 +443,7 @@ export default function App() {
   });
 
   // Inbound calls push a Call screen with the offer already attached.
-  useIncomingCallWatcher(user, (call) => {
+  useIncomingCallWatcher(user, (call, options) => {
     const inboundCallEntry = {
       name: 'Call' as ScreenName,
       params: {
@@ -452,6 +452,8 @@ export default function App() {
         roomId: call.roomId,
         isCaller: false,
         isIncomingPending: true,
+        // Answer pressed on the notification: open the call already answering.
+        autoAnswer: !!options?.autoAnswer,
         matchData: {
           uid: call.callerUid,
           nickname: call.callerName,

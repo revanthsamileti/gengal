@@ -95,11 +95,13 @@ type CallScreenProps = {
   matchData?: any;
   isCaller?: boolean;
   isIncomingPending?: boolean;
+  /** Set when the user pressed Answer on the call notification. */
+  autoAnswer?: boolean;
   navigate: (screen: string, params?: { profileName?: string; mode?: 'call' | 'video'; roomId?: string; matchData?: any; isCaller?: boolean; isIncomingPending?: boolean }) => void;
   goBack: () => void;
 };
 
-export default function CallScreen({ profileName, mode = 'call', roomId: initialRoomId, matchData, isCaller, isIncomingPending = false, navigate, goBack }: CallScreenProps) {
+export default function CallScreen({ profileName, mode = 'call', roomId: initialRoomId, matchData, isCaller, isIncomingPending = false, autoAnswer = false, navigate, goBack }: CallScreenProps) {
   /**
    * One room per call attempt, minted here whenever we are the one placing it.
    *
@@ -282,6 +284,50 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     Alert.alert(title, message, [{ text: 'OK' }]);
     void endCall();
   };
+
+  /**
+   * Answer the ringing call.
+   *
+   * Shared by the on-screen Answer button and the Answer action on the call
+   * notification, so a call answered from the tray goes through exactly the
+   * same path as one answered in the app.
+   *
+   * callStartRef is deliberately NOT set from Date.now(): this device's clock
+   * can be skewed from the caller's, which showed up as the two timers being
+   * permanently offset. The incoming_calls listener sets it once the write's
+   * serverTimestamp resolves, so both sides read the same instant.
+   *
+   * The acceptance is recorded against *this* offer or not at all. It used to
+   * be written into the ring slot whatever was in it, so a second caller
+   * arriving between the ring and the tap got accepted instead.
+   *
+   * Leaving `isPending` set is what made every answered call fail: it gates
+   * the effect that joins the RTC channel.
+   */
+  const answerIncomingCall = React.useCallback(() => {
+    if (!ringSlotUid || !callRef.callerUid) return;
+    setIsPending(false);
+    acceptCallOffer(ringSlotUid, callRef).catch((e) => {
+      console.warn('Failed to accept call:', e);
+      if (e instanceof CallGoneError) {
+        endCallWithNotice('Call ended', `${profile.name} is no longer on the line.`);
+      } else {
+        endCallWithNotice(
+          'Could not answer',
+          'Something went wrong answering that call. Please try again.'
+        );
+      }
+    });
+  }, [ringSlotUid, callRef, profile.name]);
+
+  // Answer pressed on the notification: the screen opens already answering,
+  // so the user is not asked to accept a call they just accepted.
+  const autoAnsweredRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!autoAnswer || !isPending || autoAnsweredRef.current) return;
+    autoAnsweredRef.current = true;
+    answerIncomingCall();
+  }, [autoAnswer, isPending, answerIncomingCall]);
 
   /**
    * The ringing phone gives up too, not just the caller.
@@ -1226,43 +1272,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             status: 'calling',
             timestamp: null,
           }}
-          onAccept={() => {
-            if (!ringSlotUid || !callRef.callerUid) return;
-            // callStartRef is deliberately NOT set here from Date.now(): this
-            // device's own clock can be skewed from the caller's, which
-            // showed up as the two timers being permanently offset rather
-            // than just briefly out of step. The incoming_calls listener
-            // above sets it once the write's serverTimestamp resolves, so
-            // both sides read the same instant off the same clock.
-            //
-            // The acceptance is recorded against *this* offer or not at all.
-            // It used to be written straight into the ring slot whatever was in
-            // it, so a second caller arriving in the moment between the phone
-            // ringing and the tap got accepted instead: this device joined the
-            // first caller's room while the newcomer was told they were through,
-            // leaving two people in empty rooms and the newcomer paying for it.
-            // The screen still moves on immediately -- the answer has to feel
-            // instant -- and unwinds if the offer turns out to be gone.
-            //
-            // Leaving `isPending` set is what made every answered call fail:
-            // it gates the effect that joins the RTC channel, so the receiver
-            // sat on the ringing overlay having accepted in Firestore but
-            // never joined. The caller joined an empty channel, waited out the
-            // peer timeout alone, and both sides were told the connection had
-            // been lost. Nothing else in the component clears this.
-            setIsPending(false);
-            acceptCallOffer(ringSlotUid, callRef).catch((e) => {
-              console.warn('Failed to accept call:', e);
-              if (e instanceof CallGoneError) {
-                endCallWithNotice('Call ended', `${profile.name} is no longer on the line.`);
-              } else {
-                endCallWithNotice(
-                  'Could not answer',
-                  'Something went wrong answering that call. Please try again.'
-                );
-              }
-            });
-          }}
+          onAccept={answerIncomingCall}
           onReject={() => {
             // Claim the teardown before writing: the rejection shows up on this
             // device's own listener almost immediately (Firestore surfaces the

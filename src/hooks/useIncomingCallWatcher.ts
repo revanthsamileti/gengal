@@ -1,12 +1,14 @@
 import { useEffect, useRef } from 'react';
 import type { User } from 'firebase/auth';
-import { subscribeToIncomingCalls, IncomingCall } from '../services/liveRoomService';
+import { subscribeToIncomingCalls, rejectCallOffer, IncomingCall } from '../services/liveRoomService';
 import {
   registerForPushNotificationsAsync,
   dismissCallNotification,
   subscribeToTokenRefresh,
   addNotificationResponseListener,
   getInitialNotificationResponse,
+  CALL_ACTION_ANSWER,
+  CALL_ACTION_DECLINE,
 } from '../services/notificationService';
 
 /**
@@ -62,7 +64,7 @@ const MAX_NOTIFICATION_AGE_MS = 90_000;
  */
 export function useIncomingCallWatcher(
   user: User | null,
-  onIncomingCall: (call: IncomingCall) => void
+  onIncomingCall: (call: IncomingCall, options?: { autoAnswer?: boolean }) => void
 ) {
   // Keep the callback in a ref so a re-render never tears down the listener.
   const handlerRef = useRef(onIncomingCall);
@@ -97,7 +99,7 @@ export function useIncomingCallWatcher(
      * both paths fire simultaneously (e.g., notification tap resumes foreground
      * app at the same instant the Firestore snapshot re-delivers).
      */
-    const handleCall = (call: IncomingCall | null) => {
+    const handleCall = (call: IncomingCall | null, options?: { autoAnswer?: boolean }) => {
       if (!call) {
         const hadHandled = handledRef.current != null;
         handledRef.current = null;
@@ -112,7 +114,7 @@ export function useIncomingCallWatcher(
       const key = `${call.callerUid}:${call.roomId}`;
       if (handledRef.current === key) return;
       handledRef.current = key;
-      handlerRef.current(call);
+      handlerRef.current(call, options);
     };
 
     // PRIMARY DELIVERY: live Firestore listener (works when app is foregrounded).
@@ -146,6 +148,20 @@ export function useIncomingCallWatcher(
     const unsubNotifResponse = addNotificationResponseListener((response: any) => {
       const data = response?.notification?.request?.content?.data;
       const notifDate: number = response?.notification?.date ?? 0;
+      const action: string | undefined = response?.actionIdentifier;
+
+      // Decline is answered here rather than by opening the app: the caller
+      // learns at once instead of ringing out, and the person who declined
+      // stays in whatever they were doing.
+      if (action === CALL_ACTION_DECLINE) {
+        handledRef.current = `${data?.callerUid}:${data?.roomId}`;
+        if (data?.callerUid && data?.roomId) {
+          rejectCallOffer(user.uid, { callerUid: String(data.callerUid), roomId: String(data.roomId) })
+            .catch((e) => console.warn('[IncomingCalls] Declining from the notification failed:', e));
+        }
+        dismissCallNotification().catch(() => {});
+        return;
+      }
       // Discard stale responses. getLastNotificationResponseAsync is not
       // auto-cleared; without this check a user who opens the app an hour after
       // missing a call would be routed to a long-dead offer.
@@ -154,7 +170,7 @@ export function useIncomingCallWatcher(
         return;
       }
       const call = callFromNotificationData(data);
-      if (call) handleCall(call);
+      if (call) handleCall(call, { autoAnswer: action === CALL_ACTION_ANSWER });
     });
 
     // KILLED-APP DELIVERY: the response that caused the app to open is not
@@ -171,7 +187,7 @@ export function useIncomingCallWatcher(
         return;
       }
       const call = callFromNotificationData(data);
-      if (call) handleCall(call);
+      if (call) handleCall(call, { autoAnswer: response?.actionIdentifier === CALL_ACTION_ANSWER });
     });
 
     return () => {

@@ -92,6 +92,20 @@ def test_a_ringing_phone_gets_its_own_call_channel(client, store, sent):
     assert sent[0][2]["channelId"] == "calls_v3"
 
 
+def test_call_carries_the_answer_and_decline_buttons(client, store, sent):
+    call(client)
+
+    # Android only shows the buttons when the notification names the category
+    # the app registered.
+    assert sent[0][2]["categoryId"] == push.CALL_CATEGORY
+
+
+def test_a_message_has_no_call_buttons(client, store, sent):
+    message(client)
+
+    assert "categoryId" not in sent[0][2]
+
+
 def test_switch_off_means_no_call_notification(client, store, sent):
     store["users/%s" % PEER]["isActiveMode"] = False
 

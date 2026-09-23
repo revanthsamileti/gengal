@@ -55,6 +55,17 @@ export const CALL_CHANNEL_ID = 'calls_v2';
  */
 export const RINGING_CALL_CHANNEL_ID = 'calls_v3';
 
+/**
+ * The Answer / Decline buttons on an incoming-call notification.
+ *
+ * Android shows them only when the notification names this category, so the
+ * backend puts `categoryId` in the call payload (see push.py). The ids come
+ * back on the notification response as `actionIdentifier`.
+ */
+export const CALL_CATEGORY_ID = 'incoming_call';
+export const CALL_ACTION_ANSWER = 'answer';
+export const CALL_ACTION_DECLINE = 'decline';
+
 /** Chat messages. Must stay in step with MESSAGE_CHANNEL in backend/push.py. */
 export const MESSAGE_CHANNEL_ID = 'messages';
 
@@ -115,6 +126,21 @@ export async function registerForPushNotificationsAsync(userId: string) {
         lightColor: '#FF7A256D',
       });
     }
+
+    // Declined from the tray without opening the app; answering has to open it,
+    // because a call cannot be held anywhere else.
+    await Notifications.setNotificationCategoryAsync(CALL_CATEGORY_ID, [
+      {
+        identifier: CALL_ACTION_ANSWER,
+        buttonTitle: 'Answer',
+        options: { opensAppToForeground: true },
+      },
+      {
+        identifier: CALL_ACTION_DECLINE,
+        buttonTitle: 'Decline',
+        options: { opensAppToForeground: false, isDestructive: true },
+      },
+    ]);
 
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;

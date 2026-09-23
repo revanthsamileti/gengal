@@ -51,7 +51,13 @@ class TokenGone(Exception):
     """The phone no longer answers to this token (app uninstalled, data cleared)."""
 
 
-def expo_data(title, message, data, channel_id, tag=None):
+# Names the Answer / Decline buttons the app registered (CALL_CATEGORY_ID in
+# src/services/notificationService.ts). An install without that category shows
+# the notification with no buttons, which is the old behaviour.
+CALL_CATEGORY = "incoming_call"
+
+
+def expo_data(title, message, data, channel_id, tag=None, category_id=None):
     """The FCM data map for a notification expo-notifications will display.
 
     Every value is a string, because FCM rejects anything else. There is no
@@ -67,6 +73,8 @@ def expo_data(title, message, data, channel_id, tag=None):
     }
     if tag:
         out["tag"] = str(tag)
+    if category_id:
+        out["categoryId"] = str(category_id)
     return out
 
 
