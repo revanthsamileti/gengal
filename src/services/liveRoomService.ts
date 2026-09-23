@@ -248,6 +248,50 @@ const notifyIncomingCall = async (receiverUid: string, mode: 'call' | 'video') =
 };
 
 /**
+ * How long we will wait for the missed-call push before deleting the offer
+ * anyway. Deleting the offer is what actually ends the call for both sides, so
+ * it must never be held hostage by a slow network.
+ */
+const MISSED_CALL_TIMEOUT_MS = 2500;
+
+/**
+ * Asks the server to turn the receiver's ringing notification into a swipeable
+ * "Missed call".
+ *
+ * The call notification is posted sticky so it cannot be flicked away while
+ * the phone is ringing; the price is that something has to take it down again
+ * when the call dies, or a receiver whose app is closed is left with a
+ * notification they cannot remove.
+ *
+ * Only the caller may do this, and only while the offer is still live -- the
+ * server proves both from the offer document, which is why this runs *before*
+ * clearCallOffer deletes it. Whether the call was actually picked up is the
+ * server's decision too (it reads `status`), so this does not try to guess.
+ *
+ * Never throws: a failure here costs a tidy notification, not a call.
+ */
+const announceMissedCall = async (receiverUid: string, call: CallRef) => {
+  const [{ auth }, { getBackendUrl }] = await Promise.all([
+    import('../config/firebase'),
+    import('./authService'),
+  ]);
+  const user = auth.currentUser;
+  // The receiver clears their own slot too; only the caller has a notification
+  // on somebody else's phone to clean up.
+  if (!user || user.uid !== call.callerUid) return;
+
+  const idToken = await user.getIdToken();
+  await fetch(`${getBackendUrl()}/api/v1/calls/cancel-notify`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    },
+    body: JSON.stringify({ receiverUid, roomId: call.roomId }),
+  });
+};
+
+/**
  * "I am still here", written to the call's own record.
  *
  * These used to live on `incoming_calls/{receiverUid}` alongside the offer,
@@ -432,6 +476,14 @@ export const rejectCallOffer = async (
  * failure every time.
  */
 export const clearCallOffer = async (receiverUid: string, call: CallRef) => {
+  // Before the delete, because the live offer is what proves to the server that
+  // this caller may touch that receiver's notification. Bounded, and it
+  // swallows its own failures: the delete below is what ends the call.
+  await Promise.race([
+    announceMissedCall(receiverUid, call).catch(() => {}),
+    new Promise<void>((resolve) => setTimeout(resolve, MISSED_CALL_TIMEOUT_MS)),
+  ]);
+
   const callRef = doc(db, 'incoming_calls', receiverUid);
   await runTransaction(db, async (tx) => {
     const snap = await tx.get(callRef);
