@@ -30,7 +30,7 @@ MESSAGE_CHANNEL = "messages"
 # Call channels a phone may report in user_private.callChannelId. Posting to a
 # channel an install does not have shows nothing at all, so the id is taken
 # from the device rather than assumed, and only known ones are honoured.
-KNOWN_CALL_CHANNELS = (CALL_CHANNEL, "calls_v3")
+KNOWN_CALL_CHANNELS = (CALL_CHANNEL, "calls_v3", "calls_v4")
 
 
 def call_channel_for(private_data):
@@ -57,13 +57,18 @@ class TokenGone(Exception):
 CALL_CATEGORY = "incoming_call"
 
 
-def expo_data(title, message, data, channel_id, tag=None, category_id=None):
+def expo_data(title, message, data, channel_id, tag=None, category_id=None, sticky=False):
     """The FCM data map for a notification expo-notifications will display.
 
     Every value is a string, because FCM rejects anything else. There is no
     `sound` key on purpose: its value names a custom sound file bundled in the
     app, and 'default' is not one -- that mistake once created the call channel
     with no sound at all. Without the key the channel's own sound plays.
+
+    `sticky` makes the notification unswipeable (Android setOngoing). It is for
+    calls only: a call that is still ringing must not be flicked away by
+    accident. Whatever sets it must also guarantee a way for the notification
+    to leave the tray -- see /api/v1/calls/cancel-notify.
     """
     out = {
         "title": str(title),
@@ -75,6 +80,8 @@ def expo_data(title, message, data, channel_id, tag=None, category_id=None):
         out["tag"] = str(tag)
     if category_id:
         out["categoryId"] = str(category_id)
+    if sticky:
+        out["sticky"] = "true"
     return out
 
 

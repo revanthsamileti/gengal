@@ -69,3 +69,17 @@ def test_call_channel_comes_from_the_phone():
     assert push.call_channel_for({"callChannelId": "calls_v9"}) == push.CALL_CHANNEL
     assert push.call_channel_for({}) == push.CALL_CHANNEL
     assert push.call_channel_for(None) == push.CALL_CHANNEL
+
+
+def test_a_notification_is_swipeable_unless_asked_otherwise():
+    assert "sticky" not in push.expo_data("Title", "Body", {}, "messages")
+
+
+def test_sticky_is_sent_as_a_string_because_fcm_rejects_booleans():
+    data = push.expo_data("Title", "Body", {}, "calls_v4", sticky=True)
+    assert data["sticky"] == "true"
+    assert all(isinstance(v, str) for v in data.values())
+
+
+def test_the_ringing_channel_is_one_the_backend_will_post_to():
+    assert push.call_channel_for({"callChannelId": "calls_v4"}) == "calls_v4"

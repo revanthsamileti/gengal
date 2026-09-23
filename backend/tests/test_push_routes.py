@@ -249,3 +249,15 @@ def test_online_list_keeps_people_who_left_the_app_but_can_get_push(client, stor
     assert PEER in uids
     # Left the app with no way to reach them: not listed.
     assert "ghost" not in uids
+
+
+def test_a_ringing_call_cannot_be_swiped_away(client, store, sent):
+    call(client)
+
+    assert sent[0][2]["sticky"] == "true"
+
+
+def test_a_message_can_still_be_swiped_away(client, store, sent):
+    message(client)
+
+    assert "sticky" not in sent[0][2]

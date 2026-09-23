@@ -1800,6 +1800,7 @@ def notify_incoming_call():
             push.call_channel_for(private_data),
             tag=f"call_{room_id}",
             category_id=push.CALL_CATEGORY,
+            sticky=True,
         )
         delivered = deliver_push(receiver_uid, private_data, payload, push.CALL_TTL_SECONDS)
         return jsonify({"ok": True, "delivered": delivered}), 200
