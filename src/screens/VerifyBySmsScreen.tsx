@@ -48,6 +48,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const [hint, setHint] = useState<SmsPendingHint | undefined>();
   const [smsAvailable, setSmsAvailable] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
   const { locked, run } = useActionLock();
 
   const sessionRef = useRef<SmsSession | null>(null);
@@ -195,6 +196,12 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
         ? 'Your operator’s standard SMS charge may apply.'
         : 'Uses WhatsApp over your mobile data or Wi‑Fi.';
 
+  const steps = [
+    onWhatsApp ? 'Tap Send on WhatsApp' : 'Tap Send SMS',
+    'Send the message that opens — it is already written for you',
+    'You are signed in automatically, with no code to type',
+  ];
+
   return (
     <ScreenShell tone="light">
       <View style={styles.container}>
@@ -203,141 +210,232 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
         </Pressable>
 
         <Text style={styles.title}>Verify your number</Text>
-        <Text style={styles.subtitle}>
-          Send one message from {formatPhone(phone)} to confirm it's yours.
-        </Text>
+        <View style={styles.phoneRow}>
+          <Text style={styles.phone}>{formatPhone(phone)}</Text>
+          <Pressable onPress={goBack} accessibilityRole="button" hitSlop={10}>
+            <Text style={styles.change}>Change</Text>
+          </Pressable>
+        </View>
 
-        {phase === 'starting' && <ActivityIndicator color={PLUM} style={styles.spinner} />}
+        {phase === 'starting' && (
+          <View style={styles.centered}>
+            <ActivityIndicator color={PLUM} />
+            <Text style={styles.waitText}>Getting your code…</Text>
+          </View>
+        )}
 
         {phase === 'waiting' && session && (
           <View>
-            <View style={styles.card}>
-              <Text style={styles.label}>Send this</Text>
-              <View style={styles.codeRow}>
-                <Text style={styles.code} selectable accessibilityLabel={`Message ${session.message}`}>
-                  {session.message}
-                </Text>
-                <Pressable onPress={copyMessage} accessibilityRole="button" accessibilityLabel="Copy message">
-                  <MaterialIcons name={copied ? 'check' : 'content-copy'} size={22} color={PLUM} />
-                </Pressable>
-              </View>
-              {sameNumber ? (
-                <>
-                  <Text style={styles.label}>To</Text>
-                  <Text style={styles.to} selectable>{formatPhone(session.gatewayNumber)}</Text>
-                </>
-              ) : (
-                <>
-                  {onWhatsApp && (
-                    <>
-                      <Text style={styles.label}>On WhatsApp</Text>
-                      <Text style={styles.to} selectable>{formatPhone(session.whatsappNumber ?? '')}</Text>
-                    </>
-                  )}
-                  {bySms && (
-                    <>
-                      <Text style={styles.label}>By SMS</Text>
-                      <Text style={styles.to} selectable>{formatPhone(session.gatewayNumber)}</Text>
-                    </>
-                  )}
-                </>
-              )}
+            {/* Signing in by sending a message is unfamiliar enough that the
+                screen has to say what will happen before it shows a code or a
+                number. Those moved below, under "Send it yourself instead". */}
+            <View style={styles.steps}>
+              {steps.map((text, i) => (
+                <View key={i} style={styles.stepRow}>
+                  <View style={styles.stepDot}>
+                    <Text style={styles.stepNum}>{i + 1}</Text>
+                  </View>
+                  <Text style={styles.stepText}>{text}</Text>
+                </View>
+              ))}
             </View>
 
             {onWhatsApp && (
-              <Pressable onPress={openWhatsApp} style={[styles.primaryBtn, styles.whatsappBtn]} accessibilityRole="button">
-                <MaterialCommunityIcons name="whatsapp" size={22} color="#fff" />
+              <Pressable
+                onPress={openWhatsApp}
+                style={({ pressed }) => [styles.primaryBtn, styles.whatsappBtn, pressed && styles.pressed]}
+                accessibilityRole="button"
+                accessibilityLabel="Send the verification message on WhatsApp"
+              >
+                <MaterialCommunityIcons name="whatsapp" size={24} color="#fff" />
                 <Text style={styles.primaryText}>Send on WhatsApp</Text>
               </Pressable>
             )}
 
-            {bySms &&
-              (smsAvailable ? (
-                <Pressable
-                  onPress={openComposer}
-                  style={onWhatsApp ? styles.secondaryBtn : styles.primaryBtn}
-                  accessibilityRole="button"
-                >
-                  <MaterialIcons name="sms" size={20} color={onWhatsApp ? PLUM : '#fff'} />
-                  <Text style={onWhatsApp ? styles.secondaryText : styles.primaryText}>Send SMS</Text>
-                </Pressable>
-              ) : (
-                <Text style={styles.hint}>
-                  {onWhatsApp ? 'Or, from' : 'From'} the phone with this SIM, text the message above to{' '}
-                  {formatPhone(session.gatewayNumber)}.
-                </Text>
-              ))}
+            {bySms && smsAvailable ? (
+              <Pressable
+                onPress={openComposer}
+                style={({ pressed }) => [
+                  onWhatsApp ? styles.secondaryBtn : styles.primaryBtn,
+                  pressed && styles.pressed,
+                ]}
+                accessibilityRole="button"
+                accessibilityLabel="Send the verification message by SMS"
+              >
+                <MaterialIcons name="sms" size={20} color={onWhatsApp ? PLUM : '#fff'} />
+                <Text style={onWhatsApp ? styles.secondaryText : styles.primaryText}>Send SMS</Text>
+              </Pressable>
+            ) : null}
+
+            <View style={styles.waitRow}>
+              <ActivityIndicator color={PLUM} size="small" />
+              <Text style={styles.waitText}>Waiting for your message</Text>
+              <Text style={styles.clock}>{formatClock(secondsLeft)}</Text>
+            </View>
 
             {hint ? <Text style={styles.notice}>{hintText(hint, phone)}</Text> : null}
             {notice ? <Text style={styles.notice}>{notice}</Text> : null}
 
-            <View style={styles.waitRow}>
-              <ActivityIndicator color={PLUM} />
-              <Text style={styles.waitText}>Waiting for your message… {formatClock(secondsLeft)}</Text>
-            </View>
-            <Text style={styles.fine}>{finePrint}</Text>
+            {/* Still reachable for a phone without WhatsApp, a dual-SIM
+                handset, or someone typing it on another device. */}
+            <Pressable
+              onPress={() => setManualOpen((v) => !v)}
+              style={styles.manualToggle}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: manualOpen }}
+            >
+              <Text style={styles.manualToggleText}>Send it yourself instead</Text>
+              <MaterialIcons name={manualOpen ? 'expand-less' : 'expand-more'} size={20} color={PLUM} />
+            </Pressable>
+
+            {manualOpen && (
+              <View style={styles.card}>
+                <Text style={styles.label}>Message</Text>
+                <View style={styles.codeRow}>
+                  <Text style={styles.code} selectable accessibilityLabel={`Message ${session.message}`}>
+                    {session.message}
+                  </Text>
+                  <Pressable onPress={copyMessage} accessibilityRole="button" accessibilityLabel="Copy message" hitSlop={10}>
+                    <MaterialIcons name={copied ? 'check' : 'content-copy'} size={22} color={copied ? '#15803D' : PLUM} />
+                  </Pressable>
+                </View>
+                {sameNumber ? (
+                  <>
+                    <Text style={styles.label}>Send to</Text>
+                    <Text style={styles.to} selectable>{formatPhone(session.gatewayNumber)}</Text>
+                  </>
+                ) : (
+                  <>
+                    {onWhatsApp && (
+                      <>
+                        <Text style={styles.label}>On WhatsApp</Text>
+                        <Text style={styles.to} selectable>{formatPhone(session.whatsappNumber ?? '')}</Text>
+                      </>
+                    )}
+                    {bySms && (
+                      <>
+                        <Text style={styles.label}>By SMS</Text>
+                        <Text style={styles.to} selectable>{formatPhone(session.gatewayNumber)}</Text>
+                      </>
+                    )}
+                  </>
+                )}
+                <Text style={styles.fine}>
+                  Send it from {formatPhone(phone)}, the number you are verifying. {finePrint}
+                </Text>
+              </View>
+            )}
           </View>
         )}
 
         {phase === 'signingIn' && (
-          <View style={styles.waitRow}>
+          <View style={styles.centered}>
             <ActivityIndicator color={PLUM} />
             <Text style={styles.waitText}>Signing you in…</Text>
           </View>
         )}
 
         {phase === 'verified' && (
-          <Pressable
-            onPress={() => navigate('ProfileDetails', { phone, token: newUserToken.current })}
-            style={styles.primaryBtn}
-            accessibilityRole="button"
-          >
-            <MaterialIcons name="check-circle" size={20} color="#fff" />
-            <Text style={styles.primaryText}>Number verified — Continue</Text>
-          </Pressable>
+          <View style={styles.centered}>
+            <View style={styles.tick}>
+              <MaterialIcons name="check" size={34} color="#fff" />
+            </View>
+            <Text style={styles.verified}>Number verified</Text>
+            <Pressable
+              onPress={() => navigate('ProfileDetails', { phone, token: newUserToken.current })}
+              style={({ pressed }) => [styles.primaryBtn, styles.wide, pressed && styles.pressed]}
+              accessibilityRole="button"
+            >
+              <Text style={styles.primaryText}>Continue</Text>
+            </Pressable>
+          </View>
         )}
 
         {(phase === 'expired' || phase === 'error') && (
           <View>
             <Text style={styles.error}>
-              {phase === 'expired' ? 'That code expired before your message arrived.' : errorMsg}
+              {phase === 'expired'
+                ? 'That code expired before your message arrived. A new one lasts ten minutes.'
+                : errorMsg}
             </Text>
-            <Pressable onPress={begin} disabled={locked} style={[styles.primaryBtn, locked && styles.disabled]} accessibilityRole="button">
-              <Text style={styles.primaryText}>Try again</Text>
+            <Pressable
+              onPress={begin}
+              disabled={locked}
+              style={({ pressed }) => [styles.primaryBtn, locked && styles.disabled, pressed && styles.pressed]}
+              accessibilityRole="button"
+            >
+              <Text style={styles.primaryText}>Get a new code</Text>
             </Pressable>
           </View>
         )}
-
-        <Pressable onPress={goBack} accessibilityRole="button">
-          <Text style={styles.link}>Wrong number? Change it</Text>
-        </Pressable>
       </View>
     </ScreenShell>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, paddingHorizontal: 24, paddingTop: 16 },
+  container: { flex: 1, paddingHorizontal: 24, paddingTop: 8 },
   backBtn: { width: 44, height: 44, justifyContent: 'center' },
-  title: { fontSize: 26, fontWeight: '800', color: PLUM, marginTop: 8 },
-  subtitle: { fontSize: 15, color: '#4B3B4B', marginTop: 6, marginBottom: 20 },
-  spinner: { marginTop: 32 },
-  card: { backgroundColor: '#FFFFFF', borderRadius: 16, padding: 18, marginBottom: 16, borderWidth: 1, borderColor: '#EADCEA' },
-  label: { fontSize: 12, fontWeight: '700', color: '#8A6F8A', textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 6 },
-  codeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: 6 },
-  code: { fontSize: 28, fontWeight: '800', color: PLUM, letterSpacing: 2 },
-  to: { fontSize: 18, fontWeight: '600', color: '#2B1B2B', marginTop: 4 },
-  primaryBtn: { flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', backgroundColor: PLUM, borderRadius: 14, paddingVertical: 14, marginTop: 8 },
+  title: { fontSize: 28, fontWeight: '800', color: PLUM, fontFamily: 'serif', marginTop: 4 },
+  phoneRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 6, marginBottom: 26 },
+  phone: { fontSize: 16, fontWeight: '700', color: '#2B1B2B' },
+  change: { fontSize: 14, color: PLUM, textDecorationLine: 'underline' },
+
+  steps: { gap: 14, marginBottom: 26 },
+  stepRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12 },
+  stepDot: {
+    width: 26, height: 26, borderRadius: 13, backgroundColor: '#F3E4F3',
+    alignItems: 'center', justifyContent: 'center', marginTop: 1,
+  },
+  stepNum: { fontSize: 13, fontWeight: '800', color: PLUM },
+  stepText: { flex: 1, fontSize: 15, lineHeight: 21, color: '#3B2B3B' },
+
+  primaryBtn: {
+    flexDirection: 'row', gap: 10, alignItems: 'center', justifyContent: 'center',
+    backgroundColor: PLUM, borderRadius: 16, paddingVertical: 16, marginTop: 10,
+  },
   whatsappBtn: { backgroundColor: WHATSAPP_GREEN },
-  primaryText: { color: '#FFFFFF', fontSize: 16, fontWeight: '700' },
-  secondaryBtn: { flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', borderRadius: 14, paddingVertical: 13, marginTop: 10, borderWidth: 1.5, borderColor: PLUM },
-  secondaryText: { color: PLUM, fontSize: 16, fontWeight: '700' },
+  primaryText: { color: '#FFFFFF', fontSize: 17, fontWeight: '700' },
+  secondaryBtn: {
+    flexDirection: 'row', gap: 10, alignItems: 'center', justifyContent: 'center',
+    borderRadius: 16, paddingVertical: 15, marginTop: 12, borderWidth: 1.5, borderColor: PLUM,
+  },
+  secondaryText: { color: PLUM, fontSize: 17, fontWeight: '700' },
+  pressed: { opacity: 0.85 },
   disabled: { opacity: 0.6 },
-  hint: { fontSize: 14, color: '#4B3B4B', marginTop: 10 },
-  notice: { fontSize: 13, color: '#B45309', marginTop: 10, textAlign: 'center' },
-  waitRow: { flexDirection: 'row', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 22 },
+  wide: { alignSelf: 'stretch' },
+
+  waitRow: { flexDirection: 'row', gap: 10, alignItems: 'center', justifyContent: 'center', marginTop: 24 },
   waitText: { fontSize: 15, color: '#4B3B4B' },
-  fine: { fontSize: 12, color: '#8A6F8A', textAlign: 'center', marginTop: 10 },
-  error: { fontSize: 15, color: '#DC2626', marginBottom: 8, textAlign: 'center' },
-  link: { fontSize: 14, color: PLUM, textAlign: 'center', marginTop: 24, textDecorationLine: 'underline' },
+  clock: {
+    fontSize: 13, fontWeight: '700', color: '#8A6F8A',
+    backgroundColor: '#F6EEF6', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2,
+  },
+  notice: { fontSize: 13, color: '#B45309', marginTop: 12, textAlign: 'center', lineHeight: 18 },
+
+  manualToggle: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
+    marginTop: 26, paddingVertical: 10,
+  },
+  manualToggleText: { fontSize: 14, fontWeight: '600', color: PLUM },
+  card: {
+    backgroundColor: '#FFFFFF', borderRadius: 16, padding: 18,
+    borderWidth: 1, borderColor: '#EADCEA',
+  },
+  label: {
+    fontSize: 12, fontWeight: '700', color: '#8A6F8A',
+    textTransform: 'uppercase', letterSpacing: 0.6, marginTop: 10,
+  },
+  codeRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginVertical: 6 },
+  code: { fontSize: 24, fontWeight: '800', color: PLUM, letterSpacing: 1.5 },
+  to: { fontSize: 17, fontWeight: '600', color: '#2B1B2B', marginTop: 4 },
+  fine: { fontSize: 12, color: '#8A6F8A', marginTop: 14, lineHeight: 17 },
+
+  centered: { alignItems: 'center', gap: 14, marginTop: 40 },
+  tick: {
+    width: 64, height: 64, borderRadius: 32, backgroundColor: '#15803D',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  verified: { fontSize: 20, fontWeight: '800', color: PLUM, fontFamily: 'serif' },
+  error: { fontSize: 15, color: '#DC2626', marginTop: 30, marginBottom: 10, textAlign: 'center', lineHeight: 21 },
 });
