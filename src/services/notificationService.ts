@@ -46,14 +46,33 @@ export const CALL_CHANNEL_ID = 'calls_v2';
  * The call channel that rings with the app's own ringtone rather than a single
  * notification blip. Android takes an incoming call's sound from its channel
  * and freezes a channel's settings once created, so a ringing channel can only
- * be a new one — hence the v3 id beside the v2 above.
+ * ever be a new one — hence the version suffix.
  *
- * `ringtone.wav` is bundled natively by the expo-notifications plugin (see
- * app.json), so only builds that carry it can use this channel: posting to a
- * channel that does not exist shows nothing at all. Which channel the backend
- * may use is therefore recorded per device in user_private.callChannelId.
+ * v3 is burnt. It was created by a JS-only update, before any build carried
+ * `ringtone.wav`, and expo-notifications' SoundResolver silently substitutes
+ * the system default when a raw resource is missing. Those installs froze the
+ * channel with the default sound and can never be repaired — so v3 would still
+ * be silent of the ringtone even now that the file ships. `ensureRingingChannel`
+ * below is what stops v4 going the same way.
+ *
+ * Which channel the backend may post to is recorded per device in
+ * user_private.callChannelId: posting to a channel a phone lacks shows nothing.
  */
-export const RINGING_CALL_CHANNEL_ID = 'calls_v3';
+export const RINGING_CALL_CHANNEL_ID = 'calls_v4';
+
+/** Bundled natively by the expo-notifications plugin; see app.json. */
+const RINGTONE_FILE = 'ringtone_long.ogg';
+/** Android drops the extension: the channel's sound URI ends in /raw/<this>. */
+const RINGTONE_RESOURCE = 'ringtone_long';
+/** Poisoned as described above; deleted so it stops cluttering system settings. */
+const RETIRED_CALL_CHANNEL_ID = 'calls_v3';
+
+/**
+ * Vibrates for the length of the ring rather than the single burst a
+ * notification gets. The first entry is the delay before the first buzz.
+ */
+const RING_VIBRATION: number[] = [0];
+for (let i = 0; i < 22; i++) RING_VIBRATION.push(1000, 1000);
 
 /**
  * The Answer / Decline buttons on an incoming-call notification.
@@ -80,6 +99,49 @@ export const MESSAGE_CHANNEL_ID = 'messages';
 let pushReachable = false;
 export const isPushReachable = () => pushReachable;
 
+/**
+ * Creates the ringing channel and proves it actually rings.
+ *
+ * A channel whose sound file is missing is not rejected — expo-notifications
+ * logs a warning and Android stores the system default instead, permanently,
+ * because channel settings freeze on creation. That is exactly how `calls_v3`
+ * was lost. So the channel is read back and its sound inspected; if this build
+ * does not carry the ringtone, the channel is deleted again and the phone
+ * reports the plain call channel, leaving the id clean for a build that does.
+ *
+ * Returns the channel id the backend should actually post calls to.
+ */
+async function ensureRingingChannel(): Promise<string> {
+  try {
+    await Notifications.setNotificationChannelAsync(RINGING_CALL_CHANNEL_ID, {
+      name: 'Incoming calls (ringing)',
+      importance: Notifications.AndroidImportance.MAX,
+      // Names the bundled res/raw resource, not a system sound.
+      sound: RINGTONE_FILE,
+      vibrationPattern: RING_VIBRATION,
+      // So the caller's name is readable on a locked phone.
+      lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+      lightColor: '#FF231F7C',
+    });
+
+    const channel = await Notifications.getNotificationChannelAsync(RINGING_CALL_CHANNEL_ID);
+    const sound = typeof channel?.sound === 'string' ? channel.sound : '';
+    if (sound.includes(RINGTONE_RESOURCE)) {
+      await Notifications.deleteNotificationChannelAsync?.(RETIRED_CALL_CHANNEL_ID);
+      return RINGING_CALL_CHANNEL_ID;
+    }
+
+    console.warn('[NotificationService] This build has no ringtone; staying on the plain call channel.');
+    await Notifications.deleteNotificationChannelAsync?.(RINGING_CALL_CHANNEL_ID);
+    return CALL_CHANNEL_ID;
+  } catch (e) {
+    // Could not verify — reporting a channel that may be silent is worse than
+    // reporting the one every build has.
+    console.warn('[NotificationService] Ringing channel check failed:', e);
+    return CALL_CHANNEL_ID;
+  }
+}
+
 const getProjectId = () =>
   (Constants.expoConfig as any)?.extra?.eas?.projectId ??
   (Constants as any)?.easConfig?.projectId;
@@ -89,6 +151,10 @@ export async function registerForPushNotificationsAsync(userId: string) {
     console.log('[NotificationService] Notifications module is not loaded.');
     return null;
   }
+
+  // What the backend may post calls to. Stays the plain channel unless this
+  // build proves it can actually ring (ensureRingingChannel).
+  let callChannelId = CALL_CHANNEL_ID;
 
   try {
     // The Android channel must exist before a high-priority call notification
@@ -111,14 +177,7 @@ export async function registerForPushNotificationsAsync(userId: string) {
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#FF231F7C',
       });
-      await Notifications.setNotificationChannelAsync(RINGING_CALL_CHANNEL_ID, {
-        name: 'Incoming calls (ringing)',
-        importance: Notifications.AndroidImportance.MAX,
-        // Names the bundled res/raw resource, not a system sound.
-        sound: 'ringtone.wav',
-        vibrationPattern: [0, 800, 600, 800, 600, 800],
-        lightColor: '#FF231F7C',
-      });
+      callChannelId = await ensureRingingChannel();
       await Notifications.setNotificationChannelAsync(MESSAGE_CHANNEL_ID, {
         name: 'Messages',
         importance: Notifications.AndroidImportance.HIGH,
@@ -166,9 +225,10 @@ export async function registerForPushNotificationsAsync(userId: string) {
     const fcmToken = Platform.OS === 'android' && typeof device?.data === 'string' ? device.data : null;
     if (fcmToken) {
       // callChannelId travels with the token: it says which call channel this
-      // install actually has, so the backend never posts to a missing one.
-      // Firestore rejects undefined, and this branch is Android-only anyway.
-      await savePrivateUserData(userId, { fcmToken, callChannelId: RINGING_CALL_CHANNEL_ID });
+      // install actually has *and can ring on*, so the backend never posts to a
+      // missing or silent one. Firestore rejects undefined, and this branch is
+      // Android-only anyway.
+      await savePrivateUserData(userId, { fcmToken, callChannelId });
       await setPushReachable(userId, true);
       pushReachable = true;
     }
