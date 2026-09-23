@@ -552,6 +552,20 @@ export const touchLastActive = async (uid: string) => {
 };
 
 /** Records whether this phone can get calls as notifications. See isListedOnline. */
+/**
+ * What is already recorded about whether this phone can be reached by a push.
+ *
+ * The app keeps the same answer in memory, but that copy starts as `false` on
+ * every launch, while this one survives. Leaving the app consults it, so a
+ * session that has not finished registering yet does not conclude that nobody
+ * could reach this phone. Defaults to `false` when the document or the field is
+ * missing, which is the honest answer for an install that never registered.
+ */
+export const getPushReachable = async (uid: string): Promise<boolean> => {
+  const userSnap = await getDoc(doc(db, 'users', uid));
+  return userSnap.exists() && userSnap.data().pushReachable === true;
+};
+
 export const setPushReachable = async (uid: string, reachable: boolean) => {
   const userRef = doc(db, 'users', uid);
   const userSnap = await getDoc(userRef);
@@ -591,9 +605,15 @@ export const updateUserStatus = async (uid: string, isOnline: boolean) => {
     // profile document exists.
     if (!userSnap.exists()) return;
     const isActiveMode = userSnap.data().isActiveMode !== false;
+    // isSessionActive means "signed in", not "app on screen". Leaving the app
+    // used to clear it, and isListedOnline rejects on isSessionActive === false
+    // *before* it reaches the pushReachable escape hatch -- so one wrong
+    // offline write hid someone from everybody until they reopened the app,
+    // even though their phone could still take calls. Ending a session is
+    // markSignedOut's job.
     await updateDoc(userRef, {
       isOnline: isOnline && isActiveMode,
-      isSessionActive: isOnline,
+      ...(isOnline ? { isSessionActive: true } : {}),
       lastActive: serverTimestamp()
     });
   } catch (error) {

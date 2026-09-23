@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
-import { savePrivateUserData, setPushReachable } from './userService';
+import { savePrivateUserData, setPushReachable, getPushReachable } from './userService';
 
 /**
  * The conversation on screen right now, so a message notification for it is
@@ -98,6 +98,32 @@ export const MESSAGE_CHANNEL_ID = 'messages';
  */
 let pushReachable = false;
 export const isPushReachable = () => pushReachable;
+
+/**
+ * Seeds the flag above from what is already stored for this account.
+ *
+ * The flag is per-launch: it starts `false` and only becomes `true` once
+ * registration has fetched a token and written it, which takes two round trips
+ * and can fail outright on a weak network. Until then, leaving the app took the
+ * pessimistic branch and wrote the person offline -- so swiping GenGal off the
+ * recents list hid them from everyone, despite their phone being perfectly able
+ * to receive the call.
+ *
+ * A phone that was reachable last time is reachable now: the token outlives the
+ * process, and the backend is what clears `pushReachable` when a token stops
+ * working. Reading it back turns a cold start into a known state instead of a
+ * pessimistic guess.
+ *
+ * Never throws, and never downgrades a flag that registration has already set.
+ */
+export async function primePushReachable(userId: string): Promise<void> {
+  if (pushReachable) return;
+  try {
+    if (await getPushReachable(userId)) pushReachable = true;
+  } catch (e) {
+    console.warn('[NotificationService] Could not read stored push reachability:', e);
+  }
+}
 
 /**
  * Creates the ringing channel and proves it actually rings.

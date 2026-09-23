@@ -3,6 +3,7 @@ import type { User } from 'firebase/auth';
 import { subscribeToIncomingCalls, rejectCallOffer, IncomingCall } from '../services/liveRoomService';
 import {
   registerForPushNotificationsAsync,
+  primePushReachable,
   dismissCallNotification,
   subscribeToTokenRefresh,
   addNotificationResponseListener,
@@ -80,6 +81,11 @@ export function useIncomingCallWatcher(
       handledRef.current = null;
       return;
     }
+
+    // What this phone already knows about its own reachability, before the
+    // slower registration below can confirm it. Without this, backgrounding
+    // during the registration window wrote the person offline.
+    primePushReachable(user.uid).catch(() => {});
 
     // Register / refresh push token on login.
     registerForPushNotificationsAsync(user.uid).catch((e) =>
