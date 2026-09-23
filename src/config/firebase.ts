@@ -1,7 +1,7 @@
 import { initializeApp, getApp, getApps } from 'firebase/app';
 import * as FirebaseAuth from 'firebase/auth';
 import { initializeAuth, getAuth } from 'firebase/auth';
-import { getFirestore } from 'firebase/firestore';
+import { getFirestore, initializeFirestore } from 'firebase/firestore';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
@@ -48,4 +48,24 @@ const resolveAuth = () => {
 };
 
 export const auth = resolveAuth();
-export const db = getFirestore(app);
+/**
+ * Firestore, told to detect when its streaming connection is not getting
+ * through.
+ *
+ * The default transport is a long-lived WebChannel stream. Indian mobile
+ * networks, hotel and office Wi-Fi and some carrier proxies buffer or cut that
+ * stream, which shows up as
+ *   "WebChannelConnection RPC 'Listen' stream transport errored"
+ * in the log and, on the phone, as lists and chats that quietly stop updating
+ * until the app is restarted — exactly the "nothing works on bad internet"
+ * complaint. Auto-detect falls back to long polling on those networks and
+ * keeps the streaming path everywhere else.
+ */
+export const db = (() => {
+  try {
+    return initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+  } catch {
+    // Already initialised (a second import, or a fast refresh).
+    return getFirestore(app);
+  }
+})();

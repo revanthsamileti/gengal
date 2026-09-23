@@ -59,7 +59,10 @@
       [
         "expo-notifications",
         {
-          "defaultChannel": "calls"
+          "defaultChannel": "calls",
+          "sounds": [
+            "./assets/ringtone.wav"
+          ]
         }
       ]
     ],

@@ -151,6 +151,8 @@ export interface UserPrivateData {
   expoPushToken?: string;
   /** Firebase Cloud Messaging token; what backend/push.py sends to. */
   fcmToken?: string;
+  /** Which Android call channel this install has (see notificationService). */
+  callChannelId?: string;
 }
 
 export const savePrivateUserData = async (uid: string, data: Partial<UserPrivateData>) => {

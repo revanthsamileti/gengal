@@ -84,6 +84,14 @@ def test_call_goes_out_over_fcm_on_the_call_channel(client, store, sent):
     assert ttl <= 60
 
 
+def test_a_ringing_phone_gets_its_own_call_channel(client, store, sent):
+    store["user_private/%s" % PEER]["callChannelId"] = "calls_v3"
+
+    call(client)
+
+    assert sent[0][2]["channelId"] == "calls_v3"
+
+
 def test_switch_off_means_no_call_notification(client, store, sent):
     store["users/%s" % PEER]["isActiveMode"] = False
 

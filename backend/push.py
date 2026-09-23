@@ -27,6 +27,17 @@ import json
 CALL_CHANNEL = "calls_v2"
 MESSAGE_CHANNEL = "messages"
 
+# Call channels a phone may report in user_private.callChannelId. Posting to a
+# channel an install does not have shows nothing at all, so the id is taken
+# from the device rather than assumed, and only known ones are honoured.
+KNOWN_CALL_CHANNELS = (CALL_CHANNEL, "calls_v3")
+
+
+def call_channel_for(private_data):
+    """The call channel this phone says it has, else the one every build has."""
+    reported = (private_data or {}).get("callChannelId")
+    return reported if reported in KNOWN_CALL_CHANNELS else CALL_CHANNEL
+
 # How long FCM keeps trying to deliver. A call is dead after its 60 s offer
 # window, and ringing it later only confuses; a message is still worth
 # delivering to a phone that was off for the night.

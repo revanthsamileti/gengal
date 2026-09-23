@@ -42,6 +42,19 @@ try {
  */
 export const CALL_CHANNEL_ID = 'calls_v2';
 
+/**
+ * The call channel that rings with the app's own ringtone rather than a single
+ * notification blip. Android takes an incoming call's sound from its channel
+ * and freezes a channel's settings once created, so a ringing channel can only
+ * be a new one — hence the v3 id beside the v2 above.
+ *
+ * `ringtone.wav` is bundled natively by the expo-notifications plugin (see
+ * app.json), so only builds that carry it can use this channel: posting to a
+ * channel that does not exist shows nothing at all. Which channel the backend
+ * may use is therefore recorded per device in user_private.callChannelId.
+ */
+export const RINGING_CALL_CHANNEL_ID = 'calls_v3';
+
 /** Chat messages. Must stay in step with MESSAGE_CHANNEL in backend/push.py. */
 export const MESSAGE_CHANNEL_ID = 'messages';
 
@@ -87,6 +100,14 @@ export async function registerForPushNotificationsAsync(userId: string) {
         vibrationPattern: [0, 250, 250, 250],
         lightColor: '#FF231F7C',
       });
+      await Notifications.setNotificationChannelAsync(RINGING_CALL_CHANNEL_ID, {
+        name: 'Incoming calls (ringing)',
+        importance: Notifications.AndroidImportance.MAX,
+        // Names the bundled res/raw resource, not a system sound.
+        sound: 'ringtone.wav',
+        vibrationPattern: [0, 800, 600, 800, 600, 800],
+        lightColor: '#FF231F7C',
+      });
       await Notifications.setNotificationChannelAsync(MESSAGE_CHANNEL_ID, {
         name: 'Messages',
         importance: Notifications.AndroidImportance.HIGH,
@@ -118,7 +139,10 @@ export async function registerForPushNotificationsAsync(userId: string) {
     const device = await Notifications.getDevicePushTokenAsync();
     const fcmToken = Platform.OS === 'android' && typeof device?.data === 'string' ? device.data : null;
     if (fcmToken) {
-      await savePrivateUserData(userId, { fcmToken });
+      // callChannelId travels with the token: it says which call channel this
+      // install actually has, so the backend never posts to a missing one.
+      // Firestore rejects undefined, and this branch is Android-only anyway.
+      await savePrivateUserData(userId, { fcmToken, callChannelId: RINGING_CALL_CHANNEL_ID });
       await setPushReachable(userId, true);
       pushReachable = true;
     }

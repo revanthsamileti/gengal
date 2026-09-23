@@ -59,3 +59,13 @@ def test_chat_peer():
     assert push.chat_peer("aaa_bbb_ccc", "aaa") is None
     assert push.chat_peer("aaa_aaa", "aaa") is None
     assert push.chat_peer("", "aaa") is None
+
+
+def test_call_channel_comes_from_the_phone():
+    # A phone that reports the ringing channel gets it.
+    assert push.call_channel_for({"callChannelId": "calls_v3"}) == "calls_v3"
+    # Anything unknown, missing, or absent falls back to the channel every
+    # install has — posting to a channel a phone lacks shows nothing at all.
+    assert push.call_channel_for({"callChannelId": "calls_v9"}) == push.CALL_CHANNEL
+    assert push.call_channel_for({}) == push.CALL_CHANNEL
+    assert push.call_channel_for(None) == push.CALL_CHANNEL

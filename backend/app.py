@@ -1797,7 +1797,7 @@ def notify_incoming_call():
                 "callerName": caller_name,
                 "isIncomingPending": True,
             },
-            push.CALL_CHANNEL,
+            push.call_channel_for(private_data),
             tag=f"call_{room_id}",
         )
         delivered = deliver_push(receiver_uid, private_data, payload, push.CALL_TTL_SECONDS)
