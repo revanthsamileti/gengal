@@ -3,7 +3,6 @@ import type { User } from 'firebase/auth';
 import { subscribeToIncomingCalls, rejectCallOffer, IncomingCall } from '../services/liveRoomService';
 import {
   registerForPushNotificationsAsync,
-  primePushReachable,
   dismissCallNotification,
   subscribeToTokenRefresh,
   addNotificationResponseListener,
@@ -81,11 +80,6 @@ export function useIncomingCallWatcher(
       handledRef.current = null;
       return;
     }
-
-    // What this phone already knows about its own reachability, before the
-    // slower registration below can confirm it. Without this, backgrounding
-    // during the registration window wrote the person offline.
-    primePushReachable(user.uid).catch(() => {});
 
     // Register / refresh push token on login.
     registerForPushNotificationsAsync(user.uid).catch((e) =>
@@ -194,6 +188,18 @@ export function useIncomingCallWatcher(
       const notifDate: number = response?.notification?.date ?? 0;
       if (Date.now() - notifDate > MAX_NOTIFICATION_AGE_MS) {
         console.log('[IncomingCalls] Initial notification response is too old; ignoring.');
+        return;
+      }
+      // Decline had no answer on this path at all: it only ever computed
+      // autoAnswer, so a decline that did reach a cold start walked straight
+      // into the call screen -- the opposite of what was asked for.
+      if (response?.actionIdentifier === CALL_ACTION_DECLINE) {
+        handledRef.current = `${data?.callerUid}:${data?.roomId}`;
+        if (data?.callerUid && data?.roomId) {
+          rejectCallOffer(user.uid, { callerUid: String(data.callerUid), roomId: String(data.roomId) })
+            .catch((e) => console.warn('[IncomingCalls] Declining on launch failed:', e));
+        }
+        dismissCallNotification().catch(() => {});
         return;
       }
       const call = callFromNotificationData(data);

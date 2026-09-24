@@ -76,7 +76,10 @@ def test_call_goes_out_over_fcm_on_the_call_channel(client, store, sent):
     (transport, token, data, ttl), = sent
     assert (transport, token) == ("fcm", "fcm-peer")
     assert data["channelId"] == push.CALL_CHANNEL
-    assert data["title"] == "Incoming Video Call"
+    # The caller is the headline, as on a real incoming call.
+    assert data["title"] == "Sai"
+    assert data["message"] == "Incoming video call"
+    assert data["color"] == push.BRAND_COLOR
     body = json.loads(data["body"])
     assert body["roomId"] == "room_1" and body["callerUid"] == ME and body["mode"] == "video"
     assert body["callerName"] == "Sai"
@@ -238,7 +241,13 @@ def test_long_message_is_trimmed(client, store, sent):
 
 # --- who counts as online ---------------------------------------------------
 
-def test_online_list_keeps_people_who_left_the_app_but_can_get_push(client, store):
+def test_online_list_drops_people_who_left_the_app(client, store):
+    """Being reachable by a push is not the same as being there.
+
+    The list used to keep anyone whose phone could still take a call, which
+    left people who had swiped the app away sitting in Online Now for hours.
+    Push reachability still decides call *delivery*; it no longer decides this.
+    """
     stale = now() - timedelta(hours=3)
     store["users/%s" % PEER]["lastActive"] = stale
     store["users/ghost"] = {"nickname": "Ghost", "isOnline": True, "lastActive": stale}
@@ -246,9 +255,15 @@ def test_online_list_keeps_people_who_left_the_app_but_can_get_push(client, stor
     r = client.post("/api/v1/users/online", json={"currentUid": ME})
 
     uids = [u["uid"] for u in r.get_json()["users"]]
-    assert PEER in uids
-    # Left the app with no way to reach them: not listed.
+    # PEER has pushReachable: True and is still dropped -- that is the point.
+    assert PEER not in uids
     assert "ghost" not in uids
+
+
+def test_online_list_keeps_people_who_are_still_in_the_app(client, store):
+    r = client.post("/api/v1/users/online", json={"currentUid": ME})
+
+    assert PEER in [u["uid"] for u in r.get_json()["users"]]
 
 
 def test_a_ringing_call_cannot_be_swiped_away(client, store, sent):
@@ -279,7 +294,8 @@ def test_a_missed_call_replaces_the_ringing_notification(client, store, sent):
     assert data["tag"] == "call_room_1"
     assert data["channelId"] == push.MESSAGE_CHANNEL
     assert "sticky" not in data
-    assert data["title"] == "Missed call"
+    assert data["title"] == "Sai"
+    assert data["message"] == "Missed call"
     assert json.loads(data["body"])["type"] == "call_missed"
 
 

@@ -270,7 +270,12 @@ export const isListedOnline = (user: UserProfile, now: number = Date.now()): boo
   if (user.isOnline !== true) return false;
   if (user.isActiveMode === false) return false;
   if (user.isSessionActive === false) return false;
-  if (user.pushReachable === true) return true;
+  // `pushReachable` used to keep someone listed indefinitely while they were
+  // away, on the grounds that a call could still reach their phone. It made
+  // people who had swiped GenGal off their recents sit in Online Now for
+  // hours, which is worse than missing them: the list stopped meaning
+  // anything. Being reachable is not the same as being there, and it still
+  // decides call delivery -- it just no longer decides this.
   const lastActiveMs = toMillis(user.lastActive);
   return lastActiveMs > 0 && now - lastActiveMs <= ONLINE_FRESHNESS_MS;
 };
@@ -552,20 +557,6 @@ export const touchLastActive = async (uid: string) => {
 };
 
 /** Records whether this phone can get calls as notifications. See isListedOnline. */
-/**
- * What is already recorded about whether this phone can be reached by a push.
- *
- * The app keeps the same answer in memory, but that copy starts as `false` on
- * every launch, while this one survives. Leaving the app consults it, so a
- * session that has not finished registering yet does not conclude that nobody
- * could reach this phone. Defaults to `false` when the document or the field is
- * missing, which is the honest answer for an install that never registered.
- */
-export const getPushReachable = async (uid: string): Promise<boolean> => {
-  const userSnap = await getDoc(doc(db, 'users', uid));
-  return userSnap.exists() && userSnap.data().pushReachable === true;
-};
-
 export const setPushReachable = async (uid: string, reachable: boolean) => {
   const userRef = doc(db, 'users', uid);
   const userSnap = await getDoc(userRef);

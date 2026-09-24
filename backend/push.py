@@ -57,7 +57,13 @@ class TokenGone(Exception):
 CALL_CATEGORY = "incoming_call"
 
 
-def expo_data(title, message, data, channel_id, tag=None, category_id=None, sticky=False):
+# The accent Android paints the app name and small icon with. GenGal's plum,
+# matching PLUM in the app's screens.
+BRAND_COLOR = "#5A155A"
+
+
+def expo_data(title, message, data, channel_id, tag=None, category_id=None, sticky=False,
+              color=BRAND_COLOR):
     """The FCM data map for a notification expo-notifications will display.
 
     Every value is a string, because FCM rejects anything else. There is no
@@ -82,6 +88,8 @@ def expo_data(title, message, data, channel_id, tag=None, category_id=None, stic
         out["categoryId"] = str(category_id)
     if sticky:
         out["sticky"] = "true"
+    if color:
+        out["color"] = str(color)
     return out
 
 

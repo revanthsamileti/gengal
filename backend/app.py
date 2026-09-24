@@ -1584,11 +1584,12 @@ def get_online_users_admin():
             u_data = serialize_doc(raw_dict)
             if not u_data.get('nickname') and not u_data.get('username'):
                 continue
-            # Out of the app for a while: still listed if a call can reach
-            # them as a notification (see pushReachable in userService.ts).
+            # Out of the app for a while: not listed. Being reachable by a
+            # push is not the same as being there -- keeping those people
+            # listed left anyone who had swiped the app away sitting in
+            # Online Now for hours (see isListedOnline in userService.ts).
             last_act = u_data.get('lastActive', 0)
-            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms) \
-                    and u_data.get('pushReachable') is not True:
+            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms):
                 continue
             if vip_only and not u_data.get('avatarUrl'):
                 continue
@@ -1626,11 +1627,12 @@ def get_recent_users_admin():
             u_data = serialize_doc(raw_dict)
             if not u_data.get('nickname') and not u_data.get('username'):
                 continue
-            # Out of the app for a while: still listed if a call can reach
-            # them as a notification (see pushReachable in userService.ts).
+            # Out of the app for a while: not listed. Being reachable by a
+            # push is not the same as being there -- keeping those people
+            # listed left anyone who had swiped the app away sitting in
+            # Online Now for hours (see isListedOnline in userService.ts).
             last_act = u_data.get('lastActive', 0)
-            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms) \
-                    and u_data.get('pushReachable') is not True:
+            if isinstance(last_act, (int, float)) and last_act > 0 and (now_ms - last_act > freshness_ms):
                 continue
             u_data['uid'] = d.id
             u_data['tier'] = 'VIP' if u_data.get('avatarUrl') else 'Advance'
@@ -1786,9 +1788,12 @@ def notify_incoming_call():
 
         caller_name = display_name(db_client, uid)
         room_id = (offer_snap.to_dict() or {}).get('roomId')
+        # The caller's name is the headline, the way a phone call shows who is
+        # ringing rather than the word "call". The chat notification already
+        # leads with the sender's name; this now matches it.
         payload = push.expo_data(
-            f"Incoming {'Video' if mode == 'video' else 'Voice'} Call",
-            f"{caller_name} is calling you...",
+            caller_name,
+            f"Incoming {'video' if mode == 'video' else 'voice'} call",
             {
                 "type": "call",
                 "roomId": room_id,
@@ -1866,8 +1871,8 @@ def notify_missed_call():
         caller_name = display_name(db_client, uid)
         room_id = offer.get('roomId')
         payload = push.expo_data(
+            caller_name,
             "Missed call",
-            f"{caller_name} called you",
             {
                 "type": "call_missed",
                 "roomId": room_id,

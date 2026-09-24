@@ -33,7 +33,6 @@ import { UserProvider } from './src/context/UserContext';
 import { updateUserStatus, touchLastActive } from './src/services/userService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
 import { useMessageNotificationTaps } from './src/hooks/useMessageNotificationTaps';
-import { isPushReachable } from './src/services/notificationService';
 import { rejectCallOffer } from './src/services/liveRoomService';
 import { isBlocked, startBlockListSync } from './src/services/safetyService';
 import CelebsScreen from './src/screens/CelebsScreen';
@@ -281,8 +280,12 @@ function SplashScreen() {
       <Animated.View style={{ opacity: fadeAnim, transform: [{ scale: scaleAnim }], alignItems: 'center' }}>
         {/* The logo already carries the name and the line under it, so nothing
             is repeated below it. */}
+        {/* splash-logo, not splash-icon: the latter now carries a wide
+            transparent margin so Android 12's circular mask cannot clip the
+            native splash. Nothing masks this one, so it uses the full-bleed
+            artwork and stays the size it was. */}
         <Animated.Image
-          source={require('./assets/splash-icon.png')}
+          source={require('./assets/splash-logo.png')}
           style={{ width: 264, height: 264, transform: [{ scale: scaleAnim }] }}
           resizeMode="contain"
         />
@@ -575,11 +578,13 @@ export default function App() {
         startBeating();
       } else if (nextState === 'background' || nextState === 'inactive') {
         stopBeating();
-        // Leaving the app no longer takes you offline when calls can reach
-        // this phone as notifications: the "Show me as online" switch is what
-        // decides. Without push -- web, or a phone whose push setup failed --
-        // nobody could reach you once you leave, so you still go offline.
-        if (!isPushReachable()) updateUserStatus(uid, false);
+        // Leaving the app takes you out of Online Now straight away. Staying
+        // listed because a push could still reach the phone left people
+        // showing as online for hours after they had swiped the app away.
+        // The "Show me as online" switch is untouched by this -- it stays on,
+        // and it is still what decides whether a call notification reaches
+        // you while you are away.
+        updateUserStatus(uid, false);
       }
     });
     return () => {

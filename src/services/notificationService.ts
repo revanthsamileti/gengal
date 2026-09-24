@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
-import { savePrivateUserData, setPushReachable, getPushReachable } from './userService';
+import { savePrivateUserData, setPushReachable } from './userService';
 
 /**
  * The conversation on screen right now, so a message notification for it is
@@ -87,43 +87,6 @@ export const CALL_ACTION_DECLINE = 'decline';
 
 /** Chat messages. Must stay in step with MESSAGE_CHANNEL in backend/push.py. */
 export const MESSAGE_CHANNEL_ID = 'messages';
-
-/**
- * Whether this phone can be reached by a push while GenGal is not on screen.
- *
- * Set once the Firebase token is stored. App.tsx reads it when the app goes to
- * the background: a reachable phone stays online (calls arrive as
- * notifications); one that is not -- web, or an install whose push setup
- * failed -- goes offline as before, because nobody could actually reach it.
- */
-let pushReachable = false;
-export const isPushReachable = () => pushReachable;
-
-/**
- * Seeds the flag above from what is already stored for this account.
- *
- * The flag is per-launch: it starts `false` and only becomes `true` once
- * registration has fetched a token and written it, which takes two round trips
- * and can fail outright on a weak network. Until then, leaving the app took the
- * pessimistic branch and wrote the person offline -- so swiping GenGal off the
- * recents list hid them from everyone, despite their phone being perfectly able
- * to receive the call.
- *
- * A phone that was reachable last time is reachable now: the token outlives the
- * process, and the backend is what clears `pushReachable` when a token stops
- * working. Reading it back turns a cold start into a known state instead of a
- * pessimistic guess.
- *
- * Never throws, and never downgrades a flag that registration has already set.
- */
-export async function primePushReachable(userId: string): Promise<void> {
-  if (pushReachable) return;
-  try {
-    if (await getPushReachable(userId)) pushReachable = true;
-  } catch (e) {
-    console.warn('[NotificationService] Could not read stored push reachability:', e);
-  }
-}
 
 /**
  * Creates the ringing channel and proves it actually rings.
@@ -256,7 +219,6 @@ export async function registerForPushNotificationsAsync(userId: string) {
       // Android-only anyway.
       await savePrivateUserData(userId, { fcmToken, callChannelId });
       await setPushReachable(userId, true);
-      pushReachable = true;
     }
 
     // Expo's token too, as the backend's fallback transport. Its failure must
@@ -347,7 +309,6 @@ export function subscribeToTokenRefresh(userId: string): () => void {
       // for the same token then returned early, and the phone stayed
       // unreachable, silently and permanently, from one transient failure.
       lastStoredToken = token;
-      pushReachable = true;
     } catch (e) {
       console.warn('[NotificationService] Failed to update rotated push token:', e);
     }
