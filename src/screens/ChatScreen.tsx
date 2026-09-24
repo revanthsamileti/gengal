@@ -257,7 +257,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
             {profile.avatarData ? (
               <GengalAvatar data={profile.avatarData} size={44} />
             ) : profile.uri ? (
-              <Image source={{ uri: profile.uri }} style={styles.avatar} />
+              <Image source={{ uri: profile.uri }} style={styles.avatar} accessible={false} />
             ) : (
               <View style={[styles.avatar, styles.avatarEmpty]}>
                 <MaterialIcons name="person" size={26} color="#D5BFB6" />
@@ -347,7 +347,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
                   profile.avatarData ? (
                     <GengalAvatar data={profile.avatarData} size={30} />
                   ) : profile.uri ? (
-                    <Image source={{ uri: profile.uri }} style={styles.messageAvatar} />
+                    <Image source={{ uri: profile.uri }} style={styles.messageAvatar} accessible={false} />
                   ) : (
                     <View style={[styles.messageAvatar, styles.messageAvatarEmpty]}>
                       <MaterialIcons name="person" size={16} color="#D5BFB6" />
@@ -369,7 +369,7 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
               {profile.avatarData ? (
                 <GengalAvatar data={profile.avatarData} size={30} />
               ) : profile.uri ? (
-                <Image source={{ uri: profile.uri }} style={styles.messageAvatar} />
+                <Image source={{ uri: profile.uri }} style={styles.messageAvatar} accessible={false} />
               ) : (
                 <View style={[styles.messageAvatar, styles.messageAvatarEmpty]}>
                   <MaterialIcons name="person" size={16} color="#D5BFB6" />

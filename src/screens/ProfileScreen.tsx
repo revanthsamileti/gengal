@@ -318,7 +318,7 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                 {(profile as any).avatarData ? (
                   <GengalAvatar data={(profile as any).avatarData} size={118} />
                 ) : profile.uri ? (
-                  <Image source={{ uri: profile.uri }} style={styles.avatar} />
+                  <Image source={{ uri: profile.uri }} style={styles.avatar} accessible={false} />
                 ) : (
                   <View style={[styles.avatar, styles.avatarEmpty]}>
                     <MaterialIcons name="person" size={56} color="#C9BDB2" />

@@ -251,7 +251,7 @@ function PrivateCallProgress({
               {targetAvatarData ? (
                 <GengalAvatar data={targetAvatarData} size={212} />
               ) : targetAvatarUri ? (
-                <Image source={{ uri: targetAvatarUri }} style={styles.avatarImage} />
+                <Image source={{ uri: targetAvatarUri }} style={styles.avatarImage} accessible={false} />
               ) : (
                 <MaterialIcons name="person" size={96} color="#D8C9A8" />
               )}

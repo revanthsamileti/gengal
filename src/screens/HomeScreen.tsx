@@ -317,7 +317,7 @@ export default function HomeScreen({ navigate }: HomeScreenProps) {
                         {profile.avatarData ? (
                           <GengalAvatar data={profile.avatarData as any} size={70} />
                         ) : profile.uri ? (
-                          <Image source={{ uri: profile.uri }} style={styles.profilePhoto} />
+                          <Image source={{ uri: profile.uri }} style={styles.profilePhoto} accessible={false} />
                         ) : (
                           <View style={[styles.profilePhoto, styles.profilePhotoEmpty]}>
                             <MaterialIcons name="person" size={34} color="#C9BDB2" />

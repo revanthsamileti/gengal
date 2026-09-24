@@ -1348,7 +1348,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                   {(profile as any).avatarData ? (
                     <GengalAvatar data={(profile as any).avatarData} size={200} />
                   ) : profile.uri ? (
-                    <Image source={{ uri: profile.uri }} style={styles.voiceAvatar} />
+                    <Image source={{ uri: profile.uri }} style={styles.voiceAvatar} accessible={false} />
                   ) : (
                     <MaterialIcons name="person" size={120} color="#C9BDB2" />
                   )}
@@ -1475,7 +1475,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                   {profile.avatarData ? (
                     <GengalAvatar data={profile.avatarData} size={110} />
                   ) : profile.uri ? (
-                    <Image source={{ uri: profile.uri }} style={styles.videoOffAvatar} />
+                    <Image source={{ uri: profile.uri }} style={styles.videoOffAvatar} accessible={false} />
                   ) : (
                     <MaterialIcons name="person" size={70} color="#FFFDF8" />
                   )}
@@ -1541,7 +1541,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
                 style={StyleSheet.absoluteFill}
               />
             ) : currentUserProfile?.avatarUrl ? (
-              <Image source={{ uri: currentUserProfile.avatarUrl }} style={StyleSheet.absoluteFill} />
+              <Image source={{ uri: currentUserProfile.avatarUrl }} style={StyleSheet.absoluteFill} accessible={false} />
             ) : (
               <View style={styles.selfPreviewOffContent}>
                 {currentUserProfile?.avatarData ? (
@@ -1556,7 +1556,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
               {currentUserProfile?.avatarData ? (
                 <GengalAvatar data={currentUserProfile.avatarData} size={50} />
               ) : currentUserProfile?.avatarUrl ? (
-                <Image source={{ uri: currentUserProfile.avatarUrl }} style={styles.selfPreviewAvatar} />
+                <Image source={{ uri: currentUserProfile.avatarUrl }} style={styles.selfPreviewAvatar} accessible={false} />
               ) : (
                 <MaterialIcons name="person" size={34} color="#FFFDF8" />
               )}

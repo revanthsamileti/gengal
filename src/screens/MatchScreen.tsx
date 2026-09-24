@@ -106,7 +106,7 @@ export default function MatchScreen({ profileName, matchData, roomId, navigate }
                   // Real avatarUrl; guard is necessary because a match whose
                   // account has no photo would produce source={{ uri: '' }},
                   // which warns on every render and draws nothing.
-                  <Image source={{ uri: (profile as any).uri }} style={styles.matchPhoto} />
+                  <Image source={{ uri: (profile as any).uri }} style={styles.matchPhoto} accessible={false} />
                 ) : (
                   // No avatar, no photo — person icon at full card size.
                   <View style={[styles.matchPhoto, styles.matchPhotoFallback]}>

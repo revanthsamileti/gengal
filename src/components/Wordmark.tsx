@@ -45,6 +45,9 @@ export default function Wordmark({ size = 31, color = '#7A256D', name = 'GenGal'
         source={require('../../assets/logo-mark.png')}
         style={{ width: Math.round(size * MARK_RATIO), height: line }}
         resizeMode="contain"
+        // The name is right beside it; announcing the mark separately
+        // would read the brand twice.
+        accessible={false}
       />
       <Text
         style={[

@@ -106,6 +106,7 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
                 <Image
                   source={{ uri: myProfile?.avatarUrl || 'https://via.placeholder.com/36' }}
                   style={styles.avatar}
+                  accessible={false}
                 />
               )}
             </TouchableOpacity>

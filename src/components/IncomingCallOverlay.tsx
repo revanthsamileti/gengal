@@ -178,7 +178,7 @@ export default function IncomingCallOverlay({ call, onAccept, onReject }: Props)
             {call.callerAvatarData ? (
               <GengalAvatar data={call.callerAvatarData} size={AVATAR} />
             ) : call.callerAvatarUrl ? (
-              <Image source={{ uri: call.callerAvatarUrl }} style={styles.avatarImage} />
+              <Image source={{ uri: call.callerAvatarUrl }} style={styles.avatarImage} accessible={false} />
             ) : (
               <View style={styles.avatarFallback}>
                 <MaterialIcons name="person" size={64} color="rgba(255,255,255,0.85)" />

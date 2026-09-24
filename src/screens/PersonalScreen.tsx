@@ -200,7 +200,7 @@ function FloatingProfileRow({
             <GengalAvatar data={node.avatarData} size={102} />
           ) : node.image ? (
             // Real photo URL or the sample profile's Unsplash image.
-            <Image source={{ uri: node.image }} style={styles.avatarImage} />
+            <Image source={{ uri: node.image }} style={styles.avatarImage} accessible={false} />
           ) : (
             // No avatar and no photo URL. A blank Image with uri='' warns on
             // every render and draws nothing. Render a person icon instead.

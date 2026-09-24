@@ -89,7 +89,7 @@ function UserCard({
               <GengalAvatar data={profile.avatarData} size={52} />
             ) : profile.uri ? (
               // Real avatarUrl or the sample profile's Unsplash image.
-              <Image source={{ uri: profile.uri }} style={styles.avatarImg} />
+              <Image source={{ uri: profile.uri }} style={styles.avatarImg} accessible={false} />
             ) : (
               // No avatar and no URL. source={{ uri: '' }} warns on every render
               // and draws a blank box — show a person icon instead.

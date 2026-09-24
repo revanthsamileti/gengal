@@ -305,7 +305,7 @@ function CelebCard({
               {profile.avatarData ? (
                 <GengalAvatar data={profile.avatarData} size={72} />
               ) : profile.uri ? (
-                <Image source={{ uri: profile.uri }} style={cardStyles.photo} />
+                <Image source={{ uri: profile.uri }} style={cardStyles.photo} accessible={false} />
               ) : null}
             </View>
           </LinearGradient>

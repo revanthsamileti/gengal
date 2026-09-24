@@ -138,6 +138,9 @@ export default function GengalAvatar({ data, size = 150 }: { data?: AvatarData; 
           <Image 
             source={{ uri: `data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(svgString)))}` }} 
             style={{ width: '100%', height: '100%' }} 
+            // The face is decorative: the person's name is always beside it,
+            // and this often sits inside a button with its own label.
+            accessible={false}
           />
         ) : (
           <SvgXml xml={svgString} width={size} height={size} />

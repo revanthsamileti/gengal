@@ -433,13 +433,22 @@ untested against live Razorpay credentials.
 bypass, which must stay `false` outside local testing. `ZEGO_APP_ID=0`, so only Agora can carry a
 call and the fallback leg of the provider waterfall is unconfigured.
 
-## Open — accessibility (~10 sites)
+## ✅ Accessibility — decorative imagery (2026-09-25)
 
-The long tail in the room and game screens is now labelled (mute, speaker, scoreboard, gift,
-share, back and close across `ExpertRoomScreen`, `DumCharadesRoomScreen`, `LudoBoardScreen`,
-`ClubScreen`, `ChillScreen` and 13 other screens — 28 controls). What remains is decorative
-imagery without `accessible={false}` and a few composite rows that read as several separate
-controls rather than one.
+The long tail in the room and game screens was labelled in an earlier pass (mute, speaker,
+scoreboard, gift, share, back and close across `ExpertRoomScreen`, `DumCharadesRoomScreen`,
+`LudoBoardScreen`, `ClubScreen`, `ChillScreen` and 13 other screens — 28 controls). What
+remained was decorative imagery without `accessible={false}`, and composite rows that read as
+several separate controls rather than one.
+
+Every `<Image>` in `src/` is an avatar or the logo mark, and in both cases the meaning is
+already in adjacent text — so announcing the image adds nothing, and inside a button that
+carries its own label it actively splits one control into two. All 19 are now
+`accessible={false}`, including the one inside `GengalAvatar`, which covers every avatar
+rendered through that component rather than only the raw call sites.
+
+Verified by script rather than by eye: 19 `<Image>` elements found, 0 without an
+accessibility prop.
 
 ## Verification performed
 

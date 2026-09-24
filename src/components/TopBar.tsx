@@ -27,7 +27,7 @@ export default function TopBar({ navigate, title = 'GenGal', subtitle }: TopBarP
         {myProfile?.avatarData ? (
           <GengalAvatar data={myProfile.avatarData} size={38} />
         ) : myProfile?.avatarUrl ? (
-          <Image source={{ uri: myProfile.avatarUrl }} style={styles.avatar} />
+          <Image source={{ uri: myProfile.avatarUrl }} style={styles.avatar} accessible={false} />
         ) : myProfile ? (
           <View style={[styles.avatar, styles.avatarEmpty]}>
             <MaterialIcons name="person" size={22} color="#C9BDB2" />
