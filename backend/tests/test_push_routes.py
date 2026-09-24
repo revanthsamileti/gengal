@@ -260,6 +260,17 @@ def test_online_list_drops_people_who_left_the_app(client, store):
     assert "ghost" not in uids
 
 
+def test_someone_gone_two_minutes_is_already_hidden(client, store):
+    """The window is the only thing that hides a phone that was powered off or
+    swiped away, because nothing survives those to write `isOnline: false`.
+    Two minutes must already be too long, or people linger visibly."""
+    store["users/%s" % PEER]["lastActive"] = now() - timedelta(minutes=2)
+
+    r = client.post("/api/v1/users/online", json={"currentUid": ME})
+
+    assert PEER not in [u["uid"] for u in r.get_json()["users"]]
+
+
 def test_online_list_keeps_people_who_are_still_in_the_app(client, store):
     r = client.post("/api/v1/users/online", json={"currentUid": ME})
 

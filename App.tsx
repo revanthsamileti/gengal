@@ -30,7 +30,7 @@ import BlockedUsersScreen from './src/screens/BlockedUsersScreen';
 import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
 import { UserProvider } from './src/context/UserContext';
-import { updateUserStatus, touchLastActive } from './src/services/userService';
+import { updateUserStatus, touchLastActive, USER_HEARTBEAT_MS } from './src/services/userService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
 import { useMessageNotificationTaps } from './src/hooks/useMessageNotificationTaps';
 import { rejectCallOffer } from './src/services/liveRoomService';
@@ -175,6 +175,11 @@ const SCREENS = {
       matchData={params.matchData}
       isCaller={params.isCaller}
       isIncomingPending={params.isIncomingPending}
+      // Set by the Answer button on the notification. Forgetting it here is
+      // invisible: the param is set, the prop defaults to false, and the call
+      // simply asks to be accepted a second time on a screen the user already
+      // accepted it from.
+      autoAnswer={params.autoAnswer}
       navigate={navigate}
       goBack={goBack}
     />
@@ -541,17 +546,20 @@ export default function App() {
 
     // `lastActive` used to be written only when the app came to the foreground,
     // but the directory hides anyone whose lastActive is older than
-    // ONLINE_FRESHNESS_MS (5 minutes) unless their phone can get calls as
-    // notifications. Sitting on a screen without backgrounding the app
-    // therefore made you disappear from everyone's "Online Now" after five
-    // minutes and nobody could call you. This beats well inside that window so
-    // an open app stays reachable.
-    const HEARTBEAT_MS = 2 * 60 * 1000;
+    // ONLINE_FRESHNESS_MS. Sitting on a screen without backgrounding the app
+    // therefore made you disappear from everyone's "Online Now" and nobody
+    // could call you. This beats well inside that window so an open app stays
+    // listed.
+    //
+    // The interval comes from userService rather than a copy here: this file
+    // used to hold its own 2-minute constant, which is precisely the drift the
+    // exported one exists to prevent, and it would have silently outlived the
+    // window it is supposed to fit inside.
     let timer: ReturnType<typeof setInterval> | null = null;
 
     const startBeating = () => {
       if (timer) return;
-      timer = setInterval(() => touchLastActive(uid), HEARTBEAT_MS);
+      timer = setInterval(() => touchLastActive(uid), USER_HEARTBEAT_MS);
     };
 
     const stopBeating = () => {

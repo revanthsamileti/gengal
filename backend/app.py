@@ -1557,6 +1557,14 @@ def save_user_profile_admin():
         print(f"[USER-API] Save profile error: {e}")
         return jsonify({"error": str(e)}), 500
 
+# How long a lastActive stamp keeps someone listed as online.
+#
+# Must match ONLINE_FRESHNESS_MS in src/services/userService.ts -- the app
+# and this server both filter the same people, and a mismatch shows up as a
+# user who is listed by one and not the other. This is the ceiling on how
+# long somebody lingers after being swiped away or powered off, because no
+# process survives those to write anything.
+FRESHNESS_MS = 90 * 1000
 @app.route('/api/v1/users/online', methods=['POST', 'OPTIONS'])
 def get_online_users_admin():
     if request.method == 'OPTIONS':
@@ -1572,7 +1580,7 @@ def get_online_users_admin():
         query_snap = db_client.collection('users').where('isOnline', '==', True).limit(50).stream()
         users_list = []
         now_ms = int(time.time() * 1000)
-        freshness_ms = 5 * 60 * 1000  # 5 minutes threshold
+        freshness_ms = FRESHNESS_MS
         for d in query_snap:
             if current_uid and d.id == current_uid:
                 continue
@@ -1615,7 +1623,7 @@ def get_recent_users_admin():
         query_snap = db_client.collection('users').limit(50).stream()
         users_list = []
         now_ms = int(time.time() * 1000)
-        freshness_ms = 5 * 60 * 1000
+        freshness_ms = FRESHNESS_MS
         for d in query_snap:
             if current_uid and d.id == current_uid:
                 continue

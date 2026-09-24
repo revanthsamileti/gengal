@@ -25,8 +25,19 @@ import {
  * Exported so App.tsx (the heartbeat driver) and any screen that renders
  * availability status use the same number — previously this was a private
  * constant, so callers invented their own cutoffs that could drift apart.
+ *
+ * This is the ceiling on how long someone can linger in Online Now after they
+ * are gone. A phone that is swiped away, powered off, or loses signal writes
+ * nothing on the way out — there is no process left to write — so nothing but
+ * this window can hide them. Five minutes was too long to be believable, hence
+ * 90 seconds. It cannot go much lower without the heartbeat below becoming
+ * expensive, and must stay at least two heartbeats wide so a single dropped
+ * write does not blink an active user out of the feed.
+ *
+ * The backend applies the same window to its own listings; see FRESHNESS_MS in
+ * backend/app.py.
  */
-export const ONLINE_FRESHNESS_MS = 5 * 60 * 1000;
+export const ONLINE_FRESHNESS_MS = 90 * 1000;
 
 /**
  * How often the App-level heartbeat should call touchLastActive.
@@ -36,9 +47,12 @@ export const ONLINE_FRESHNESS_MS = 5 * 60 * 1000;
  * blink a user out of the "Online Now" feed mid-session.
  *
  * Distinct from presenceService.HEARTBEAT_MS: room presence is ephemeral and
- * high-frequency (20 s), user presence is persistent and cheaper (2 min).
+ * high-frequency (20 s), user presence is persistent and cheaper.
+ *
+ * Only beats while the app is on screen, so the cost is one write per 30 s of
+ * actual use rather than around the clock.
  */
-export const USER_HEARTBEAT_MS = 2 * 60 * 1000;
+export const USER_HEARTBEAT_MS = 30 * 1000;
 
 /**
  * How long an `inCallSince` stamp keeps someone reading as mid-call.
