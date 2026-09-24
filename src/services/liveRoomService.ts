@@ -251,8 +251,13 @@ const notifyIncomingCall = async (receiverUid: string, mode: 'call' | 'video') =
  * How long we will wait for the missed-call push before deleting the offer
  * anyway. Deleting the offer is what actually ends the call for both sides, so
  * it must never be held hostage by a slow network.
+ *
+ * Kept short because this sits in the caller's teardown: every millisecond here
+ * is a millisecond the caller stares at a call screen that is already over. One
+ * POST on a working connection is well inside this; a connection that is not
+ * working will not deliver the push at a longer timeout either.
  */
-const MISSED_CALL_TIMEOUT_MS = 2500;
+const MISSED_CALL_TIMEOUT_MS = 1200;
 
 /**
  * Asks the server to turn the receiver's ringing notification into a swipeable

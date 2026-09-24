@@ -281,6 +281,11 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
    */
   const endCallWithNotice = (title: string, message: string) => {
     if (endedRef.current) return;
+    // Silence first, unconditionally. Alert.alert does not block and endCall is
+    // asynchronous, so the screen lives on for a moment in whatever state it
+    // was in -- and every route into here means the call is over, whatever the
+    // ring state machine currently believes.
+    stopRingtone();
     Alert.alert(title, message, [{ text: 'OK' }]);
     void endCall();
   };
@@ -390,7 +395,16 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   React.useEffect(() => {
     if (isPending) {
       void startRingtone('incoming');
-    } else if (isCaller && callStep === 'ringing' && callerStatus !== 'accepted') {
+    } else if (
+      isCaller &&
+      callStep === 'ringing' &&
+      // Only while the call is genuinely still waiting for an answer. This
+      // used to read `callerStatus !== 'accepted'`, which meant a *decline*
+      // satisfied it: the status changed to 'rejected', this effect re-ran,
+      // and it started the ringback again. The caller heard their phone ring
+      // on behind the "Call declined" alert until the screen finally unmounted.
+      (callerStatus === null || callerStatus === 'calling')
+    ) {
       // Ringback for the caller: no vibration, they are already holding the phone.
       void startRingtone('outgoing', false);
     } else {
