@@ -89,7 +89,7 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
             <View style={{ width: 44, height: 44 }} />
           )}
           <View style={styles.centerTitle}>
-            <Text style={styles.brand}>Gengal</Text>
+            <Text style={styles.brand}>GenGal</Text>
           </View>
           {isEditMode ? (
             <TouchableOpacity

@@ -116,7 +116,7 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Text style={styles.brand}>Gengal</Text>
+          <Text style={styles.brand}>GenGal</Text>
         </View>
 
         <View style={styles.titleSection}>
@@ -164,6 +164,11 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
                 setPhone(digits.slice(0, selectedCountry.max));
               }}
               placeholder="0000000000"
+              // Large text is a real preference and is honoured; the
+              // accessibility sizes above this would not fit ten digits at
+              // any weight, and a number you cannot read the end of is
+              // worse than one shown slightly smaller than asked.
+              maxFontSizeMultiplier={1.3}
               placeholderTextColor="#B9A7B9"
               keyboardType="phone-pad"
               textContentType="telephoneNumber"
@@ -391,12 +396,16 @@ const styles = StyleSheet.create({
   },
   inputText: {
     flex: 1,
-    fontSize: 22,
+    // Ten digits at 22px with 2px of tracking left 25px of slack in a
+    // 172px field, so anything past a 1.17x system font scale cut the last
+    // digit off -- and Android's ordinary 'Large' setting is 1.3x. People
+    // could not see the end of their own number while typing it.
+    fontSize: 20,
     fontWeight: '700',
     color: '#1A1A1A',
-    letterSpacing: 2,
+    letterSpacing: 1,
     textAlign: 'left',
-    marginLeft: 16,
+    marginLeft: 12,
     minWidth: 0,
   },
   placeholderText: {

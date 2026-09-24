@@ -311,7 +311,7 @@ function SplashScreen() {
 export default function App() {
   const [fontsLoaded] = useFonts({
     ...MaterialIcons.font,
-    // The "Gengal" wordmark in TopBar.
+    // The "GenGal" wordmark in TopBar.
     DancingScript_700Bold,
   });
 

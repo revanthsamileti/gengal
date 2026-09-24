@@ -290,7 +290,7 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
           accessibilityLabel="Go back">
           <MaterialIcons name="arrow-back" size={23} color={skeuo.plum} />
         </TouchableOpacity>
-        <Text style={styles.brand}>Gengal</Text>
+        <Text style={styles.brand}>GenGal</Text>
         <DiamondBadge compact />
       </View>
 

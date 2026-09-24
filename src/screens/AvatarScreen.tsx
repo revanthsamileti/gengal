@@ -168,7 +168,7 @@ export default function AvatarScreen({ navigate, goBack, route }: AvatarScreenPr
           <TouchableOpacity onPress={goBack} style={styles.backBtn} accessibilityRole="button" accessibilityLabel="Go back">
             <MaterialIcons name="arrow-back" size={24} color="#5A155A" />
           </TouchableOpacity>
-          <Text style={styles.brand}>Gengal</Text>
+          <Text style={styles.brand}>GenGal</Text>
           <View style={{ width: 44 }} />
         </View>
 

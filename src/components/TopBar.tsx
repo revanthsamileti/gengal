@@ -11,7 +11,7 @@ type TopBarProps = {
   subtitle?: string;
 };
 
-export default function TopBar({ navigate, title = 'Gengal', subtitle }: TopBarProps) {
+export default function TopBar({ navigate, title = 'GenGal', subtitle }: TopBarProps) {
   const { profile: myProfile } = useUser();
 
   return (
@@ -139,7 +139,7 @@ const styles = StyleSheet.create({
   },
   headerSub: {
     // Hangs below the wordmark instead of stacking with it. Stacked, the
-    // subtitle pushed "Gengal" 17px higher on Club, Celebs and Chill than on
+    // subtitle pushed "GenGal" 17px higher on Club, Celebs and Chill than on
     // the other tabs, so the logo jumped every time you switched tabs.
     position: 'absolute',
     // Clear of the script's descenders: the tail of the "g" reaches the

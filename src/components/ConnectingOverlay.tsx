@@ -233,7 +233,7 @@ function PrivateCallProgress({
     <Modal visible transparent animationType="fade" statusBarTranslucent onRequestClose={onCancel}>
       <View style={styles.container}>
         <View style={styles.privateHeader}>
-          <Text style={styles.logoText}>Gengal</Text>
+          <Text style={styles.logoText}>GenGal</Text>
           <View style={styles.privatePill}>
             <MaterialIcons name={isVideo ? 'videocam' : 'lock'} size={12} color="#8D6E18" />
             <Text style={styles.privatePillText}>{isVideo ? 'Private Video Call' : 'Private Call'}</Text>

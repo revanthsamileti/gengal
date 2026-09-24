@@ -108,7 +108,7 @@ export default function ClubScreen({ navigate, goBack }: {
     const nickname = profile?.nickname || profile?.username || 'Host';
     try {
       await Share.share({
-        message: `Hey! Join my live matchmaking room on Gengal Club.\nTopic: "${finalTopic}"\nExpert: ${nickname}\n\nSearch for my room in the Club tab!`,
+        message: `Hey! Join my live matchmaking room on GenGal Club.\nTopic: "${finalTopic}"\nExpert: ${nickname}\n\nSearch for my room in the Club tab!`,
       });
     } catch (e: any) {
       console.warn('Error sharing invite:', e);
