@@ -162,6 +162,64 @@ const detectLocation = (): Promise<GeoAnswer | null> =>
     });
   });
 
+/**
+ * Where the phone actually is, rather than where its network appears to be.
+ *
+ * The IP services above find the *connection*: on mobile data that resolves to
+ * the carrier's gateway, so from one connection they returned Hyderabad,
+ * Bellampalli and Gaddi Annaram at the same moment. GPS answers the question
+ * that was actually being asked, so it is tried first and the IP guess is kept
+ * only for when this is unavailable or declined.
+ *
+ * Read once, never watched: nothing here runs in the background.
+ */
+const GPS_TIMEOUT_MS = 12000;
+
+/**
+ * `ask` is false on the automatic pass, so arriving at the screen never raises
+ * a permission dialog out of nowhere -- someone who has already granted it
+ * gets the accurate answer, everyone else gets the IP guess until they press
+ * the button themselves.
+ */
+const detectByGps = async (ask: boolean): Promise<GeoAnswer | null> => {
+  try {
+    const Location = await import('expo-location');
+    let { status } = await Location.getForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      if (!ask) return null;
+      ({ status } = await Location.requestForegroundPermissionsAsync());
+      if (status !== 'granted') return null;
+    }
+
+    // A fix can take a long time indoors, and this sits in front of somebody
+    // filling in a form, so it is bounded like every other lookup here.
+    const position = await Promise.race([
+      Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+      new Promise<null>((resolve) => setTimeout(() => resolve(null), GPS_TIMEOUT_MS)),
+    ]);
+    if (!position) return null;
+
+    const [place] = await Location.reverseGeocodeAsync({
+      latitude: position.coords.latitude,
+      longitude: position.coords.longitude,
+    });
+    if (!place) return null;
+
+    // `region` is the state on Android; `subregion` is usually the district,
+    // and `city` can be null out in the country, so the nearest named place
+    // stands in rather than leaving it blank.
+    return {
+      region: place.region || place.subregion || '',
+      country: place.country || '',
+      city: place.city || place.subregion || place.district || '',
+    };
+  } catch {
+    // No module in this build, no play services, permission revoked mid-call.
+    return null;
+  }
+};
+
+
 export default function ProfileDetailsScreen({ navigate, route }: ProfileDetailsScreenProps) {
   const isEditMode = route?.params?.isEditMode || false;
   const returnTo = route?.params?.returnTo || 'Settings';
@@ -185,12 +243,18 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
   const [isLanguageModalVisible, setIsLanguageModalVisible] = useState(false);
   const [isDetectingState, setIsDetectingState] = useState(false);
   const [autoDetectedState, setAutoDetectedState] = useState(false);
+  /** Which method answered, so the note below can say so truthfully. */
+  const [detectSource, setDetectSource] = useState<'gps' | 'ip' | null>(null);
 
   const detectStateAutomatically = async (isUserInitiated = false) => {
     if (!isUserInitiated && (stateText || route?.params?.state || isEditMode)) return;
     setIsDetectingState(true);
     try {
-      const found = await detectLocation();
+      // GPS first, because it answers the right question. The IP consensus
+      // stays as the fallback for a declined permission or a phone that
+      // cannot get a fix.
+      const byGps = await detectByGps(isUserInitiated);
+      const found = byGps ?? (await detectLocation());
       const detectedRegion = found?.region ?? '';
       const detectedCountry = found?.country ?? '';
       const detectedCity = found?.city ?? '';
@@ -198,6 +262,7 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
       if (detectedRegion) {
         setStateText(detectedRegion);
         setAutoDetectedState(true);
+        setDetectSource(byGps ? 'gps' : 'ip');
       }
       if (!city && detectedCity) {
         setCity(detectedCity);
@@ -484,10 +549,14 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
               placeholderTextColor="#A0A0A0"
             />
             {autoDetectedState && (
-              // Said as a guess, because it is one: this comes from the
-              // address your connection presents, not from where you are.
+              // Says which method answered. A GPS fix is worth trusting; the
+              // IP fallback is a guess about the network, and saying so is
+              // what stops somebody leaving a town they have never visited
+              // sitting in a field other people search on.
               <Text style={styles.autoDetectSuccess}>
-                Guessed from your connection — change it if it is wrong
+                {detectSource === 'gps'
+                  ? 'From your location — edit if you like'
+                  : 'Guessed from your connection — change it if it is wrong'}
               </Text>
             )}
           </View>
