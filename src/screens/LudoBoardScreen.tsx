@@ -497,7 +497,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             <Text
               style={[
                 ludoType.eyebrow,
-                isMyTurn && !asSpectator && { color: GEMS[room.currentTurn].core },
+                isMyTurn && !asSpectator && { color: GEMS[room.currentTurn].ink },
               ]}
             >
               {eyebrow}

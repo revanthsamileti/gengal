@@ -46,24 +46,35 @@ type PieceSpec = {
   dark: string;
   /** Tint behind a colour's own area. */
   wash: string;
+  /**
+   * The colour when it has to be *read* rather than seen: dice pips, small
+   * status text, badge fills behind white numerals.
+   *
+   * `core` is tuned for large filled areas on the white board, where a grey
+   * grid line does the separating. Reused at 9-10px on white or cream it
+   * falls apart -- yellow `core` is 1.8:1 against the die face, so on
+   * yellow's turn the roll simply could not be read. Every `ink` here
+   * clears 4.5:1 on both the board white and the screen's cream.
+   */
+  ink: string;
   name: string;
 };
 
 export const GEMS: Record<GemColor, PieceSpec> = {
   blue: {
-    core: '#1B76E3', light: '#7DB6F2', dark: '#0D4C95',
+    core: '#1B76E3', light: '#7DB6F2', dark: '#0D4C95', ink: '#0D4C95',
     wash: 'rgba(27, 118, 227, 0.12)', name: 'Blue',
   },
   green: {
-    core: '#38A81C', light: '#83D26A', dark: '#1E6B0E',
+    core: '#38A81C', light: '#83D26A', dark: '#1E6B0E', ink: '#1E6B0E',
     wash: 'rgba(56, 168, 28, 0.12)', name: 'Green',
   },
   red: {
-    core: '#E32B22', light: '#F58079', dark: '#9C130D',
+    core: '#E32B22', light: '#F58079', dark: '#9C130D', ink: '#9C130D',
     wash: 'rgba(227, 43, 34, 0.12)', name: 'Red',
   },
   yellow: {
-    core: '#F7B500', light: '#FFD968', dark: '#B07C00',
+    core: '#F7B500', light: '#FFD968', dark: '#B07C00', ink: '#8A6100',
     wash: 'rgba(247, 181, 0, 0.14)', name: 'Yellow',
   },
 };

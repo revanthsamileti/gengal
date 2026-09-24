@@ -90,7 +90,10 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
     breathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.05] })
   );
 
+  // The border and glow say whose turn it is; the pips have to be read, so
+  // they take the ink variant. Yellow core on a white die face was 1.8:1.
   const accent = GEMS[turnColor].core;
+  const pipColor = GEMS[turnColor].ink;
   const live = enabled || rolling;
   const pips = PIPS[face] ?? PIPS[1];
 
@@ -125,7 +128,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
                 {
                   left: (px / 100) * SIZE - 5,
                   top: (py / 100) * SIZE - 5,
-                  backgroundColor: live ? accent : ludo.inkFaint,
+                  backgroundColor: live ? pipColor : ludo.inkFaint,
                 },
               ]}
             />

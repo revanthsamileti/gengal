@@ -61,7 +61,7 @@ export function PlayerSeat({
         ]}
       >
         <View style={[styles.emptyDot, { borderColor: gem.core }]}>
-          <MaterialIcons name="add" size={16} color={gem.core} />
+          <MaterialIcons name="add" size={16} color={gem.ink} />
         </View>
         <View style={styles.meta}>
           <Text style={styles.emptyName}>{gem.name}</Text>
@@ -109,7 +109,7 @@ export function PlayerSeat({
           <GengalAvatar data={player.avatarData} size={AVATAR} />
         </View>
         {rank !== null && (
-          <View style={[styles.rank, { backgroundColor: gem.core }]}>
+          <View style={[styles.rank, { backgroundColor: gem.ink }]}>
             <Text style={[styles.rankText, numeric]}>{rank}</Text>
           </View>
         )}
@@ -125,7 +125,7 @@ export function PlayerSeat({
               key={i}
               style={[
                 styles.pip,
-                { backgroundColor: i < tokensHome ? gem.core : ludo.gridSoft },
+                { backgroundColor: i < tokensHome ? gem.ink : ludo.gridSoft },
               ]}
             />
           ))}
