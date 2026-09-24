@@ -7,6 +7,7 @@ import { Platform, Image,
   View, } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
+import Wordmark from '../components/Wordmark';
 import ScreenShell from '../components/ScreenShell';
 import { useUser } from '../context/UserContext';
 import GengalAvatar from '../components/GengalAvatar';
@@ -89,7 +90,7 @@ export default function LanguageScreen({ navigate, route }: LanguageScreenProps)
             <View style={{ width: 44, height: 44 }} />
           )}
           <View style={styles.centerTitle}>
-            <Text style={styles.brand}>GenGal</Text>
+            <Wordmark size={26} color="#321151" />
           </View>
           {isEditMode ? (
             <TouchableOpacity
@@ -211,12 +212,6 @@ const styles = StyleSheet.create({
   centerTitle: {
     flex: 1,
     alignItems: 'center',
-  },
-  brand: {
-    color: '#321151',
-    fontFamily: 'serif',
-    fontSize: 26,
-    fontWeight: '900',
   },
   avatarShadow: {
     borderRadius: 18,

@@ -13,6 +13,7 @@ import {
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { MaterialIcons } from '@expo/vector-icons';
+import Wordmark from '../components/Wordmark';
 import ScreenShell from '../components/ScreenShell';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
 import { ActivityIndicator, StatusBar } from 'react-native';
@@ -116,7 +117,7 @@ export default function PhoneScreen({ navigate, goBack, route }: PhoneScreenProp
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Text style={styles.brand}>GenGal</Text>
+          <Wordmark size={30} />
         </View>
 
         <View style={styles.titleSection}>
@@ -302,14 +303,11 @@ const styles = StyleSheet.create({
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    // Centred, like the title and the field beneath it. 'space-between'
+    // was left over from a row that had a second item in it, and it left
+    // the wordmark hanging off the left edge of an otherwise centred page.
+    justifyContent: 'center',
     marginBottom: 20,
-  },
-  brand: {
-    color: skeuo.plum,
-    fontFamily: 'serif',
-    fontSize: 28,
-    fontWeight: '900',
   },
   titleSection: {
     alignItems: 'center',

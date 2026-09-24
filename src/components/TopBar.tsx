@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { View, Text, TouchableOpacity, Image, StyleSheet } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from './GengalAvatar';
+import Wordmark from './Wordmark';
 import DiamondBadge from './DiamondBadge';
 import { useUser } from '../context/UserContext';
 
@@ -37,12 +38,7 @@ export default function TopBar({ navigate, title = 'GenGal', subtitle }: TopBarP
       </TouchableOpacity>
 
       <View style={styles.centerTitle}>
-        <View style={styles.lockup}>
-          {/* The heart from the GenGal logo, so the header carries the same
-              mark as the app icon and the splash. */}
-          <Image source={require('../../assets/logo-mark.png')} style={styles.mark} resizeMode="contain" />
-          <Text style={styles.brand} numberOfLines={1}>{title}</Text>
-        </View>
+        <Wordmark name={title} />
         {subtitle ? (
           <Text style={styles.headerSub} numberOfLines={1}>{subtitle}</Text>
         ) : null}
@@ -61,6 +57,11 @@ export default function TopBar({ navigate, title = 'GenGal', subtitle }: TopBarP
 }
 
 /** Height of the wordmark's line; the header row is centred on it. */
+/**
+ * Height of the wordmark's line. Must stay in step with Wordmark's own
+ * LINE_RATIO at the default size (31 * 1.29), because the subtitle below
+ * is positioned against it.
+ */
 const BRAND_LINE = 40;
 
 const styles = StyleSheet.create({
@@ -110,32 +111,6 @@ const styles = StyleSheet.create({
     height: BRAND_LINE,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  lockup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  mark: {
-    width: 30,
-    height: BRAND_LINE,
-  },
-  brand: {
-    // Loaded in App.tsx's useFonts. No fontWeight: on Android a weight with a
-    // custom family makes the system pick its own bold face instead.
-    fontFamily: 'DancingScript_700Bold',
-    fontSize: 31,
-    lineHeight: BRAND_LINE,
-    // A script's last stroke leans past the width the font reserves for it,
-    // and Android clips text to its content box, so the final "l" ended in a
-    // straight cut. Padding does not help (the clip excludes padding); a box
-    // wider than the word is what gives the stroke room. Only a little wider,
-    // though: at 150 the mark-plus-word pair was wider than the gap between
-    // the avatar and the coin badge and pushed up against the avatar.
-    minWidth: 112,
-    textAlign: 'center',
-    color: '#7A256D',
-    includeFontPadding: false,
   },
   headerSub: {
     // Hangs below the wordmark instead of stacking with it. Stacked, the
