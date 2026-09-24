@@ -539,14 +539,19 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
           />
           <RailButton
             icon={micMuted ? 'mic-off' : 'mic'}
-            label={micMuted ? 'Unmute' : 'Mute'}
+            // Names what it controls, not what tapping does. Beside it sat
+            // the speaker toggle reading 'Muted', so the rail offered
+            // 'Mute' and 'Muted' side by side -- one an instruction, one a
+            // state, for two different things. The icon and the highlight
+            // carry on/off on both now.
+            label="Mic"
             active={micMuted}
             onPress={toggleMic}
             ionicon
           />
           <RailButton
             icon={speakerOn ? 'volume-high' : 'volume-mute'}
-            label={speakerOn ? 'Speaker' : 'Muted'}
+            label="Speaker"
             active={!speakerOn}
             onPress={toggleSpeaker}
             ionicon

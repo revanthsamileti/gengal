@@ -105,7 +105,18 @@ export function PlayerSeat({
             />
           </Svg>
         )}
-        <View style={[styles.avatar, { borderColor: isActive ? gem.core : 'transparent' }]}>
+        {/* The ring is how you tell who is playing which colour, so it is always
+            drawn. It used to appear only on the active player's turn, which
+            meant three of the four seats carried no colour at all -- and the
+            home pips below stay grey until a token actually finishes, so a
+            whole game could pass without the board ever saying who was who.
+            Whose turn it is is already carried by the progress ring above. */}
+        <View
+          style={[
+            styles.avatar,
+            { borderColor: gem.ink, borderWidth: isActive ? 3 : 1.5 },
+          ]}
+        >
           <GengalAvatar data={player.avatarData} size={AVATAR} />
         </View>
         {rank !== null && (
