@@ -1565,6 +1565,12 @@ def save_user_profile_admin():
 # long somebody lingers after being swiped away or powered off, because no
 # process survives those to write anything.
 FRESHNESS_MS = 90 * 1000
+
+# Longest caller avatar URL worth putting in a call notification. FCM refuses a
+# data message larger than 4 KB, and a refused message is a call that never
+# rings -- so an unusually long URL is dropped and the receiver falls back to
+# the caller's generated avatar.
+AVATAR_URL_MAX_CHARS = 512
 @app.route('/api/v1/users/online', methods=['POST', 'OPTIONS'])
 def get_online_users_admin():
     if request.method == 'OPTIONS':
@@ -1795,21 +1801,38 @@ def notify_incoming_call():
             return jsonify({"ok": True, "delivered": False}), 200
 
         caller_name = display_name(db_client, uid)
-        room_id = (offer_snap.to_dict() or {}).get('roomId')
+        offer = offer_snap.to_dict() or {}
+        room_id = offer.get('roomId')
+
+        # The receiver's app builds the ringing screen from this payload alone
+        # when GenGal was not running, and it cannot fall back to the offer
+        # document afterwards: the call is already deduplicated by then, so the
+        # snapshot carrying the avatar is discarded as a repeat. Without these
+        # the caller rang as a faceless placeholder.
+        call_body = {
+            "type": "call",
+            "roomId": room_id,
+            "mode": mode,
+            "callerUid": uid,
+            "callerName": caller_name,
+            "isIncomingPending": True,
+        }
+        avatar_data = offer.get('callerAvatarData')
+        if isinstance(avatar_data, dict):
+            call_body["callerAvatarData"] = avatar_data
+        avatar_url = offer.get('callerAvatarUrl')
+        # Length-checked because FCM rejects a data message over 4 KB outright,
+        # and losing the whole call notification to an over-long avatar URL is
+        # far worse than showing the generated avatar instead.
+        if isinstance(avatar_url, str) and 0 < len(avatar_url) <= AVATAR_URL_MAX_CHARS:
+            call_body["callerAvatarUrl"] = avatar_url
         # The caller's name is the headline, the way a phone call shows who is
         # ringing rather than the word "call". The chat notification already
         # leads with the sender's name; this now matches it.
         payload = push.expo_data(
             caller_name,
             f"Incoming {'video' if mode == 'video' else 'voice'} call",
-            {
-                "type": "call",
-                "roomId": room_id,
-                "mode": mode,
-                "callerUid": uid,
-                "callerName": caller_name,
-                "isIncomingPending": True,
-            },
+            call_body,
             push.call_channel_for(private_data),
             tag=f"call_{room_id}",
             category_id=push.CALL_CATEGORY,

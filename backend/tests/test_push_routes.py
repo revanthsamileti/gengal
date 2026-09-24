@@ -33,7 +33,11 @@ def store(monkeypatch):
         "users/%s" % ME: {"nickname": "Sai", "isActiveMode": True},
         "users/%s" % PEER: {"nickname": "Asha", "isActiveMode": True, "isOnline": True, "pushReachable": True},
         "user_private/%s" % PEER: {"fcmToken": "fcm-peer"},
-        "incoming_calls/%s" % PEER: {"callerUid": ME, "roomId": "room_1"},
+        "incoming_calls/%s" % PEER: {
+            "callerUid": ME, "roomId": "room_1",
+            "callerAvatarUrl": "https://example.test/sai.png",
+            "callerAvatarData": {"topType": "ShortHairDreads01", "skinColor": "Brown"},
+        },
         "chats/%s" % CHAT: {"participants": [ME, PEER]},
         "chats/%s/messages/m1" % CHAT: {"senderId": ME, "text": "hello Asha", "timestamp": now()},
     }
@@ -85,6 +89,31 @@ def test_call_goes_out_over_fcm_on_the_call_channel(client, store, sent):
     assert body["callerName"] == "Sai"
     # A call notification delivered after the offer expired rings a dead call.
     assert ttl <= 60
+
+
+def test_the_call_carries_the_caller_s_face(client, store, sent):
+    """A phone that was closed builds the ringing screen from this payload
+    alone, and cannot fall back to the offer document afterwards -- the call
+    is already deduplicated, so that snapshot is dropped as a repeat."""
+    call(client)
+
+    body = json.loads(sent[0][2]["body"])
+    assert body["callerAvatarUrl"] == "https://example.test/sai.png"
+    assert body["callerAvatarData"]["skinColor"] == "Brown"
+
+
+def test_an_absurd_avatar_url_is_dropped_rather_than_losing_the_call(client, store, sent):
+    """FCM refuses a data message over 4 KB, and a refused message is a call
+    that never rings. The generated avatar is a far better outcome."""
+    store["incoming_calls/%s" % PEER]["callerAvatarUrl"] = "https://example.test/" + ("x" * 5000)
+
+    r = call(client)
+
+    assert r.get_json()["delivered"] is True
+    body = json.loads(sent[0][2]["body"])
+    assert "callerAvatarUrl" not in body
+    # The avatar config is small and bounded, so it still travels.
+    assert body["callerAvatarData"]["skinColor"] == "Brown"
 
 
 def test_a_ringing_phone_gets_its_own_call_channel(client, store, sent):
