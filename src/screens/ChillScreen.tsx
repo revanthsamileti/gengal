@@ -420,7 +420,14 @@ export default function ChillScreen({ navigate, goBack }: Props) {
     setJoiningLudoId(room.id);
     try {
       const { joined } = await joinLudoRoom(room.id, myUid, myName, myAvatarData);
-      if (joined) navigate('LudoBoard', { roomId: room.id });
+      // joined is false only when the table no longer exists -- a lobby
+      // card that outlived its room. Doing nothing here left the button
+      // spinning and then simply stopping, with no screen and no reason.
+      if (!joined) {
+        Alert.alert('That table is gone', 'It closed before you could join. Try another one.');
+        return;
+      }
+      navigate('LudoBoard', { roomId: room.id });
     } finally {
       setJoiningLudoId(null);
     }

@@ -71,7 +71,16 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
 
-  const [room, setRoom] = useState<LudoRoom | null>(null);
+  /**
+   * undefined = still finding out, null = confirmed gone.
+   *
+   * These used to be the same value and the screen rendered it as the
+   * loading spinner -- so a room that had been deleted, or a listener that
+   * failed (subscribeToLudoRoom reports that as null on purpose), left the
+   * player watching "Setting the table..." forever, with no way to tell
+   * that the table was never coming.
+   */
+  const [room, setRoom] = useState<LudoRoom | null | undefined>(undefined);
   const [events, setEvents] = useState<LudoEvent[]>([]);
   const [chatText, setChatText] = useState('');
   const [rolling, setRolling] = useState(false);
@@ -116,7 +125,11 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
 
   // ── Room wiring ────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (!roomId) return;
+    // No room id is not "still loading" either: nothing will ever arrive.
+    if (!roomId) {
+      setRoom(null);
+      return;
+    }
     return subscribeToLudoRoom(roomId, setRoom);
   }, [roomId]);
 
@@ -319,7 +332,21 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   }, [roomId, myUid, myName, isHost, goBack]);
 
   // ── Loading ────────────────────────────────────────────────────────────────
-  if (!room) {
+  if (room === null) {
+    return (
+      <View style={styles.root}>
+        <SafeAreaView style={styles.center}>
+          <Text style={styles.goneTitle}>This table is gone</Text>
+          <Text style={styles.loadingText}>The game ended, or it could not be reached.</Text>
+          <Pressable onPress={() => goBack?.()} style={styles.goneBtn} accessibilityRole="button">
+            <Text style={styles.goneBtnText}>Back to games</Text>
+          </Pressable>
+        </SafeAreaView>
+      </View>
+    );
+  }
+
+  if (room === undefined) {
     return (
       <View style={styles.root}>
         <SafeAreaView style={styles.center}>
@@ -741,6 +768,12 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: ludo.surface },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   loadingText: { color: ludo.inkSoft, fontSize: 13, fontWeight: '700' },
+  goneTitle: { color: ludo.ink, fontSize: 20, fontWeight: '800' },
+  goneBtn: {
+    marginTop: 8, paddingHorizontal: 22, paddingVertical: 12,
+    borderRadius: 14, backgroundColor: ludo.ink,
+  },
+  goneBtnText: { color: ludo.surface, fontSize: 15, fontWeight: '800' },
   pressed: { opacity: 0.7 },
 
   header: {

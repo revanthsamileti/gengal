@@ -311,7 +311,13 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
    */
   const answerIncomingCall = React.useCallback(() => {
     if (!ringSlotUid || !callRef.callerUid) return;
+    // Both in the same render. isConnecting starts false on this screen (it is
+    // seeded from !isIncomingPending), and the effect that sets it only runs
+    // after isPending clears -- so answering used to paint the full call UI
+    // with no overlay for a frame, then drop the connecting overlay on top of
+    // it, then take it away again. Three states where there should be one.
     setIsPending(false);
+    setIsConnecting(true);
     acceptCallOffer(ringSlotUid, callRef).catch((e) => {
       console.warn('Failed to accept call:', e);
       if (e instanceof CallGoneError) {
