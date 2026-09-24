@@ -43,6 +43,82 @@ type ProfileDetailsScreenProps = {
   route: any;
 };
 
+/**
+ * Working out roughly where somebody is, from their IP.
+ *
+ * Three services are asked because any one of them can be down, rate-limited
+ * or wrong. They used to be asked *in turn*, and none of the three had a
+ * timeout -- so on a weak connection the first request could hang for as long
+ * as the platform allowed, then the second, then the third, while the profile
+ * screen sat on its spinner during signup with no way past it.
+ *
+ * Now all three are asked at once and the first usable answer wins, so the
+ * wait is the fastest service rather than the sum of the slowest, and it is
+ * bounded either way.
+ */
+const GEO_TIMEOUT_MS = 5000;
+
+type GeoAnswer = { region: string; country: string; city: string };
+
+const GEO_PROVIDERS: { url: string; read: (data: any) => GeoAnswer | null }[] = [
+  {
+    url: 'https://ipwhois.app/json/',
+    read: (d) =>
+      d?.success !== false && d?.region
+        ? { region: d.region, country: d.country || '', city: d.city || '' }
+        : null,
+  },
+  {
+    url: 'https://ipapi.co/json/',
+    read: (d) =>
+      d?.region ? { region: d.region, country: d.country_name || '', city: d.city || '' } : null,
+  },
+  {
+    // Answers 307 to its own https host; fetch follows that, curl without -L
+    // does not, which is why this one looks broken when tested by hand.
+    url: 'https://freeipapi.com/api/json/',
+    read: (d) =>
+      d?.regionName
+        ? { region: d.regionName, country: d.countryName || '', city: d.cityName || '' }
+        : null,
+  },
+];
+
+const askGeoProvider = async (provider: (typeof GEO_PROVIDERS)[number]): Promise<GeoAnswer | null> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GEO_TIMEOUT_MS);
+  try {
+    const res = await fetch(provider.url, { signal: controller.signal });
+    if (!res.ok) return null;
+    return provider.read(await res.json());
+  } catch {
+    // Timed out, offline, or HTML where JSON was expected. A provider that
+    // fails must not stop the others answering.
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/** The first provider with a usable answer; null once all three have failed. */
+const firstGeoAnswer = (): Promise<GeoAnswer | null> =>
+  new Promise((resolve) => {
+    let settled = false;
+    let outstanding = GEO_PROVIDERS.length;
+    GEO_PROVIDERS.forEach((provider) => {
+      askGeoProvider(provider).then((answer) => {
+        if (settled) return;
+        if (answer) {
+          settled = true;
+          resolve(answer);
+        } else if (--outstanding === 0) {
+          settled = true;
+          resolve(null);
+        }
+      });
+    });
+  });
+
 export default function ProfileDetailsScreen({ navigate, route }: ProfileDetailsScreenProps) {
   const isEditMode = route?.params?.isEditMode || false;
   const returnTo = route?.params?.returnTo || 'Settings';
@@ -71,58 +147,10 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
     if (!isUserInitiated && (stateText || route?.params?.state || isEditMode)) return;
     setIsDetectingState(true);
     try {
-      let detectedRegion = '';
-      let detectedCountry = '';
-      let detectedCity = '';
-
-      // Primary: ipwhois.app
-      try {
-        const res = await fetch('https://ipwhois.app/json/');
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success !== false && data.region) {
-            detectedRegion = data.region;
-            detectedCountry = data.country || '';
-            detectedCity = data.city || '';
-          }
-        }
-      } catch (err) {
-        console.warn('ipwhois fallback needed:', err);
-      }
-
-      // Fallback 1: ipapi.co
-      if (!detectedRegion) {
-        try {
-          const res2 = await fetch('https://ipapi.co/json/');
-          if (res2.ok) {
-            const data2 = await res2.json();
-            if (data2.region) {
-              detectedRegion = data2.region;
-              detectedCountry = data2.country_name || '';
-              detectedCity = data2.city || '';
-            }
-          }
-        } catch (err2) {
-          console.warn('ipapi fallback needed:', err2);
-        }
-      }
-
-      // Fallback 2: freeipapi.com
-      if (!detectedRegion) {
-        try {
-          const res3 = await fetch('https://freeipapi.com/api/json/');
-          if (res3.ok) {
-            const data3 = await res3.json();
-            if (data3.regionName) {
-              detectedRegion = data3.regionName;
-              detectedCountry = data3.countryName || '';
-              detectedCity = data3.cityName || '';
-            }
-          }
-        } catch (err3) {
-          console.warn('freeipapi fallback needed:', err3);
-        }
-      }
+      const found = await firstGeoAnswer();
+      const detectedRegion = found?.region ?? '';
+      const detectedCountry = found?.country ?? '';
+      const detectedCity = found?.city ?? '';
 
       if (detectedRegion) {
         setStateText(detectedRegion);
