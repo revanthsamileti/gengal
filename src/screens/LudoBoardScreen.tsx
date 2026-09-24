@@ -25,7 +25,7 @@ import { LudoPawn } from '../components/ludo/LudoPawn';
 import { LudoBoardSurface } from '../components/ludo/LudoBoardSurface';
 import { LudoDie } from '../components/ludo/LudoDie';
 import { PlayerSeat } from '../components/ludo/PlayerSeat';
-import { cellForPosition, PlayerColor } from './LudoConstants';
+import { BASE_ORIGIN, cellForPosition, PlayerColor } from './LudoConstants';
 import { GEMS, ludo, ludoRadius, ludoType, numeric } from '../theme/ludoTheme';
 
 import { useRoomVoice } from '../hooks/useRoomVoice';
@@ -51,10 +51,22 @@ interface Props {
 }
 
 /** Seats sit at the corner of the board their colour occupies. */
-const SEAT_LAYOUT: { color: PlayerColor; align: 'left' | 'right' }[][] = [
-  [{ color: 'red', align: 'left' }, { color: 'blue', align: 'right' }],
-  [{ color: 'yellow', align: 'left' }, { color: 'green', align: 'right' }],
-];
+/**
+ * Where each player's card sits, derived from where their home actually is.
+ *
+ * This was a hand-written list, and every entry was wrong: red sat above the
+ * blue corner, blue above green's, yellow below red's and green below
+ * yellow's. Each player's card was pinned over somebody else's home, which is
+ * the one thing a seat's position is supposed to tell you. Reading it off
+ * BASE_ORIGIN means the seats cannot drift from the board again.
+ */
+const SEAT_LAYOUT: { color: PlayerColor; align: 'left' | 'right' }[][] =
+  ([0, 9] as const).map((row) =>
+    (Object.keys(BASE_ORIGIN) as PlayerColor[])
+      .filter((color) => BASE_ORIGIN[color].y === row)
+      .sort((a, b) => BASE_ORIGIN[a].x - BASE_ORIGIN[b].x)
+      .map((color, i) => ({ color, align: i === 0 ? ('left' as const) : ('right' as const) })),
+  );
 
 const ROLL_COST = 15;
 const BET_AMOUNT = 50;
