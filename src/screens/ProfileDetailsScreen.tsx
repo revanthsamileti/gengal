@@ -100,20 +100,63 @@ const askGeoProvider = async (provider: (typeof GEO_PROVIDERS)[number]): Promise
   }
 };
 
-/** The first provider with a usable answer; null once all three have failed. */
-const firstGeoAnswer = (): Promise<GeoAnswer | null> =>
+/**
+ * The most common non-empty value, if it occurs at least `min` times.
+ * Compared case-insensitively but returned as the providers spelled it.
+ */
+const agreedValue = (values: string[], min = 2): string | null => {
+  const counts = new Map<string, { label: string; n: number }>();
+  for (const value of values) {
+    const label = (value || '').trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    const seen = counts.get(key);
+    counts.set(key, { label: seen?.label ?? label, n: (seen?.n ?? 0) + 1 });
+  }
+  let best: { label: string; n: number } | null = null;
+  for (const entry of counts.values()) {
+    if (!best || entry.n > best.n) best = entry;
+  }
+  return best && best.n >= min ? best.label : null;
+};
+
+const summarise = (answers: GeoAnswer[]): GeoAnswer | null => {
+  if (!answers.length) return null;
+  return {
+    // Providers nearly always agree on the state, so one answer is enough.
+    region: agreedValue(answers.map((a) => a.region)) ?? answers[0].region,
+    country: agreedValue(answers.map((a) => a.country)) ?? answers[0].country,
+    // City is where this method is least trustworthy: a mobile connection
+    // resolves to wherever the carrier's gateway sits, which can be a
+    // different city entirely -- the same connection here reported Hyderabad
+    // over IPv6 and Bellampalli over IPv4. Offered only when two services
+    // independently agree; otherwise it is left for the person to fill in,
+    // which is better than confidently writing the wrong town into a
+    // profile other people search on.
+    city: agreedValue(answers.map((a) => a.city)) ?? '',
+  };
+};
+
+/**
+ * Asks every provider at once and returns what they agree on.
+ *
+ * Resolves as soon as two of them agree on a city, since that is as much
+ * confidence as this method can offer, and otherwise once they have all
+ * answered or run out of time.
+ */
+const detectLocation = (): Promise<GeoAnswer | null> =>
   new Promise((resolve) => {
-    let settled = false;
+    const answers: GeoAnswer[] = [];
     let outstanding = GEO_PROVIDERS.length;
+    let settled = false;
     GEO_PROVIDERS.forEach((provider) => {
       askGeoProvider(provider).then((answer) => {
         if (settled) return;
-        if (answer) {
+        if (answer) answers.push(answer);
+        outstanding -= 1;
+        if (agreedValue(answers.map((a) => a.city)) || outstanding === 0) {
           settled = true;
-          resolve(answer);
-        } else if (--outstanding === 0) {
-          settled = true;
-          resolve(null);
+          resolve(summarise(answers));
         }
       });
     });
@@ -147,7 +190,7 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
     if (!isUserInitiated && (stateText || route?.params?.state || isEditMode)) return;
     setIsDetectingState(true);
     try {
-      const found = await firstGeoAnswer();
+      const found = await detectLocation();
       const detectedRegion = found?.region ?? '';
       const detectedCountry = found?.country ?? '';
       const detectedCity = found?.city ?? '';
@@ -426,7 +469,7 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
                   <MaterialIcons name="my-location" size={13} color={skeuo.plum} style={{ marginRight: 5 }} />
                 )}
                 <Text style={styles.autoDetectText}>
-                  {isDetectingState ? 'Detecting...' : autoDetectedState ? '✨ Auto-Detected' : 'Auto Detect'}
+                  {isDetectingState ? 'Detecting...' : autoDetectedState ? 'Detected' : 'Auto Detect'}
                 </Text>
               </TouchableOpacity>
             </View>
@@ -441,8 +484,10 @@ export default function ProfileDetailsScreen({ navigate, route }: ProfileDetails
               placeholderTextColor="#A0A0A0"
             />
             {autoDetectedState && (
+              // Said as a guess, because it is one: this comes from the
+              // address your connection presents, not from where you are.
               <Text style={styles.autoDetectSuccess}>
-                ✓ State automatically detected during registration
+                Guessed from your connection — change it if it is wrong
               </Text>
             )}
           </View>
