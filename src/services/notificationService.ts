@@ -190,6 +190,16 @@ export async function registerForPushNotificationsAsync(userId: string) {
       },
     ]);
 
+    // Routes a Decline tap to the headless task when there is no app running
+    // to hear it (see callActionTask.ts). Registration is idempotent, and its
+    // failure must not stop the token being stored below.
+    try {
+      const { CALL_ACTION_TASK } = await import('./callActionTask');
+      await Notifications.registerTaskAsync?.(CALL_ACTION_TASK);
+    } catch (e) {
+      console.warn('[NotificationService] Background notification task unavailable:', e);
+    }
+
     const { status: existingStatus } = await Notifications.getPermissionsAsync();
     let finalStatus = existingStatus;
 
