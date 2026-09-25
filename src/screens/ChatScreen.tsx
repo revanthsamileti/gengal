@@ -32,6 +32,11 @@ import {
 import { auth } from '../config/firebase';
 import { useActionLock } from '../hooks/useActionLock';
 import { launchCall } from '../services/callPermissionService';
+import {
+  describePresence,
+  subscribeToUserProfile,
+  UserProfile,
+} from '../services/userService';
 import { Alert } from '../components/CustomAlert';
 import { useBlockedUids } from '../services/safetyService';
 
@@ -78,6 +83,13 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
   // Surface listener failures so the user sees an error instead of a blank list.
   const [listenerError, setListenerError] = useState(false);
   const [peerTyping, setPeerTyping] = useState(false);
+  /**
+   * The other person's live record. The header used to state "Online now" as
+   * static text for everyone; this is where the real answer comes from.
+   */
+  const [peer, setPeer] = useState<UserProfile | null>(null);
+  /** Only the setter is used: bumping it re-renders, which is the point. */
+  const [, bumpPresenceClock] = useState(0);
 
   // ScrollView ref and scroll-position tracking for smart auto-scroll.
   const scrollRef = useRef<ScrollView>(null);
@@ -181,6 +193,23 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
     };
   }, [chatId, currentUid]);
 
+  // The peer's live record, for the header. Its own effect so a presence
+  // failure cannot take the message listener down with it.
+  useEffect(() => {
+    if (!targetUid) {
+      setPeer(null);
+      return;
+    }
+    return subscribeToUserProfile(targetUid, setPeer);
+  }, [targetUid]);
+
+  // "Last seen 3m ago" is computed from a timestamp, so without a tick it
+  // would sit at whatever it said when the screen opened.
+  useEffect(() => {
+    const t = setInterval(() => bumpPresenceClock((n) => n + 1), 60000);
+    return () => clearInterval(t);
+  }, []);
+
   // Auto-scroll to the newest message, but only when the user is already at
   // the bottom of the list. Scrolling them back while they are reading history
   // is a real annoyance that made users miss context.
@@ -194,6 +223,10 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
     );
     return () => clearTimeout(t);
   }, [messages.length]);
+
+  // Recomputed on every render; the minute timer above is what forces one, so
+  // "Last seen 3m ago" does not sit frozen at whatever it said on open.
+  const presence = describePresence(peer);
 
   const handleSend = async (text = draft) => {
     const trimmed = text.trim();
@@ -268,13 +301,15 @@ export default function ChatScreen({ profileName, navigate, goBack, route }: Cha
                   off the right edge -- the container already has minWidth 0,
                   but without numberOfLines the text still forces the row wider. */}
               <Text style={styles.name} numberOfLines={1}>{profile.name}</Text>
-              <View style={styles.statusRow}>
-                <View style={styles.onlineDot} />
-                {/* Single line: the two price pills leave this column narrow,
-                    and without it "Online now" wrapped and pushed the header
-                    taller than the name it sits under. */}
-                <Text style={styles.statusText} numberOfLines={1}>Online now</Text>
-              </View>
+              {presence.text ? (
+                <View style={styles.statusRow}>
+                  <View style={[styles.onlineDot, PRESENCE_DOT[presence.tone]]} />
+                  {/* Single line: the two price pills leave this column narrow,
+                      and without it the status wrapped and pushed the header
+                      taller than the name it sits under. */}
+                  <Text style={styles.statusText} numberOfLines={1}>{presence.text}</Text>
+                </View>
+              ) : null}
             </View>
           </View>
           <View style={styles.headerActions}>
@@ -505,6 +540,8 @@ const styles = StyleSheet.create({
     borderRadius: 4,
     backgroundColor: '#73BB58',
   },
+  dotBusy: { backgroundColor: '#D9822B' },
+  dotOffline: { backgroundColor: '#BFB0A8' },
   statusText: {
     color: '#9E8C82',
     fontSize: 10,
@@ -711,3 +748,10 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 });
+
+/** Dot colour per presence tone; the base style is the green "online" case. */
+const PRESENCE_DOT = {
+  online: undefined,
+  busy: styles.dotBusy,
+  offline: styles.dotOffline,
+} as const;

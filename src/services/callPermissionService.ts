@@ -1,5 +1,6 @@
 import { Linking, PermissionsAndroid, Platform } from 'react-native';
 import { Alert } from '../components/CustomAlert';
+import { getUserProfile, isUserAvailableNow, isUserInCall } from './userService';
 
 /**
  * Up-front microphone/camera gating for outbound calls.
@@ -71,11 +72,36 @@ export async function ensureCallPermissions(
 }
 
 /**
+ * Whether the person can be called right now, checked against their live
+ * record rather than the list the caller happened to be looking at.
+ *
+ * Those lists are snapshots: someone can close the app seconds after their
+ * card is drawn, and a card that is a minute old is enough to ring a phone
+ * nobody is holding. The caller then pays the full ring timeout to find out.
+ *
+ * Only a definite "no" stops the call. If the record cannot be read at all --
+ * offline, a permissions blip -- the call goes ahead: refusing to dial because
+ * a lookup failed would be a worse bug than the one this prevents.
+ */
+async function isReachableNow(uid: string): Promise<{ ok: boolean; reason?: 'offline' | 'busy' }> {
+  try {
+    const peer = await getUserProfile(uid);
+    if (!peer) return { ok: true };
+    if (isUserAvailableNow(peer)) return { ok: true };
+    return { ok: false, reason: isUserInCall(peer) ? 'busy' : 'offline' };
+  } catch {
+    return { ok: true };
+  }
+}
+
+/**
  * The single entry point every Call/Video button goes through: gate on
- * permissions, and only navigate into CallScreen once they are actually held.
- * When the dialog had to be shown, this deliberately does nothing further —
- * the user grants, then taps Call again, and that second tap goes straight
- * through the `granted` path above.
+ * permissions and on the other person being reachable, and only navigate into
+ * CallScreen once both hold.
+ *
+ * When the permission dialog had to be shown, this deliberately does nothing
+ * further — the user grants, then taps Call again, and that second tap goes
+ * straight through the `granted` path above.
  */
 export async function launchCall(
   navigate: (screen: string, params?: any) => void,
@@ -83,5 +109,21 @@ export async function launchCall(
 ): Promise<void> {
   const outcome = await ensureCallPermissions(params.mode);
   if (outcome !== 'granted') return;
+
+  const peerUid: string | undefined = params.matchData?.uid;
+  const peerName: string = params.profileName || params.matchData?.name || 'They';
+  if (peerUid) {
+    const { ok, reason } = await isReachableNow(peerUid);
+    if (!ok) {
+      Alert.alert(
+        reason === 'busy' ? `${peerName} is on another call` : `${peerName} is offline`,
+        reason === 'busy'
+          ? 'Try again in a few minutes.'
+          : 'You can call them when they are back online. Send a message in the meantime.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+  }
   navigate('Call', params);
 }

@@ -34,10 +34,13 @@ function ModeButton({
   mode,
   profile,
   navigate,
+  reachable,
 }: {
   mode: 'call' | 'video';
   profile: any;
   navigate: ProfileScreenProps['navigate'];
+  /** False when the person is offline or already on a call. */
+  reachable: boolean;
 }) {
   const isVideo = mode === 'video';
   const { locked, run } = useActionLock();
@@ -46,7 +49,10 @@ function ModeButton({
   // offer a call button. The extra `isSampleProfile` exclusion that used to sit
   // here is gone with the seeded profiles themselves — every profile reaching
   // this screen now comes from a real Firestore account.
-  const canCall = !!(profile as any)?.uid;
+  // Offline counts the same as having no uid: launchCall refuses either way,
+  // and a button that looks live and then rejects you is worse than one that
+  // plainly is not on offer.
+  const canCall = !!(profile as any)?.uid && reachable;
 
   return (
     <TouchableOpacity
@@ -54,7 +60,11 @@ function ModeButton({
       style={[styles.modeButton, isVideo && styles.modeButtonVideo, (!canCall || locked) && { opacity: 0.5 }]}
       disabled={!canCall || locked}
       accessibilityRole="button"
-      accessibilityLabel={isVideo ? `Video call ${peerName}` : `Call ${peerName}`}
+      accessibilityLabel={
+        reachable
+          ? (isVideo ? `Video call ${peerName}` : `Call ${peerName}`)
+          : `${peerName} is offline`
+      }
       accessibilityState={{ disabled: !canCall || locked }}
       onPress={() =>
         run(() =>
@@ -148,9 +158,20 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
     profile = allProfiles[allProfiles.length - 1];
   }
 
-  const isCurrentUser = !profileName || profile?.name === (myProfile?.nickname || myProfile?.username || 'User');
-
   const targetUid = route?.params?.matchData?.uid || route?.params?.uid;
+  /**
+   * Whose profile this is.
+   *
+   * Compared by uid whenever there is one. It used to be decided by display
+   * name alone, so anybody who happened to share your nickname opened as
+   * *you*: your owner controls, your Earnings button, and no Follow button for
+   * the person you were actually looking at. The name test survives only for
+   * the entries that arrive without a uid.
+   */
+  const isCurrentUser = targetUid
+    ? targetUid === myProfile?.uid
+    : !profileName || profile?.name === (myProfile?.nickname || myProfile?.username || 'User');
+
   const myFollowing: string[] = Array.isArray(myProfile?.following) ? (myProfile!.following as string[]) : [];
   const [isFollowing, setIsFollowing] = useState(() => targetUid ? myFollowing.includes(targetUid) : false);
   const blockedUids = useBlockedUids();
@@ -407,27 +428,41 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
             ) : (
               <>
                 <View style={styles.panelHeaderRow}>
-                  <Text style={styles.panelTitle}>Available now</Text>
+                  {/* Was the fixed string "Available now", directly under a
+                      chip that could read "Offline". */}
+                  <Text style={styles.panelTitle}>
+                    {isOnline ? 'Available now' : 'Not available right now'}
+                  </Text>
                   <TouchableOpacity
                     activeOpacity={0.82}
                     style={[styles.followButton, isFollowing && styles.followingButton]}
                     hitSlop={tap34}
                     onPress={async () => {
                       const myUid = auth.currentUser?.uid;
+                      // This used to flip the button to "Following" and write
+                      // nothing, so a follow that could never be saved looked
+                      // exactly like one that was -- until you came back.
                       if (!myUid || !targetUid) {
-                        setIsFollowing(true);
+                        Alert.alert(
+                          'Could not follow',
+                          'This profile is missing some details. Open it again from the list.',
+                        );
                         return;
                       }
+                      const wasFollowing = isFollowing;
                       try {
-                        if (isFollowing) {
-                          setIsFollowing(false);
+                        setIsFollowing(!wasFollowing);
+                        if (wasFollowing) {
                           await unfollowUser(myUid, targetUid);
                         } else {
-                          setIsFollowing(true);
                           await followUser(myUid, targetUid);
                         }
-                      } catch (e) {
-                        setIsFollowing((prev) => !prev);
+                      } catch {
+                        setIsFollowing(wasFollowing);
+                        Alert.alert(
+                          wasFollowing ? 'Could not unfollow' : 'Could not follow',
+                          'Please check your connection and try again.',
+                        );
                       }
                     }}
                   >
@@ -443,7 +478,13 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
                 </View>
                 {!isBlocked && <View style={styles.modeRow}>
                   {profile.modes.map((mode: any) => (
-                    <ModeButton key={mode} mode={mode} profile={profile as any} navigate={navigate} />
+                    <ModeButton
+                      key={mode}
+                      mode={mode}
+                      profile={profile as any}
+                      navigate={navigate}
+                      reachable={isOnline}
+                    />
                   ))}
                 </View>}
                 <View style={styles.secondaryActions}>

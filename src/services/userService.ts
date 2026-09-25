@@ -258,6 +258,43 @@ const toMillis = (value: any): number => {
  * show "Available now" in the full directory while being excluded from the
  * online lists. Kept here rather than in a screen so the rule has one home.
  */
+export type Presence = {
+  text: string;
+  tone: 'online' | 'busy' | 'offline';
+};
+
+/** "3m", "4h", "2d" -- short enough for the narrow column in a chat header. */
+const sinceLabel = (ms: number): string => {
+  const minutes = Math.floor(ms / 60000);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return days < 7 ? `${days}d ago` : 'a while ago';
+};
+
+/**
+ * What to show under someone's name: one sentence, and the colour for the dot.
+ *
+ * Lives next to the rules it reads so a header cannot drift from the listings.
+ * The chat header used to render a green dot and the words "Online now" as
+ * static text, for everybody, forever.
+ *
+ * Someone who has turned "Show me as online" off gets a bare "Offline" with no
+ * time: a last-seen stamp would hand back exactly the presence they asked the
+ * app to stop publishing.
+ */
+export const describePresence = (user: UserProfile | null, now: number = Date.now()): Presence => {
+  if (!user) return { text: '', tone: 'offline' };
+  if (isUserInCall(user, now)) return { text: 'On a call', tone: 'busy' };
+  if (isUserAvailableNow(user)) return { text: 'Online now', tone: 'online' };
+  if (user.isActiveMode === false) return { text: 'Offline', tone: 'offline' };
+  const lastActiveMs = toMillis(user.lastActive);
+  if (!lastActiveMs) return { text: 'Offline', tone: 'offline' };
+  return { text: `Last seen ${sinceLabel(now - lastActiveMs)}`, tone: 'offline' };
+};
+
 export const isUserAvailableNow = (user: UserProfile): boolean => {
   // Someone mid-call is online but not reachable. Showing them as "Available
   // now" invites a call that cannot be answered, and the caller pays the full
