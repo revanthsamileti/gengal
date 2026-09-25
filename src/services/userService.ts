@@ -1,5 +1,6 @@
 import { db } from '../config/firebase';
 import { isBlocked, onBlockListChange } from './safetyService';
+import { isKnownOffline, onLivePresenceChange } from './livePresenceService';
 import {
   doc,
   setDoc,
@@ -403,9 +404,19 @@ const blockAware = (
   let last: UserProfile[] | null = null;
   const emit = () => {
     if (!last) return;
-    callback(last.filter((u) => !isBlocked(u.uid) && (!stillListed || stillListed(u))));
+    callback(
+      last.filter(
+        (u) =>
+          !isBlocked(u.uid) &&
+          // A disconnect RTDB has already seen beats any staleness window.
+          // Only ever subtracts: a uid it has no record of is not hidden.
+          !(stillListed && isKnownOffline(u.uid)) &&
+          (!stillListed || stillListed(u)),
+      ),
+    );
   };
   const offBlocks = onBlockListChange(emit);
+  const offPresence = stillListed ? onLivePresenceChange(emit) : undefined;
   const timer = stillListed ? setInterval(emit, LIVE_REFILTER_MS) : undefined;
   return {
     deliver: (users: UserProfile[]) => {
@@ -414,6 +425,7 @@ const blockAware = (
     },
     off: () => {
       if (timer) clearInterval(timer);
+      offPresence?.();
       offBlocks();
     },
   };

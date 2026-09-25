@@ -31,6 +31,7 @@ import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
 import { UserProvider } from './src/context/UserContext';
 import { updateUserStatus, touchLastActive, USER_HEARTBEAT_MS } from './src/services/userService';
+import { markLivePresence, startLivePresence } from './src/services/livePresenceService';
 import { useIncomingCallWatcher } from './src/hooks/useIncomingCallWatcher';
 import { useMessageNotificationTaps } from './src/hooks/useMessageNotificationTaps';
 import { rejectCallOffer } from './src/services/liveRoomService';
@@ -575,17 +576,28 @@ export default function App() {
     // way out stuck, and reopening the app left you invisible with the switch
     // still showing on. updateUserStatus keeps isOnline in step with the
     // switch, so this never turns on someone who switched it off.
+    // Registers the "mark me offline" write on Google's servers, so a phone
+    // that is powered off or force-stopped is dropped by them rather than
+    // waiting out a staleness window here. Inert until a Realtime Database
+    // exists for the project.
+    const stopLivePresence = startLivePresence(uid);
+
     if (AppState.currentState === 'active') {
       updateUserStatus(uid, true);
+      void markLivePresence(uid, true);
       startBeating();
     }
 
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         updateUserStatus(uid, true);
+        void markLivePresence(uid, true);
         startBeating();
       } else if (nextState === 'background' || nextState === 'inactive') {
         stopBeating();
+        // Backgrounding does not always drop the socket, so onDisconnect alone
+        // would not cover pressing Home. Say it outright.
+        void markLivePresence(uid, false);
         // Leaving the app takes you out of Online Now straight away. Staying
         // listed because a push could still reach the phone left people
         // showing as online for hours after they had swiped the app away.
@@ -597,6 +609,10 @@ export default function App() {
     });
     return () => {
       stopBeating();
+      // Runs on sign-out as well as unmount, so the record does not sit online
+      // waiting for a socket timeout that a clean sign-out never produces.
+      void markLivePresence(uid, false);
+      stopLivePresence();
       subscription.remove();
     };
   }, [signedInUid]);

@@ -5,8 +5,21 @@ import { getFirestore, initializeFirestore } from 'firebase/firestore';
 import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+/**
+ * Realtime Database, used only for onDisconnect presence (livePresenceService).
+ *
+ * Its URL carries the region, which is chosen when the database is created, so
+ * it cannot be derived from the project id -- a guess that is wrong by one
+ * region fails silently, which is worse than being absent. Supplied at bundle
+ * time instead; with no value the SDK reports no database, every presence call
+ * catches, and the app falls back to the Firestore staleness rule exactly as
+ * it did before.
+ */
+const databaseURL = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL;
+
 export const firebaseConfig = {
   apiKey: "AIzaSyDf20OS0bDrX76sRiVyPI-D6t8iLOlXpkQ",
+  ...(databaseURL ? { databaseURL } : {}),
   authDomain: "gengal-38003.firebaseapp.com",
   projectId: "gengal-38003",
   storageBucket: "gengal-38003.firebasestorage.app",
