@@ -26,6 +26,15 @@ const FAST_POLL_MS = 1200;
 const FAST_WINDOW_MS = 45000;
 /** The server throttles below 0.9 s and answers 429; stay clear of it. */
 const MIN_POLL_GAP_MS = 1000;
+/**
+ * How long a sent message may take before the screen offers the other channel.
+ *
+ * SMS has a heartbeat, so the server knows when the gateway phone dies and says
+ * so. WhatsApp has no such signal -- delivery can stop at Meta's end with
+ * nothing to detect it from here -- so silence after a hand-off is the only
+ * evidence there is, and ten minutes of it helps nobody.
+ */
+const STALL_AFTER_MS = 25000;
 const PLUM = '#5A155A';
 // WhatsApp's teal green: recognisable, and dark enough for white text.
 const WHATSAPP_GREEN = '#128C7E';
@@ -71,6 +80,8 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const [smsOffline, setSmsOffline] = useState(false);
   /** Which app we sent them to, so the screen can say it is now watching. */
   const [handoff, setHandoff] = useState<SignInChannel | null>(null);
+  /** Sent a while ago and still nothing: offer the other way in. */
+  const [stalled, setStalled] = useState(false);
   const [smsAvailable, setSmsAvailable] = useState(false);
   const [copied, setCopied] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
@@ -83,6 +94,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   /** Poll quickly until this moment; set when the user hands off or returns. */
   const fastUntil = useRef(0);
   const lastPollAt = useRef(0);
+  const handoffAt = useRef(0);
   const newUserToken = useRef<string | null>(null);
 
   useEffect(() => {
@@ -98,6 +110,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
         setNotice('');
         setHint(undefined);
         setHandoff(null);
+        setStalled(false);
         setLiveChannels(null);
         fastUntil.current = 0;
         setPhase('starting');
@@ -192,6 +205,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
     timer = setTimeout(loop, FAST_POLL_MS);
     const tick = setInterval(() => {
       setSecondsLeft(Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000)));
+      if (handoffAt.current && Date.now() - handoffAt.current > STALL_AFTER_MS) setStalled(true);
     }, 1000);
     return () => {
       stopped = true;
@@ -221,6 +235,8 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
       await Linking.openURL(whatsappLink(s.whatsappNumber, s.message));
       // From here the message can land at any moment, so watch closely.
       setHandoff('whatsapp');
+      setStalled(false);
+      handoffAt.current = Date.now();
       fastUntil.current = Date.now() + FAST_WINDOW_MS;
     } catch {
       setNotice(`Could not open WhatsApp. Send the message above to ${formatPhone(s.whatsappNumber)} yourself.`);
@@ -237,6 +253,8 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
       setNotice(cancelled ? 'SMS not sent. Tap Send SMS to try again.' : '');
       if (!cancelled) {
         setHandoff('sms');
+        setStalled(false);
+        handoffAt.current = Date.now();
         fastUntil.current = Date.now() + FAST_WINDOW_MS;
       }
       pollOnce();
@@ -258,6 +276,9 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const onWhatsApp = channels.includes('whatsapp') && Boolean(session?.whatsappNumber);
   const bySms = channels.includes('sms') && Boolean(session?.gatewayNumber);
   const sameNumber = onWhatsApp && bySms && session?.whatsappNumber === session?.gatewayNumber;
+  // Only worth suggesting a fallback that is actually on offer right now.
+  const otherChannel =
+    handoff === 'whatsapp' ? bySms && smsAvailable : handoff === 'sms' ? onWhatsApp : false;
   const finePrint =
     onWhatsApp && bySms
       ? 'WhatsApp is free on data. SMS may cost your operator’s standard rate.'
@@ -358,6 +379,16 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
               </Text>
               <Text style={styles.clock}>{formatClock(secondsLeft)}</Text>
             </View>
+
+            {/* A hint means the server knows what went wrong and has said so;
+                that is better information than "nothing arrived", so it wins. */}
+            {stalled && !hint && otherChannel ? (
+              <Text style={styles.info}>
+                {handoff === 'whatsapp'
+                  ? 'Nothing from WhatsApp yet. You can send it as a text instead.'
+                  : 'Nothing from that text yet. You can send it on WhatsApp instead.'}
+              </Text>
+            ) : null}
 
             {hint ? <Text style={styles.notice}>{hintText(hint, phone)}</Text> : null}
             {notice ? <Text style={styles.notice}>{notice}</Text> : null}
