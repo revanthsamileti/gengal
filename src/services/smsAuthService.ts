@@ -23,14 +23,30 @@ export type SmsSession = {
   whatsappNumber?: string;
   /** What the server can receive right now, best first. Absent from older servers. */
   channels?: SignInChannel[];
+  /** SMS is set up here but the gateway phone is unreachable: down, not absent. */
+  smsOffline?: boolean;
   expiresIn: number;
 };
 
-/** Why a session is still pending, when the server knows. */
-export type SmsPendingHint = 'sender_mismatch' | 'share_number';
+/**
+ * Why a session is still pending, when the server knows.
+ *
+ * `wrong_sim` and `no_code` mean the message reached us and was dropped. They
+ * exist because the alternative was a ten-minute spinner: the server logged
+ * the reason and told the waiting app nothing.
+ */
+export type SmsPendingHint = 'sender_mismatch' | 'share_number' | 'wrong_sim' | 'no_code';
+
+const HINTS: SmsPendingHint[] = ['sender_mismatch', 'share_number', 'wrong_sim', 'no_code'];
 
 export type SmsPollResult =
-  | { status: 'pending'; expiresIn: number; hint?: SmsPendingHint }
+  | {
+      status: 'pending';
+      expiresIn: number;
+      hint?: SmsPendingHint;
+      channels?: SignInChannel[];
+      smsOffline?: boolean;
+    }
   | { status: 'expired' }
   | { status: 'verified'; token: string; isNewUser: boolean }
   /** Transient (network, throttle, 5xx): keep polling until the deadline. */
@@ -92,8 +108,19 @@ export const pollSmsVerification = async (sessionId: string): Promise<SmsPollRes
       return { status: 'verified', token: data.token, isNewUser: Boolean(data.isNewUser) };
     }
     if (data?.status === 'pending') {
-      const hint = data.hint === 'sender_mismatch' || data.hint === 'share_number' ? data.hint : undefined;
-      return { status: 'pending', expiresIn: Number(data.expiresIn) || 0, hint };
+      const hint = HINTS.includes(data.hint) ? (data.hint as SmsPendingHint) : undefined;
+      // Absent from an older server, which is why the screen only narrows its
+      // channels when a list actually arrives.
+      const channels = Array.isArray(data.channels)
+        ? (data.channels.filter((c: unknown) => c === 'sms' || c === 'whatsapp') as SignInChannel[])
+        : undefined;
+      return {
+        status: 'pending',
+        expiresIn: Number(data.expiresIn) || 0,
+        hint,
+        channels,
+        smsOffline: Boolean(data.smsOffline),
+      };
     }
     if (data?.status === 'expired') return { status: 'expired' };
     return { status: 'retry' };

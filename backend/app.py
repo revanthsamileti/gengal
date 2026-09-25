@@ -449,6 +449,37 @@ def log_sms(outcome, phone=None):
     print(f"[AUTH] sms_verify outcome={outcome} phone={masked}", flush=True)
 
 
+def channel_status():
+    """(channels, sms_configured, gateway_health): what can take a code right now.
+
+    Shared by start and status so the two cannot disagree: the gateway phone
+    can die while somebody is already waiting, and the screen can only move
+    them to WhatsApp if every poll reports what is still up.
+    """
+    sms_configured = bool(env_value("SMS_GATEWAY_NUMBER") and env_value("SMS_GATEWAY_SIGNING_KEY"))
+    health, _ = sms_gateway.status()
+    sms_up = sms_configured and health not in ("offline", "misconfigured")
+    # WhatsApp lands on Meta's servers, not on the gateway phone, so it keeps
+    # sign-in working while that phone is down.
+    channels = (["whatsapp"] if whatsapp_configured() else []) + (["sms"] if sms_up else [])
+    return channels, sms_configured, health
+
+
+def note_sms_hint(raw_sender, text, hint, received_at=None):
+    """Tell the waiting app why an SMS that did reach us did not sign it in.
+
+    Matching on the code is exact; falling back to the sender covers the case
+    where the code is what was unreadable. Without this a dropped SMS was only
+    ever a log line, and the app spun until the session expired.
+    """
+    code = sms_verify.parse_code(text)
+    if code and sms_sessions.note_hint(code, hint, received_at) == "ok":
+        return
+    sender = sms_verify.normalize_in_mobile(raw_sender)
+    if sender:
+        sms_sessions.note_hint_for_phone(sender, hint)
+
+
 @app.route('/api/v1/auth/sms/start', methods=['POST', 'OPTIONS'])
 def sms_start():
     if request.method == 'OPTIONS':
@@ -460,14 +491,10 @@ def sms_start():
 
     dev_bypass = os.environ.get("ALLOW_DEV_OTP_BYPASS") == "true"
     gateway_number = env_value("SMS_GATEWAY_NUMBER")
-    sms_configured = bool(gateway_number and env_value("SMS_GATEWAY_SIGNING_KEY"))
-    health, _ = sms_gateway.status()
-    sms_up = sms_configured and health not in ("offline", "misconfigured")
+    channels, sms_configured, health = channel_status()
+    sms_up = "sms" in channels
     if sms_configured and not sms_up:
         log_sms("gateway_" + health, phone)
-    # WhatsApp lands on Meta's servers, not on the gateway phone, so it keeps
-    # sign-in working while that phone is down.
-    channels = (["whatsapp"] if whatsapp_configured() else []) + (["sms"] if sms_up else [])
     if not dev_bypass and not channels:
         if not sms_configured:
             return jsonify({"error": "SMS sign-in is not configured", "code": "sms_not_configured"}), 503
@@ -494,6 +521,9 @@ def sms_start():
         "gatewayNumber": gateway_number if (sms_up or dev_bypass) else "",
         "whatsappNumber": env_value("WHATSAPP_NUMBER") if "whatsapp" in channels else "",
         "channels": channels,
+        # Configured but unreachable, so the screen can say "down for a few
+        # minutes" rather than implying SMS was never on offer here.
+        "smsOffline": sms_configured and not sms_up,
         "expiresIn": sms_verify.SESSION_TTL_SECONDS,
     }), 200
 
@@ -550,6 +580,10 @@ def accept_sms(raw_sender, text, received_at):
     code = sms_verify.parse_code(text)
     if not sender or not code:
         log_sms("unparseable", sender)
+        # An alphanumeric sender id is a bank or operator texting the gateway,
+        # not a user: there is nobody waiting to tell.
+        if sender:
+            sms_sessions.note_hint_for_phone(sender, "no_code")
         return
     log_sms(sms_sessions.mark_verified(code, sender, received_at), sender)
 
@@ -579,22 +613,26 @@ def sms_forwarder_inbound():
         log_sms("bad_payload")
         return ok
 
-    # Users are told to text one SIM's number; an SMS landing on the phone's
-    # other SIM must not count, or the advertised number would not be the only
-    # way in.
-    wanted_sim = env_value("SMS_GATEWAY_SIM").lower()
-    sim = str(payload.get("sim") or "").lower()
-    if wanted_sim and sim != wanted_sim:
-        log_sms(f"wrong_sim:{sim or '-'}")
-        return ok
+    received_at = (sms_verify.epoch_millis_to_seconds(payload.get("receivedStamp"))
+                   or sms_verify.epoch_millis_to_seconds(payload.get("sentStamp")))
 
     # A retry resends the identical body, so its hash identifies the delivery.
+    # Checked before the SIM gate so a retry cannot re-hint a session either.
     if sms_sessions.seen_delivery("fwd:" + hashlib.sha256(raw).hexdigest()):
         log_sms("duplicate")
         return ok
 
-    received_at = (sms_verify.epoch_millis_to_seconds(payload.get("receivedStamp"))
-                   or sms_verify.epoch_millis_to_seconds(payload.get("sentStamp")))
+    # Users are told to text one SIM's number; an SMS landing on the phone's
+    # other SIM must not count, or the advertised number would not be the only
+    # way in. It does get a hint: the message reached us, and leaving the app
+    # to time out on a text we deliberately dropped is the worst of both.
+    wanted_sim = env_value("SMS_GATEWAY_SIM").lower()
+    sim = str(payload.get("sim") or "").lower()
+    if wanted_sim and sim != wanted_sim:
+        log_sms(f"wrong_sim:{sim or '-'}")
+        note_sms_hint(payload.get("from"), payload.get("text"), "wrong_sim", received_at)
+        return ok
+
     accept_sms(payload.get("from"), payload.get("text"), received_at)
     return ok
 
@@ -626,7 +664,9 @@ def sms_status():
     if state == "expired":
         return jsonify({"status": "expired"}), 200
     if state == "pending":
-        pending = {"status": "pending", "expiresIn": value}
+        channels, sms_configured, _ = channel_status()
+        pending = {"status": "pending", "expiresIn": value, "channels": channels,
+                   "smsOffline": sms_configured and "sms" not in channels}
         hint = (sms_sessions.info(session_id) or {}).get("hint")
         if hint:
             pending["hint"] = hint

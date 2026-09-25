@@ -377,6 +377,63 @@ def test_forwarder_rejects_an_sms_older_than_its_session(client, sms, sim1):
     assert status(client, body["sessionId"]).get_json()["status"] == "pending"
 
 
+def test_forwarder_tells_the_waiting_app_the_sms_hit_the_other_sim(client, sms, sim1):
+    """A dropped SMS must say so. It used to be logged and silently discarded,
+    so someone who texted the wrong SIM watched the spinner for ten minutes."""
+    body = start(client).get_json()
+    forwarder(client, forwarder_body(PHONE, body["message"], sim="sim2"))
+    pending = status(client, body["sessionId"]).get_json()
+    assert pending["status"] == "pending"
+    assert pending["hint"] == "wrong_sim"
+
+
+def test_forwarder_tells_the_waiting_app_when_the_code_was_unreadable(client, sms, sim1):
+    """An edited or mangled message reaches us with no code to match on, so the
+    hint has to be attached by sender instead."""
+    body = start(client).get_json()
+    forwarder(client, forwarder_body(PHONE, "hey"))
+    assert status(client, body["sessionId"]).get_json()["hint"] == "no_code"
+
+
+def test_a_stranger_texting_nonsense_does_not_disturb_a_live_session(client, sms, sim1):
+    """The no-code hint is keyed by sender, so it must not land on somebody
+    else's session."""
+    body = start(client).get_json()
+    forwarder(client, forwarder_body("+919123456789", "hey"))
+    assert "hint" not in status(client, body["sessionId"]).get_json()
+
+
+def test_status_tells_the_waiting_app_which_channels_are_live(client, sms, sim1, monkeypatch):
+    """The gateway can die while somebody is already waiting; the screen can
+    only offer WhatsApp instead if each poll says what is still up."""
+    body = start(client).get_json()
+    assert "sms" in status(client, body["sessionId"]).get_json()["channels"]
+
+    clock = [time.time()]
+    health = sms_verify.GatewayHealth(clock=lambda: clock[0])
+    health.seen()
+    clock[0] += 301
+    monkeypatch.setattr(app_module, "sms_gateway", health)
+    assert "sms" not in status(client, body["sessionId"]).get_json()["channels"]
+
+
+def test_status_separates_sms_being_down_from_sms_being_absent(client, sms, sim1, monkeypatch):
+    """"Down for a few minutes" and "not offered here" need different words for
+    somebody who has no WhatsApp, so the flag is reported apart from channels."""
+    body = start(client).get_json()
+    assert body["smsOffline"] is False
+
+    clock = [time.time()]
+    health = sms_verify.GatewayHealth(clock=lambda: clock[0])
+    health.seen()
+    clock[0] += 301
+    monkeypatch.setattr(app_module, "sms_gateway", health)
+    assert status(client, body["sessionId"]).get_json()["smsOffline"] is True
+
+    monkeypatch.delenv("SMS_GATEWAY_NUMBER")
+    assert status(client, body["sessionId"]).get_json()["smsOffline"] is False
+
+
 def test_forwarder_from_the_wrong_sender_does_not_verify(client, sms, sim1):
     body = start(client).get_json()
     forwarder(client, forwarder_body("+919123456789", body["message"]))

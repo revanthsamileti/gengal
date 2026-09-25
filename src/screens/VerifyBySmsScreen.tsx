@@ -8,6 +8,7 @@ import { useActionLock } from '../hooks/useActionLock';
 import {
   pollSmsVerification,
   signInWithSmsToken,
+  SignInChannel,
   SmsAuthError,
   SmsPendingHint,
   SmsSession,
@@ -15,7 +16,16 @@ import {
   whatsappLink,
 } from '../services/smsAuthService';
 
-const POLL_INTERVAL_MS = 2000;
+/**
+ * Polling cadence. Nothing can arrive until the user actually sends something,
+ * so the idle rate is unhurried and the fast rate is spent where it shows:
+ * the half minute after they hand off to WhatsApp or the SMS app.
+ */
+const IDLE_POLL_MS = 2500;
+const FAST_POLL_MS = 1200;
+const FAST_WINDOW_MS = 45000;
+/** The server throttles below 0.9 s and answers 429; stay clear of it. */
+const MIN_POLL_GAP_MS = 1000;
 const PLUM = '#5A155A';
 // WhatsApp's teal green: recognisable, and dark enough for white text.
 const WHATSAPP_GREEN = '#128C7E';
@@ -33,10 +43,20 @@ type Props = {
 const formatPhone = (p: string) => (p.length === 13 ? `${p.slice(0, 3)} ${p.slice(3, 8)} ${p.slice(8)}` : p);
 const formatClock = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
-const hintText = (hint: SmsPendingHint, phone: string) =>
-  hint === 'share_number'
-    ? 'Almost done: tap “Share phone number” in WhatsApp.'
-    : `That message came from a different number. Send it from the WhatsApp or SIM of ${formatPhone(phone)}.`;
+const hintText = (hint: SmsPendingHint, phone: string) => {
+  switch (hint) {
+    case 'share_number':
+      return 'Almost done: tap “Share phone number” in WhatsApp.';
+    case 'sender_mismatch':
+      return `That message came from a different number. Send it from the WhatsApp or SIM of ${formatPhone(phone)}.`;
+    // Not the user's fault: the text reached the gateway on a line the server
+    // is not reading. Point at the channel that works instead of blaming them.
+    case 'wrong_sim':
+      return 'Your text reached us, but not on a line we can read. Send it on WhatsApp instead.';
+    case 'no_code':
+      return 'We got your text, but could not find the code in it. Send the message exactly as written.';
+  }
+};
 
 export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const phone = route?.params?.phone ?? '';
@@ -46,6 +66,11 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const [errorMsg, setErrorMsg] = useState('');
   const [notice, setNotice] = useState('');
   const [hint, setHint] = useState<SmsPendingHint | undefined>();
+  /** Live from each poll: the gateway phone can die while someone is waiting. */
+  const [liveChannels, setLiveChannels] = useState<SignInChannel[] | null>(null);
+  const [smsOffline, setSmsOffline] = useState(false);
+  /** Which app we sent them to, so the screen can say it is now watching. */
+  const [handoff, setHandoff] = useState<SignInChannel | null>(null);
   const [smsAvailable, setSmsAvailable] = useState(false);
   const [copied, setCopied] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
@@ -55,6 +80,9 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const deadlineRef = useRef(0);
   const pollInFlight = useRef(false);
   const finished = useRef(false);
+  /** Poll quickly until this moment; set when the user hands off or returns. */
+  const fastUntil = useRef(0);
+  const lastPollAt = useRef(0);
   const newUserToken = useRef<string | null>(null);
 
   useEffect(() => {
@@ -69,12 +97,17 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
         setErrorMsg('');
         setNotice('');
         setHint(undefined);
+        setHandoff(null);
+        setLiveChannels(null);
+        fastUntil.current = 0;
         setPhase('starting');
         try {
           const s = await startSmsVerification(phone);
           sessionRef.current = s;
           deadlineRef.current = Date.now() + s.expiresIn * 1000;
           setSession(s);
+          setLiveChannels(s.channels ?? []);
+          setSmsOffline(Boolean(s.smsOffline));
           setSecondsLeft(s.expiresIn);
           setPhase('waiting');
         } catch (e) {
@@ -96,17 +129,28 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const pollOnce = useCallback(async () => {
     const s = sessionRef.current;
     if (!s || pollInFlight.current || finished.current) return;
+    // Two timers can line up -- the loop and the return-to-foreground check --
+    // and the server answers 429 below 0.9 s. Skipping the duplicate is free:
+    // a poll just happened.
+    if (Date.now() - lastPollAt.current < MIN_POLL_GAP_MS) return;
     if (Date.now() >= deadlineRef.current) {
       sessionRef.current = null;
       setPhase('expired');
       return;
     }
     pollInFlight.current = true;
+    lastPollAt.current = Date.now();
     try {
       const result = await pollSmsVerification(s.sessionId);
       if (sessionRef.current !== s || finished.current) return;
       if (result.status === 'pending') {
         setHint(result.hint);
+        // Only narrow on a list the server actually sent: an older build omits
+        // it, and an absent list must not empty the screen of its buttons.
+        if (result.channels) {
+          setLiveChannels(result.channels);
+          setSmsOffline(Boolean(result.smsOffline));
+        }
       } else if (result.status === 'expired') {
         sessionRef.current = null;
         setPhase('expired');
@@ -134,23 +178,36 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
     }
   }, [navigate, phone]);
 
+  // A self-scheduling timeout rather than setInterval, so the gap can change
+  // between polls without tearing the loop down and starting it again.
   useEffect(() => {
     if (phase !== 'waiting') return;
-    const poll = setInterval(pollOnce, POLL_INTERVAL_MS);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const loop = async () => {
+      await pollOnce();
+      if (stopped) return;
+      timer = setTimeout(loop, Date.now() < fastUntil.current ? FAST_POLL_MS : IDLE_POLL_MS);
+    };
+    timer = setTimeout(loop, FAST_POLL_MS);
     const tick = setInterval(() => {
       setSecondsLeft(Math.max(0, Math.round((deadlineRef.current - Date.now()) / 1000)));
     }, 1000);
     return () => {
-      clearInterval(poll);
+      stopped = true;
+      clearTimeout(timer);
       clearInterval(tick);
     };
   }, [phase, pollOnce]);
 
   // The user leaves for WhatsApp or the SMS app mid-flow, and JS timers can be
-  // suspended in the background. Check the moment they come back.
+  // suspended in the background. Check the moment they come back, and stay on
+  // the fast cadence: if the message went through, it lands about now.
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') pollOnce();
+      if (state !== 'active') return;
+      if (sessionRef.current) fastUntil.current = Date.now() + FAST_WINDOW_MS;
+      pollOnce();
     });
     return () => sub.remove();
   }, [pollOnce]);
@@ -159,8 +216,12 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
     const s = sessionRef.current;
     if (!s?.whatsappNumber) return;
     setNotice('');
+    setHint(undefined);
     try {
       await Linking.openURL(whatsappLink(s.whatsappNumber, s.message));
+      // From here the message can land at any moment, so watch closely.
+      setHandoff('whatsapp');
+      fastUntil.current = Date.now() + FAST_WINDOW_MS;
     } catch {
       setNotice(`Could not open WhatsApp. Send the message above to ${formatPhone(s.whatsappNumber)} yourself.`);
     }
@@ -169,9 +230,15 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const openComposer = async () => {
     const s = sessionRef.current;
     if (!s) return;
+    setHint(undefined);
     try {
       const { result } = await SMS.sendSMSAsync([s.gatewayNumber], s.message);
-      setNotice(result === 'cancelled' ? 'SMS not sent. Tap Send SMS to try again.' : '');
+      const cancelled = result === 'cancelled';
+      setNotice(cancelled ? 'SMS not sent. Tap Send SMS to try again.' : '');
+      if (!cancelled) {
+        setHandoff('sms');
+        fastUntil.current = Date.now() + FAST_WINDOW_MS;
+      }
       pollOnce();
     } catch {
       setNotice('Could not open your SMS app. Send the text above yourself.');
@@ -185,7 +252,9 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  const channels = session?.channels ?? [];
+  // The live list wins once a poll has produced one: the gateway can go down,
+  // or come back, while this screen is open.
+  const channels = liveChannels ?? session?.channels ?? [];
   const onWhatsApp = channels.includes('whatsapp') && Boolean(session?.whatsappNumber);
   const bySms = channels.includes('sms') && Boolean(session?.gatewayNumber);
   const sameNumber = onWhatsApp && bySms && session?.whatsappNumber === session?.gatewayNumber;
@@ -267,9 +336,26 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
               </Pressable>
             ) : null}
 
+            {/* Both channels can go down together, and the buttons simply
+                vanish. Saying so -- and that the code is still good -- is the
+                difference between waiting and giving up. The button returns on
+                its own, because every poll re-reads what is live. */}
+            {!onWhatsApp && !bySms ? (
+              <Text style={styles.info}>
+                Sign-in is down for a moment. Keep this screen open — it comes back on its own,
+                and your code is still good.
+              </Text>
+            ) : smsOffline && !bySms ? (
+              <Text style={styles.info}>
+                Texting is down for a few minutes, so WhatsApp is the way in right now.
+              </Text>
+            ) : null}
+
             <View style={styles.waitRow}>
               <ActivityIndicator color={PLUM} size="small" />
-              <Text style={styles.waitText}>Waiting for your message</Text>
+              <Text style={styles.waitText}>
+                {handoff ? 'Looking for your message…' : 'Waiting for your message'}
+              </Text>
               <Text style={styles.clock}>{formatClock(secondsLeft)}</Text>
             </View>
 
@@ -412,6 +498,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#F6EEF6', borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2,
   },
   notice: { fontSize: 13, color: '#B45309', marginTop: 12, textAlign: 'center', lineHeight: 18 },
+  // Information, not a warning: nothing has gone wrong for this user yet.
+  info: { fontSize: 13, color: '#5B4A5B', marginTop: 18, textAlign: 'center', lineHeight: 19 },
 
   manualToggle: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,

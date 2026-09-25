@@ -194,6 +194,21 @@ class SessionStore:
             session["hint"] = hint
             return "ok"
 
+    def note_hint_for_phone(self, phone, hint):
+        """Hint the live session for a number when the code was unreadable.
+
+        A mangled or edited message gives nothing to match on, and the whole
+        point of a hint is to explain that. The sender is the only handle left,
+        and for the ordinary case it is exactly the number being verified.
+        """
+        with self._lock:
+            self._purge(self._clock())
+            session_id = self._by_phone.get(phone)
+            if not session_id:
+                return "no_session"
+            self._sessions[session_id]["hint"] = hint
+            return "ok"
+
     def info(self, session_id):
         """{hint, channel} of a live session, or None."""
         with self._lock:
