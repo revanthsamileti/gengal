@@ -1604,10 +1604,11 @@ def save_user_profile_admin():
 #
 # Must match ONLINE_FRESHNESS_MS in src/services/userService.ts -- the app
 # and this server both filter the same people, and a mismatch shows up as a
-# user who is listed by one and not the other. This is the ceiling on how
-# long somebody lingers after being swiped away or powered off, because no
-# process survives those to write anything.
-FRESHNESS_MS = 90 * 1000
+# user who is listed by one and not the other. It is the fallback only: the
+# app writes isOnline: false as it leaves the foreground, so a phone that is
+# swiped out of recents drops out at once. This covers the ones that cannot
+# say goodbye -- powered off, force-stopped, out of signal.
+FRESHNESS_MS = 45 * 1000
 
 # Longest caller avatar URL worth putting in a call notification. FCM refuses a
 # data message larger than 4 KB, and a refused message is a call that never

@@ -27,17 +27,20 @@ import {
  * constant, so callers invented their own cutoffs that could drift apart.
  *
  * This is the ceiling on how long someone can linger in Online Now after they
- * are gone. A phone that is swiped away, powered off, or loses signal writes
- * nothing on the way out — there is no process left to write — so nothing but
- * this window can hide them. Five minutes was too long to be believable, hence
- * 90 seconds. It cannot go much lower without the heartbeat below becoming
- * expensive, and must stay at least two heartbeats wide so a single dropped
- * write does not blink an active user out of the feed.
+ * are gone, and it only ever applies to a phone that could not say goodbye:
+ * powered off, force-stopped, out of signal, crashed. Leaving the app normally
+ * — Home, recents, swiping it away — writes isOnline: false on the way out and
+ * is hidden at once, so this window is the fallback, not the usual path.
+ *
+ * Five minutes was unbelievable, 90 seconds was still long enough to look
+ * broken. 45 seconds is the floor that keeps two heartbeats inside the window,
+ * so a single dropped write cannot blink an active user out of the feed.
+ * Going lower means paying for a faster heartbeat on every online phone.
  *
  * The backend applies the same window to its own listings; see FRESHNESS_MS in
  * backend/app.py.
  */
-export const ONLINE_FRESHNESS_MS = 90 * 1000;
+export const ONLINE_FRESHNESS_MS = 45 * 1000;
 
 /**
  * How often the App-level heartbeat should call touchLastActive.
@@ -49,10 +52,10 @@ export const ONLINE_FRESHNESS_MS = 90 * 1000;
  * Distinct from presenceService.HEARTBEAT_MS: room presence is ephemeral and
  * high-frequency (20 s), user presence is persistent and cheaper.
  *
- * Only beats while the app is on screen, so the cost is one write per 30 s of
+ * Only beats while the app is on screen, so the cost is one write per 20 s of
  * actual use rather than around the clock.
  */
-export const USER_HEARTBEAT_MS = 30 * 1000;
+export const USER_HEARTBEAT_MS = 20 * 1000;
 
 /**
  * How long an `inCallSince` stamp keeps someone reading as mid-call.
@@ -375,21 +378,44 @@ const placeholderAvatarData = (id: string) => {
 };
 
 /**
+ * How often a listing re-applies its time-based filter.
+ *
+ * Whether someone is still online depends on the clock, but a Firestore
+ * snapshot only arrives when a document *changes* -- and a phone that was
+ * powered off or force-stopped changes nothing, by definition. Filtering only
+ * inside the snapshot callback therefore left exactly the people this window
+ * exists to remove sitting in the list until some unrelated document happened
+ * to write. Re-checking on a timer is what actually drops them.
+ */
+const LIVE_REFILTER_MS = 10 * 1000;
+
+/**
  * Wraps a directory listener so blocked people never reach a screen, and so a
  * block takes effect at once instead of on the next Firestore snapshot.
+ *
+ * `stillListed` is applied at emit time rather than at snapshot time, so a
+ * rule that reads the clock keeps being true (or stops being true) on its own.
  */
-const blockAware = (callback: (users: UserProfile[]) => void) => {
+const blockAware = (
+  callback: (users: UserProfile[]) => void,
+  stillListed?: (u: UserProfile) => boolean,
+) => {
   let last: UserProfile[] | null = null;
   const emit = () => {
-    if (last) callback(last.filter((u) => !isBlocked(u.uid)));
+    if (!last) return;
+    callback(last.filter((u) => !isBlocked(u.uid) && (!stillListed || stillListed(u))));
   };
-  const off = onBlockListChange(emit);
+  const offBlocks = onBlockListChange(emit);
+  const timer = stillListed ? setInterval(emit, LIVE_REFILTER_MS) : undefined;
   return {
     deliver: (users: UserProfile[]) => {
       last = users;
       emit();
     },
-    off,
+    off: () => {
+      if (timer) clearInterval(timer);
+      offBlocks();
+    },
   };
 };
 
@@ -402,14 +428,15 @@ export const subscribeToOnlineUsers = (callback: (users: UserProfile[]) => void,
     limit(DIRECTORY_PAGE_SIZE)
   );
 
-  const sink = blockAware(callback);
+  // isListedOnline is handed to the sink rather than applied here: it reads the
+  // clock, so it has to be re-checked between snapshots.
+  const sink = blockAware(callback, isListedOnline);
   const unsub = onSnapshot(q, (querySnapshot) => {
     const users: UserProfile[] = [];
     querySnapshot.forEach((doc) => {
       const data = doc.data() as UserProfile;
       if (currentUid && doc.id === currentUid) return;
       if (vipOnly && data.isVip !== true) return;
-      if (!isListedOnline(data)) return;
 
       users.push({
         ...data,
@@ -493,7 +520,7 @@ export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void,
     limit(DIRECTORY_PAGE_SIZE)
   );
 
-  const sink = blockAware(callback);
+  const sink = blockAware(callback, isListedOnline);
   const unsub = onSnapshot(q, (querySnapshot) => {
     const users: UserProfile[] = [];
     querySnapshot.forEach((doc) => {
@@ -504,8 +531,7 @@ export const subscribeToRecentUsers = (callback: (users: UserProfile[]) => void,
       const hasProfileIdentity = Boolean(data.nickname || data.username);
       if (!hasProfileIdentity) return;
 
-      if (!isListedOnline(data)) return;
-
+      // isListedOnline is applied by the sink, on a timer -- see blockAware.
       users.push(normalizeVisibleUser(doc.id, data));
     });
 
@@ -640,10 +666,31 @@ export const markSignedOut = async (uid: string) => {
 };
 
 export const updateUserStatus = async (uid: string, isOnline: boolean) => {
+  const userRef = doc(db, 'users', uid);
+
+  // Going offline writes immediately, with nothing awaited in front of it.
+  //
+  // This used to getDoc() first, for isActiveMode. On the offline path that
+  // read cannot change the answer -- `false && isActiveMode` is false whatever
+  // it says -- but it did decide whether the write happened at all: swiping
+  // the app out of recents kills the process in moments, and the write sat
+  // behind a network read that never came back. The person stayed in Online
+  // Now until their heartbeat went stale, which is exactly the delay this is
+  // meant to avoid. One write, sent first, is the whole fix.
+  //
+  // lastActive is still stamped, so "last seen" reads as the moment they left.
+  if (!isOnline) {
+    try {
+      await updateDoc(userRef, { isOnline: false, lastActive: serverTimestamp() });
+    } catch {
+      // No profile document yet: there is nothing listed to hide.
+    }
+    return;
+  }
+
   try {
-    const userRef = doc(db, 'users', uid);
     const userSnap = await getDoc(userRef);
-    // Same race as touchLastActive: nothing to mark online/offline before the
+    // Same race as touchLastActive: nothing to mark online before the
     // profile document exists.
     if (!userSnap.exists()) return;
     const isActiveMode = userSnap.data().isActiveMode !== false;
@@ -654,8 +701,8 @@ export const updateUserStatus = async (uid: string, isOnline: boolean) => {
     // even though their phone could still take calls. Ending a session is
     // markSignedOut's job.
     await updateDoc(userRef, {
-      isOnline: isOnline && isActiveMode,
-      ...(isOnline ? { isSessionActive: true } : {}),
+      isOnline: isActiveMode,
+      isSessionActive: true,
       lastActive: serverTimestamp()
     });
   } catch (error) {
