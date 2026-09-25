@@ -8,14 +8,19 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 /**
  * Realtime Database, used only for onDisconnect presence (livePresenceService).
  *
- * Its URL carries the region, which is chosen when the database is created, so
- * it cannot be derived from the project id -- a guess that is wrong by one
- * region fails silently, which is worse than being absent. Supplied at bundle
- * time instead; with no value the SDK reports no database, every presence call
- * catches, and the app falls back to the Firestore staleness rule exactly as
- * it did before.
+ * Its URL carries the region, chosen when the database is created, so it cannot
+ * be derived from the project id -- and a URL wrong by one region fails
+ * silently. This one is the real instance: Singapore (asia-southeast1), on the
+ * no-cost Spark plan. Public, like the apiKey beside it; the rules are what
+ * protect the data, not the address.
+ *
+ * The env var stays as an override for a second project or a local emulator.
+ * With no value at all the SDK reports no database, every presence call
+ * catches, and the app falls back to the Firestore staleness rule.
  */
-const databaseURL = process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL;
+const databaseURL =
+  process.env.EXPO_PUBLIC_FIREBASE_DATABASE_URL ||
+  'https://gengal-38003-default-rtdb.asia-southeast1.firebasedatabase.app';
 
 export const firebaseConfig = {
   apiKey: "AIzaSyDf20OS0bDrX76sRiVyPI-D6t8iLOlXpkQ",
