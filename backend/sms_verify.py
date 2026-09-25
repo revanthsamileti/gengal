@@ -164,17 +164,23 @@ class SessionStore:
                 "last_poll": None,
                 "channel": None,
                 "hint": None,
+                # When a message for this session reached us at all. Separate
+                # from verified_at: one that arrives from the wrong number, or
+                # on the wrong SIM, was still received.
+                "received_at": None,
             }
             self._sessions[session["id"]] = session
             self._by_code[code] = session["id"]
             self._by_phone[phone] = session["id"]
-            return {k: v for k, v in session.items() if k not in ("last_poll", "channel", "hint")}
+            return {k: v for k, v in session.items()
+                    if k not in ("last_poll", "channel", "hint", "received_at")}
 
     def mark_verified(self, code, sender, received_at=None, channel="sms"):
         with self._lock:
             session, outcome = self._live_session_for(code, received_at)
             if not session:
                 return outcome
+            session["received_at"] = self._clock()
             if sender != session["phone"]:
                 # Common with WhatsApp on a second SIM: tell the waiting app,
                 # rather than leaving it spinning until the code expires.
@@ -192,6 +198,7 @@ class SessionStore:
             if not session:
                 return outcome
             session["hint"] = hint
+            session["received_at"] = self._clock()
             return "ok"
 
     def note_hint_for_phone(self, phone, hint):
@@ -207,16 +214,18 @@ class SessionStore:
             if not session_id:
                 return "no_session"
             self._sessions[session_id]["hint"] = hint
+            self._sessions[session_id]["received_at"] = self._clock()
             return "ok"
 
     def info(self, session_id):
-        """{hint, channel} of a live session, or None."""
+        """{hint, channel, received} of a live session, or None."""
         with self._lock:
             self._purge(self._clock())
             session = self._sessions.get(session_id) if session_id else None
             if not session:
                 return None
-            return {"hint": session["hint"], "channel": session["channel"]}
+            return {"hint": session["hint"], "channel": session["channel"],
+                    "received": session["received_at"] is not None}
 
     def _live_session_for(self, code, received_at):
         """(session, "ok") for a live code, else (None, "no_session" | "stale")."""

@@ -35,6 +35,73 @@ const MIN_POLL_GAP_MS = 1000;
  * evidence there is, and ten minutes of it helps nobody.
  */
 const STALL_AFTER_MS = 25000;
+/**
+ * How long each step of the trail is held.
+ *
+ * On the happy path the server records "arrived" and "verified" in the same
+ * instant, so the poll that learns anything learns everything. Both really
+ * happened, and showing them in order is the difference between a result and
+ * a spinner that ends -- but only if each step is on screen long enough to
+ * read. Three steps at this rate cost about a second.
+ */
+const STEP_MS = 420;
+
+type Progress = 'idle' | 'received' | 'verifying' | 'verified' | 'rejected';
+
+/** Hints that mean the message was refused, rather than needing another step. */
+const REJECTING: SmsPendingHint[] = ['sender_mismatch', 'wrong_sim', 'no_code'];
+
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const GREEN = '#15803D';
+const RED = '#DC2626';
+
+/** One row of the trail: done, in progress, failed, or not reached yet. */
+function Step({ state, label }: { state: 'done' | 'active' | 'failed' | 'todo'; label: string }) {
+  return (
+    <View style={styles.trailRow}>
+      {state === 'active' ? (
+        <ActivityIndicator color={PLUM} size="small" style={styles.trailIcon} />
+      ) : (
+        <MaterialIcons
+          name={state === 'done' ? 'check-circle' : state === 'failed' ? 'cancel' : 'radio-button-unchecked'}
+          size={22}
+          color={state === 'done' ? GREEN : state === 'failed' ? RED : '#C9B6C9'}
+          style={styles.trailIcon}
+        />
+      )}
+      <Text
+        style={[
+          styles.trailText,
+          state === 'todo' && styles.trailTodo,
+          state === 'failed' && styles.trailFailed,
+        ]}
+      >
+        {label}
+      </Text>
+    </View>
+  );
+}
+
+function Trail({ progress, reason }: { progress: Progress; reason?: string }) {
+  const failed = progress === 'rejected';
+  const verifying = progress === 'verifying';
+  const verified = progress === 'verified';
+  return (
+    <View style={styles.trail} accessibilityLiveRegion="polite">
+      <Step state="done" label="Message received" />
+      {failed ? (
+        <Step state="failed" label="Not verified" />
+      ) : (
+        <>
+          <Step state={verified ? 'done' : verifying ? 'active' : 'todo'} label="Verifying" />
+          <Step state={verified ? 'done' : 'todo'} label="Verified" />
+        </>
+      )}
+      {failed && reason ? <Text style={styles.trailReason}>{reason}</Text> : null}
+    </View>
+  );
+}
 const PLUM = '#5A155A';
 // WhatsApp's teal green: recognisable, and dark enough for white text.
 const WHATSAPP_GREEN = '#128C7E';
@@ -82,6 +149,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const [handoff, setHandoff] = useState<SignInChannel | null>(null);
   /** Sent a while ago and still nothing: offer the other way in. */
   const [stalled, setStalled] = useState(false);
+  const [progress, setProgress] = useState<Progress>('idle');
   const [smsAvailable, setSmsAvailable] = useState(false);
   const [copied, setCopied] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
@@ -95,10 +163,15 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const fastUntil = useRef(0);
   const lastPollAt = useRef(0);
   const handoffAt = useRef(0);
+  /** The trail is timed, so it must not set state after the screen is gone. */
+  const mounted = useRef(true);
   const newUserToken = useRef<string | null>(null);
 
   useEffect(() => {
     SMS.isAvailableAsync().then(setSmsAvailable).catch(() => setSmsAvailable(false));
+    return () => {
+      mounted.current = false;
+    };
   }, []);
 
   const begin = useCallback(
@@ -111,6 +184,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
         setHint(undefined);
         setHandoff(null);
         setStalled(false);
+        setProgress('idle');
         setLiveChannels(null);
         fastUntil.current = 0;
         setPhase('starting');
@@ -158,6 +232,11 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
       if (sessionRef.current !== s || finished.current) return;
       if (result.status === 'pending') {
         setHint(result.hint);
+        // Arrived and refused. share_number is not a refusal -- it is one more
+        // step -- so it keeps the ordinary waiting screen and its own hint.
+        setProgress(
+          result.received && result.hint && REJECTING.includes(result.hint) ? 'rejected' : 'idle'
+        );
         // Only narrow on a list the server actually sent: an older build omits
         // it, and an absent list must not empty the screen of its buttons.
         if (result.channels) {
@@ -170,6 +249,19 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
       } else if (result.status === 'verified') {
         finished.current = true;
         sessionRef.current = null;
+        setHint(undefined);
+        // Arrival and verification are recorded in the same instant, so one
+        // poll learns both. Walk the trail in the order the steps happened
+        // rather than jumping straight to the end.
+        setProgress('received');
+        await wait(STEP_MS);
+        if (!mounted.current) return;
+        setProgress('verifying');
+        await wait(STEP_MS);
+        if (!mounted.current) return;
+        setProgress('verified');
+        await wait(STEP_MS);
+        if (!mounted.current) return;
         if (result.isNewUser) {
           newUserToken.current = result.token;
           setPhase('verified');
@@ -181,6 +273,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
             await signInWithSmsToken(result.token);
           } catch {
             finished.current = false;
+            setProgress('idle');
             setErrorMsg('Could not finish signing in. Please try again.');
             setPhase('error');
           }
@@ -277,6 +370,7 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
   const bySms = channels.includes('sms') && Boolean(session?.gatewayNumber);
   const sameNumber = onWhatsApp && bySms && session?.whatsappNumber === session?.gatewayNumber;
   // Only worth suggesting a fallback that is actually on offer right now.
+  const runningTrail = progress === 'received' || progress === 'verifying' || progress === 'verified';
   const otherChannel =
     handoff === 'whatsapp' ? bySms && smsAvailable : handoff === 'sms' ? onWhatsApp : false;
   const finePrint =
@@ -314,12 +408,24 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
           </View>
         )}
 
-        {phase === 'waiting' && session && (
+        {/* A run that is going to succeed owns the screen: the instructions and
+            the send buttons are noise once the message is in. A refusal keeps
+            them, because the next thing the user does is send again. */}
+        {phase === 'waiting' && session && runningTrail && (
+          <View style={styles.centeredTrail}>
+            <Trail progress={progress} />
+          </View>
+        )}
+
+        {phase === 'waiting' && session && !runningTrail && (
           <View>
+            {progress === 'rejected' && (
+              <Trail progress="rejected" reason={hint ? hintText(hint, phone) : undefined} />
+            )}
             {/* Signing in by sending a message is unfamiliar enough that the
                 screen has to say what will happen before it shows a code or a
                 number. Those moved below, under "Send it yourself instead". */}
-            <View style={styles.steps}>
+            <View style={[styles.steps, progress === 'rejected' && styles.stepsTight]}>
               {steps.map((text, i) => (
                 <View key={i} style={styles.stepRow}>
                   <View style={styles.stepDot}>
@@ -390,7 +496,9 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
               </Text>
             ) : null}
 
-            {hint ? <Text style={styles.notice}>{hintText(hint, phone)}</Text> : null}
+            {hint && progress !== 'rejected' ? (
+              <Text style={styles.notice}>{hintText(hint, phone)}</Text>
+            ) : null}
             {notice ? <Text style={styles.notice}>{notice}</Text> : null}
 
             {/* Still reachable for a phone without WhatsApp, a dual-SIM
@@ -549,6 +657,16 @@ const styles = StyleSheet.create({
   code: { fontSize: 24, fontWeight: '800', color: PLUM, letterSpacing: 1.5 },
   to: { fontSize: 17, fontWeight: '600', color: '#2B1B2B', marginTop: 4 },
   fine: { fontSize: 12, color: '#8A6F8A', marginTop: 14, lineHeight: 17 },
+
+  trail: { gap: 14, marginBottom: 4 },
+  centeredTrail: { marginTop: 48, alignSelf: 'center' },
+  trailRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  trailIcon: { width: 22, height: 22, textAlign: 'center' },
+  trailText: { fontSize: 16, fontWeight: '700', color: '#2B1B2B' },
+  trailTodo: { color: '#A892A8', fontWeight: '600' },
+  trailFailed: { color: RED },
+  trailReason: { fontSize: 13, color: '#B45309', lineHeight: 18, marginLeft: 34, marginTop: -4 },
+  stepsTight: { marginTop: 22 },
 
   centered: { alignItems: 'center', gap: 14, marginTop: 40 },
   tick: {

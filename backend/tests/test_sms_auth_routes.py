@@ -434,6 +434,26 @@ def test_status_separates_sms_being_down_from_sms_being_absent(client, sms, sim1
     assert status(client, body["sessionId"]).get_json()["smsOffline"] is False
 
 
+def test_status_reports_a_message_arriving_apart_from_it_verifying(client, sms, sim1):
+    """"Received" and "verified" are different facts and the screen shows them
+    as different steps, so a message that arrived and was refused must not look
+    the same as one that never came."""
+    body = start(client).get_json()
+    assert status(client, body["sessionId"]).get_json()["received"] is False
+    forwarder(client, forwarder_body(PHONE, body["message"], sim="sim2"))
+    pending = status(client, body["sessionId"]).get_json()
+    assert pending["status"] == "pending"
+    assert pending["received"] is True
+
+
+def test_a_message_from_the_wrong_number_still_counts_as_received(client, sms, sim1):
+    body = start(client).get_json()
+    forwarder(client, forwarder_body("+919123456789", body["message"]))
+    pending = status(client, body["sessionId"]).get_json()
+    assert pending["received"] is True
+    assert pending["hint"] == "sender_mismatch"
+
+
 def test_forwarder_from_the_wrong_sender_does_not_verify(client, sms, sim1):
     body = start(client).get_json()
     forwarder(client, forwarder_body("+919123456789", body["message"]))

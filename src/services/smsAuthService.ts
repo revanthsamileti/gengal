@@ -46,6 +46,8 @@ export type SmsPollResult =
       hint?: SmsPendingHint;
       channels?: SignInChannel[];
       smsOffline?: boolean;
+      /** A message for this session reached the server, whatever came of it. */
+      received?: boolean;
     }
   | { status: 'expired' }
   | { status: 'verified'; token: string; isNewUser: boolean }
@@ -120,6 +122,7 @@ export const pollSmsVerification = async (sessionId: string): Promise<SmsPollRes
         hint,
         channels,
         smsOffline: Boolean(data.smsOffline),
+        received: Boolean(data.received),
       };
     }
     if (data?.status === 'expired') return { status: 'expired' };

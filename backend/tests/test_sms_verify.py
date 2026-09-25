@@ -325,7 +325,7 @@ def test_misconfigured_wins_over_online():
 def test_info_records_which_channel_verified():
     store, _ = make_store()
     s = store.start(PHONE)
-    assert store.info(s["id"]) == {"hint": None, "channel": None}
+    assert store.info(s["id"]) == {"hint": None, "channel": None, "received": False}
     assert store.mark_verified(s["code"], PHONE, channel="whatsapp") == "verified"
     assert store.info(s["id"])["channel"] == "whatsapp"
 
@@ -341,7 +341,8 @@ def test_sender_mismatch_leaves_a_hint_for_the_poller():
     store, _ = make_store()
     s = store.start(PHONE)
     store.mark_verified(s["code"], OTHER, channel="whatsapp")
-    assert store.info(s["id"]) == {"hint": "sender_mismatch", "channel": None}
+    # Received, but not verified: the screen shows those as separate steps.
+    assert store.info(s["id"]) == {"hint": "sender_mismatch", "channel": None, "received": True}
 
 
 def test_note_hint_sets_a_hint_on_a_live_session():

@@ -665,11 +665,14 @@ def sms_status():
         return jsonify({"status": "expired"}), 200
     if state == "pending":
         channels, sms_configured, _ = channel_status()
+        info = sms_sessions.info(session_id) or {}
         pending = {"status": "pending", "expiresIn": value, "channels": channels,
-                   "smsOffline": sms_configured and "sms" not in channels}
-        hint = (sms_sessions.info(session_id) or {}).get("hint")
-        if hint:
-            pending["hint"] = hint
+                   "smsOffline": sms_configured and "sms" not in channels,
+                   # A message reached us and did not sign them in: the screen
+                   # shows that as its own step rather than going on waiting.
+                   "received": bool(info.get("received"))}
+        if info.get("hint"):
+            pending["hint"] = info["hint"]
         return jsonify(pending), 200
 
     phone = value
