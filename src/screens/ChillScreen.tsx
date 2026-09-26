@@ -25,7 +25,6 @@ import {
   subscribeToChillRooms,
   createChillRoom,
 } from '../services/chillService';
-import { deductUserCoins } from '../services/coinService';
 import { useLiveRooms } from '../hooks/useRoomPresence';
 import RosterStrip from '../components/rooms/RosterStrip';
 import {
@@ -400,7 +399,6 @@ export default function ChillScreen({ navigate, goBack }: Props) {
     setCreatingLudo(true);
     setLudoCreateModalVisible(false);
     try {
-      await deductUserCoins(myUid, 10);
       const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
     } catch (e) {

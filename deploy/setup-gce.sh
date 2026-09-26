@@ -31,7 +31,8 @@ sudo apt-get update -y
 sudo apt-get install -y \
     python3 python3-venv python3-dev \
     build-essential pkg-config \
-    git nginx curl jq
+    git nginx curl jq \
+    certbot python3-certbot-nginx
 
 echo "==> Swap (${SWAPSIZE_MB}MB)"
 # e2-micro is 1 GB. firebase-admin plus grpcio idles around 150-250 MB, which

@@ -13,6 +13,16 @@ import { getAgoraAppId } from '../services/rtcConfigService';
  */
 export type FreeProvider = 'agora' | 'zegocloud';
 
+/** Keep a remote uid briefly after offline so a fast rejoin does not blank video. */
+const PEER_OFFLINE_GRACE_MS = 5000;
+
+/** Agora ConnectionStateType values used by onConnectionStateChanged. */
+const AgoraConnectionState = {
+  CONNECTED: 3,
+  RECONNECTING: 4,
+  FAILED: 5,
+} as const;
+
 interface GengalVoiceInterface {
   /**
    * `speakerDefault` controls whether the audio route is set to loudspeaker
@@ -47,6 +57,11 @@ interface GengalVoiceInterface {
    * heartbeat has timed out.
    */
   isReconnecting: boolean;
+  /**
+   * True after Agora reports CONNECTION_STATE_TYPE_FAILED. The SDK has given
+   * up; CallScreen must hang up rather than sit on a dead media path.
+   */
+  rtcFailed: boolean;
 }
 
 export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
@@ -62,6 +77,7 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
   // CallScreen can show a localised "Reconnecting…" banner that is triggered
   // by the RTC layer directly, not delayed by a heartbeat timeout.
   const [isReconnecting, setIsReconnecting] = useState(false);
+  const [rtcFailed, setRtcFailed] = useState(false);
 
   // Safe ref for Agora engine so it doesn't crash the web bundler.
   const agoraEngineRef = useRef<any>(null);
@@ -75,6 +91,27 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
   // Engine setup is async now that the App ID comes from the backend, so
   // connectSeat awaits this instead of racing it.
   const agoraReadyRef = useRef<Promise<void> | null>(null);
+
+  // Brief offline events should not blank the remote video tile; wait before
+  // removing a uid so a quick rejoin keeps the surface.
+  const offlineTimersRef = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map());
+
+  function cancelOfflineGrace(remoteUid: number): void {
+    const pending = offlineTimersRef.current.get(remoteUid);
+    if (!pending) return;
+    clearTimeout(pending);
+    offlineTimersRef.current.delete(remoteUid);
+  }
+
+  function clearAllOfflineGrace(): void {
+    for (const timer of offlineTimersRef.current.values()) clearTimeout(timer);
+    offlineTimersRef.current.clear();
+  }
+
+  function markRtcHealthy(): void {
+    setIsReconnecting(false);
+    setRtcFailed(false);
+  }
 
   useEffect(() => {
     // We only initialize Agora if we are not on web (react-native-agora is native only)
@@ -105,15 +142,21 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
               setSpeakerOn(speaker);
               setLocalUid(connection.localUid ?? 0);
               // Reconnection succeeded (or this is the initial join).
-              setIsReconnecting(false);
+              markRtcHealthy();
             },
             onUserJoined: (_connection: any, remoteUid: number, _elapsed: number) => {
               console.log(`[Agora Node] Remote user joined: ${remoteUid}`);
-              setRemoteUids((prev) => [...prev, remoteUid]);
+              cancelOfflineGrace(remoteUid);
+              setRemoteUids((prev) => (prev.includes(remoteUid) ? prev : [...prev, remoteUid]));
             },
             onUserOffline: (_connection: any, remoteUid: number, _reason: any) => {
-              console.log(`[Agora Node] Remote user offline: ${remoteUid}`);
-              setRemoteUids((prev) => prev.filter((uid) => uid !== remoteUid));
+              console.log(`[Agora Node] Remote user offline: ${remoteUid} (grace before drop)`);
+              cancelOfflineGrace(remoteUid);
+              const timer = setTimeout(() => {
+                offlineTimersRef.current.delete(remoteUid);
+                setRemoteUids((prev) => prev.filter((uid) => uid !== remoteUid));
+              }, PEER_OFFLINE_GRACE_MS);
+              offlineTimersRef.current.set(remoteUid, timer);
             },
             /**
              * Connection state events from the Agora RTC layer.
@@ -136,18 +179,23 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
               state: number,
               _reason: number
             ) => {
-              const RECONNECTING = 4;
-              const CONNECTED = 3;
-              const FAILED = 5;
-              if (state === RECONNECTING) {
-                console.warn('[Agora Node] Connection lost — SDK is reconnecting.');
-                setIsReconnecting(true);
-              } else if (state === CONNECTED) {
-                console.log('[Agora Node] Connection restored.');
-                setIsReconnecting(false);
-              } else if (state === FAILED) {
-                console.error('[Agora Node] Reconnection failed — SDK gave up.');
-                setIsReconnecting(false);
+              switch (state) {
+                case AgoraConnectionState.RECONNECTING:
+                  console.warn('[Agora Node] Connection lost — SDK is reconnecting.');
+                  setIsReconnecting(true);
+                  setRtcFailed(false);
+                  break;
+                case AgoraConnectionState.CONNECTED:
+                  console.log('[Agora Node] Connection restored.');
+                  markRtcHealthy();
+                  break;
+                case AgoraConnectionState.FAILED:
+                  console.error('[Agora Node] Reconnection failed — SDK gave up.');
+                  setIsReconnecting(false);
+                  setRtcFailed(true);
+                  break;
+                default:
+                  break;
               }
             },
             onError: (err: any, msg: string) => {
@@ -296,13 +344,17 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
   };
 
   const disconnectSeat = async () => {
+    clearAllOfflineGrace();
+
     if (provider === 'agora' && agoraEngineRef.current) {
       agoraEngineRef.current.leaveChannel();
     }
 
     console.log(`[Voice Adapter] Safe native channel teardown for: ${provider}`);
     logDebugEvent('voice.disconnect', { provider });
-    setIsReconnecting(false);
+    markRtcHealthy();
+    setRemoteUids([]);
+    setLocalUid(null);
   };
 
   const toggleMic = async () => {
@@ -354,5 +406,6 @@ export function useGengalVoice(provider: FreeProvider): GengalVoiceInterface {
     remoteUids,
     localUid,
     isReconnecting,
+    rtcFailed,
   };
 }

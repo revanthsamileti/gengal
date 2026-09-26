@@ -77,6 +77,42 @@ def agora_numeric_uid(user_uid):
     digest = hashlib.sha256(str(user_uid).encode("utf-8")).hexdigest()
     return int(digest[:8], 16) & 0x7FFFFFFF
 
+
+# agora_token_builder / RtcTokenBuilder role ints.
+AGORA_ROLE_PUBLISHER = 1
+AGORA_ROLE_SUBSCRIBER = 2
+# Matches client PRESENCE_TTL_MS — host billing must not charge aged-out guests.
+PRESENCE_STALE_SECONDS = 55
+ROOM_DOC_COLLECTIONS = ('expert_rooms', 'chill_rooms', 'ludo_rooms')
+
+
+def find_room_document(db_client, room_id):
+    """Return (collection_name, room_dict) or (None, None) if unknown."""
+    for name in ROOM_DOC_COLLECTIONS:
+        snap = db_client.collection(name).document(room_id).get()
+        if snap.exists:
+            return name, snap.to_dict() or {}
+    return None, None
+
+
+def room_uid_is_speaker(room_collection, room, user_uid):
+    """True when the uid may publish (on stage / seated / host-actor-guesser)."""
+    if room_collection == 'expert_rooms':
+        return any(
+            (s or {}).get('uid') == user_uid for s in (room.get('speakers') or [])
+        )
+    if room_collection == 'ludo_rooms':
+        uids = room.get('playerUids') or [
+            (p or {}).get('uid') for p in (room.get('players') or [])
+        ]
+        return user_uid in uids
+    if room_collection == 'chill_rooms':
+        return user_uid in (
+            room.get('hostUid'), room.get('actorUid'), room.get('guesserUid')
+        )
+    return False
+
+
 def bearer_uid():
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
@@ -297,8 +333,8 @@ def generate_agora_token():
     if request.method == 'OPTIONS':
         return '', 200
         
-    # A token grants publish access to a channel, so the caller must prove who
-    # they are and can only ever mint a token for their own uid.
+    # A token grants channel access, so the caller must prove who they are and
+    # can only mint for their own uid — and only for a room/call they belong to.
     authed_uid, error_response = require_bearer_uid()
     if error_response:
         return error_response
@@ -307,36 +343,71 @@ def generate_agora_token():
         data = request.json or {}
         room_id = data.get('roomId')
         user_uid = authed_uid
+        # Client may still send `role`; privilege is derived server-side only.
 
         if not room_id:
             return jsonify({"error": "Missing mandatory roomId parameter"}), 400
         if not AGORA_APP_ID or not AGORA_APP_CERTIFICATE:
             return jsonify({"error": "Agora credentials are not configured"}), 503
 
-        # Configuration setups
-        # Role 1 is for RTC_ROLE_PUBLISHER (allows talking and listening)
-        role = 1 
-        expiration_time_in_seconds = 7200 # 2 Hours safe call limit
-        current_timestamp = int(time.time())
-        privilege_expired_ts = current_timestamp + expiration_time_in_seconds
+        db_client = firestore.client()
+        role = AGORA_ROLE_SUBSCRIBER
 
-        # Deterministic integer representation for the Agora channel track.
+        call_snap = db_client.collection('calls').document(room_id).get()
+        if call_snap.exists:
+            call = call_snap.to_dict() or {}
+            if user_uid not in (call.get('callerUid'), call.get('receiverUid')):
+                return jsonify({"error": "Not a participant in this call"}), 403
+            if call.get('status') == 'ended':
+                return jsonify({"error": "Call has ended"}), 403
+            role = AGORA_ROLE_PUBLISHER
+        else:
+            room_collection, room = find_room_document(db_client, room_id)
+            if room is None:
+                return jsonify({"error": "Unknown room"}), 404
+            if room.get('status') == 'closed':
+                return jsonify({"error": "Room is closed"}), 403
+
+            is_host = user_uid == room.get('hostUid')
+            is_speaker = room_uid_is_speaker(room_collection, room, user_uid)
+
+            # Presence membership gates tokens. Hosts and seated speakers may
+            # mint before their heartbeat doc lands; listeners need members/{uid}.
+            member_exists = (
+                db_client.collection(room_collection)
+                .document(room_id)
+                .collection('members')
+                .document(user_uid)
+                .get()
+                .exists
+            )
+            if not (is_host or is_speaker or member_exists):
+                return jsonify({"error": "Not a member of this room"}), 403
+
+            role = (
+                AGORA_ROLE_PUBLISHER
+                if (is_host or is_speaker)
+                else AGORA_ROLE_SUBSCRIBER
+            )
+
+        expiration_time_in_seconds = 7200
+        privilege_expired_ts = int(time.time()) + expiration_time_in_seconds
         numeric_uid = agora_numeric_uid(user_uid)
 
-        # Generate the cryptographic token
         token = RtcTokenBuilder.buildTokenWithUid(
-            AGORA_APP_ID, 
-            AGORA_APP_CERTIFICATE, 
-            room_id, 
-            numeric_uid, 
-            role, 
-            privilege_expired_ts
+            AGORA_APP_ID,
+            AGORA_APP_CERTIFICATE,
+            room_id,
+            numeric_uid,
+            role,
+            privilege_expired_ts,
         )
 
         return jsonify({
             "token": token,
             "uid": numeric_uid,
-            "expiresIn": expiration_time_in_seconds
+            "role": "broadcaster" if role == AGORA_ROLE_PUBLISHER else "audience",
+            "expiresIn": expiration_time_in_seconds,
         }), 200
 
     except Exception as e:
@@ -784,11 +855,46 @@ MAX_BILLABLE_TICK_SECONDS = 60
 # 7 200 s = 2 hours — a generous but non-exploitable ceiling for any single call.
 MAX_REWARDS_SECONDS = 7200
 
+# Host cut on Ludo ticket / bet / roll spends. Clients used to send this as a
+# free-form `commissionAmount`; a patched app could set it equal to the full
+# debit and turn the endpoint into an arbitrary P2P transfer.
+HOST_COMMISSION_RATE = 0.10
+
+# Hard caps so a patched client cannot drain an entire balance in one call via
+# the generic spend APIs. Gift catalogs top out at 1000; Ludo seats/bets stay
+# well under 5000.
+MAX_COIN_TRANSFER = 1000
+MAX_SINGLE_DEDUCT = 5000
+
+# Expert-room per-minute rate bounds (matches ClubScreen UI). Billing clamps to
+# these even if an old room document somehow holds an out-of-range value.
+MAX_ROOM_RATE_PER_MIN = 500
+
+
 def get_coin_balance(snapshot):
     if not snapshot.exists:
         raise ValueError("User does not exist")
     data = snapshot.to_dict() or {}
     return float(data.get("coins") or 0)
+
+
+def parse_capped_amount(raw_value, field_name, max_amount):
+    amount = parse_positive_number(raw_value, field_name)
+    if amount > max_amount:
+        raise ValueError(f"{field_name} exceeds maximum of {max_amount}")
+    return amount
+
+
+def server_host_commission(amount):
+    """Host cut is always derived server-side; client-sent commission is ignored."""
+    return math.floor(amount * HOST_COMMISSION_RATE)
+
+
+def ensure_utc(value):
+    if not isinstance(value, datetime):
+        return None
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
 
 @app.route('/api/v1/coins/deduct', methods=['POST', 'OPTIONS'])
 def deduct_coins():
@@ -798,19 +904,17 @@ def deduct_coins():
     if error_response:
         return error_response
     data = request.json or {}
-    user_id = data.get("userId")
-    if user_id != uid:
+    if data.get("userId") != uid:
         return jsonify({"error": "Cannot deduct coins for another user"}), 403
     try:
-        amount = parse_positive_number(data.get("amount"), "amount")
+        amount = parse_capped_amount(data.get("amount"), "amount", MAX_SINGLE_DEDUCT)
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
-            snap = user_ref.get(transaction=transaction)
-            balance = get_coin_balance(snap)
+            balance = get_coin_balance(user_ref.get(transaction=transaction))
             if balance < amount:
                 raise ValueError("Insufficient Gengal balance")
             new_balance = balance - amount
@@ -832,36 +936,38 @@ def deduct_with_commission():
     if error_response:
         return error_response
     data = request.json or {}
-    user_id = data.get("userId")
     host_uid = data.get("hostUid")
-    if user_id != uid:
+    if data.get("userId") != uid:
         return jsonify({"error": "Cannot deduct coins for another user"}), 403
     if not host_uid:
         return jsonify({"error": "Missing hostUid"}), 400
     try:
-        amount = parse_positive_number(data.get("amount"), "amount")
-        commission = float(data.get("commissionAmount") or 0)
-        if commission < 0 or commission > amount:
-            raise ValueError("Invalid commission amount")
+        amount = parse_capped_amount(data.get("amount"), "amount", MAX_SINGLE_DEDUCT)
+        # Client may still send commissionAmount for backward compatibility; ignored.
+        commission = server_host_commission(amount)
 
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
         host_ref = db_client.collection('users').document(host_uid)
+        pay_host = commission > 0 and host_uid != uid
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
-            user_snap = user_ref.get(transaction=transaction)
-            user_balance = get_coin_balance(user_snap)
+            # All reads before writes (Firestore transaction rule).
+            user_balance = get_coin_balance(user_ref.get(transaction=transaction))
+            host_balance = (
+                get_coin_balance(host_ref.get(transaction=transaction))
+                if pay_host else None
+            )
             if user_balance < amount:
                 raise ValueError("Insufficient Gengal balance")
+
             user_new = user_balance - amount
             transaction.update(user_ref, {"coins": user_new})
 
             host_new = None
-            if commission > 0 and host_uid != uid:
-                host_snap = host_ref.get(transaction=transaction)
-                host_balance = get_coin_balance(host_snap)
+            if pay_host:
                 host_new = host_balance + commission
                 transaction.update(host_ref, {"coins": host_new})
             return user_new, host_new
@@ -889,7 +995,7 @@ def transfer_coins_endpoint():
     if not receiver_id or sender_id == receiver_id:
         return jsonify({"error": "Invalid receiver"}), 400
     try:
-        amount = parse_positive_number(data.get("amount"), "amount")
+        amount = parse_capped_amount(data.get("amount"), "amount", MAX_COIN_TRANSFER)
         db_client = firestore.client()
         sender_ref = db_client.collection('users').document(sender_id)
         receiver_ref = db_client.collection('users').document(receiver_id)
@@ -897,10 +1003,8 @@ def transfer_coins_endpoint():
 
         @firestore.transactional
         def apply(transaction):
-            sender_snap = sender_ref.get(transaction=transaction)
-            receiver_snap = receiver_ref.get(transaction=transaction)
-            sender_balance = get_coin_balance(sender_snap)
-            receiver_balance = get_coin_balance(receiver_snap)
+            sender_balance = get_coin_balance(sender_ref.get(transaction=transaction))
+            receiver_balance = get_coin_balance(receiver_ref.get(transaction=transaction))
             if sender_balance < amount:
                 raise ValueError("Insufficient Gengal balance")
             sender_new = sender_balance - amount
@@ -1006,12 +1110,11 @@ def call_billing_endpoint():
 
             # An ended call still gets one last tick from each client, and it
             # must charge for the run-up to the hang-up and not one second more.
-            # `endedAt` is a serverTimestamp() written by the client SDK, which
-            # means the value itself comes from the server -- a client cannot
-            # backdate it to shorten what it owes.
-            ended = current.get('status') == 'ended'
+            # Cap on `endedAt` whenever it is set — even if a client flipped
+            # `status` back to active — so hang-up time is the hard stop.
             ended_at = as_utc(current.get('endedAt'))
-            bill_until = min(now, ended_at) if (ended and ended_at) else now
+            ended = current.get('status') == 'ended' or ended_at is not None
+            bill_until = min(now, ended_at) if ended_at else now
 
             # Stamped on both participants every tick so the discovery feed --
             # and the rule guarding /incoming_calls -- can tell who is mid-call.
@@ -1212,59 +1315,68 @@ def room_billing_endpoint():
 
         room = room_snap.to_dict() or {}
         host_uid = room.get('hostUid')
-        rate_per_min = float(room.get('ratePerMin') or 0)
+        # Clamp so a forged create (or legacy doc) cannot charge unbounded rates.
+        rate_per_min = min(
+            max(float(room.get('ratePerMin') or 0), 0.0),
+            float(MAX_ROOM_RATE_PER_MIN),
+        )
 
-        # Free room, or the caller is the host being paid rather than charged.
-        if rate_per_min <= 0 or uid == host_uid:
-            return jsonify({"success": True, "billedAmount": 0, "billedSeconds": 0}), 200
-        if room.get('status') == 'closed':
+        member_uid = str(data.get("memberUid") or uid).strip() or uid
+        # Only the member themselves, or the host collecting for them, may tick.
+        # Host-driven ticks close the "patched guest never bills" free-ride.
+        if member_uid != uid and uid != host_uid:
+            return jsonify({"error": "Cannot bill another member"}), 403
+
+        # Free room, closed room, or billing the host (who is paid, not charged).
+        if rate_per_min <= 0 or member_uid == host_uid or room.get('status') == 'closed':
             return jsonify({"success": True, "billedAmount": 0, "billedSeconds": 0}), 200
 
-        member_ref = room_ref.collection('members').document(uid)
-        if not member_ref.get().exists:
+        member_ref = room_ref.collection('members').document(member_uid)
+        member_snap = member_ref.get()
+        if not member_snap.exists:
             return jsonify({"error": "Not a member of this room"}), 403
 
-        payer_ref = db_client.collection('users').document(uid)
+        # Host-driven ticks must not charge guests who aged out of presence
+        # (force-quit / left without leaveRoom). Self-ticks assert presence.
+        if member_uid != uid:
+            last_seen = ensure_utc((member_snap.to_dict() or {}).get('lastSeen'))
+            if last_seen is None:
+                return jsonify({"error": "Member is not present"}), 409
+            age = (datetime.now(timezone.utc) - last_seen).total_seconds()
+            if age > PRESENCE_STALE_SECONDS:
+                return jsonify({
+                    "success": True,
+                    "billedAmount": 0,
+                    "billedSeconds": 0,
+                    "hasInsufficientFunds": False,
+                    "memberUid": member_uid,
+                    "skipped": "not_present",
+                }), 200
+
+        payer_ref = db_client.collection('users').document(member_uid)
         host_ref = db_client.collection('users').document(host_uid)
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
-            member_snap = member_ref.get(transaction=transaction)
-            member = member_snap.to_dict() or {}
-
+            member = (member_ref.get(transaction=transaction).to_dict()) or {}
             now = datetime.now(timezone.utc)
-            last = member.get('lastBilledAt')
-            joined = member.get('joinedAt')
+            last = ensure_utc(member.get('lastBilledAt'))
+            joined = ensure_utc(member.get('joinedAt'))
 
-            # First tick only starts the clock, so nobody is charged for the
-            # time between opening the room list and actually joining.
-            if not isinstance(last, datetime):
+            # First tick only starts the clock. After a crash/rejoin, joinedAt is
+            # newer than lastBilledAt — that gap was spent outside and must not
+            # be charged.
+            if last is None or (joined is not None and joined > last):
                 transaction.update(member_ref, {"lastBilledAt": now})
                 return 0.0, None, False, 0.0
-
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
-
-            # A crash skips the leave path, so the member document survives with
-            # a stale clock. Rejoining refreshes joinedAt — if that is newer than
-            # the last billing point, the gap is time spent outside the room and
-            # must not be charged.
-            if isinstance(joined, datetime):
-                joined_at = joined if joined.tzinfo else joined.replace(tzinfo=timezone.utc)
-                if joined_at > last:
-                    transaction.update(member_ref, {"lastBilledAt": now})
-                    return 0.0, None, False, 0.0
 
             elapsed = (now - last).total_seconds()
             if elapsed <= 0:
                 return 0.0, None, False, 0.0
             elapsed = min(elapsed, MAX_BILLABLE_TICK_SECONDS)
 
-            # Firestore requires every read in a transaction to happen before
-            # any write, so both balances are fetched up front. Reading the host
-            # after debiting the payer threw on exactly the path that matters —
-            # the first tick that bills a non-zero amount.
+            # Firestore requires every read before any write.
             payer_balance = get_coin_balance(payer_ref.get(transaction=transaction))
             host_balance = get_coin_balance(host_ref.get(transaction=transaction))
 
@@ -1290,12 +1402,479 @@ def room_billing_endpoint():
             "billedSeconds": elapsed,
             "newBalance": new_balance,
             "hasInsufficientFunds": has_insufficient,
+            "memberUid": member_uid,
         }), 200
     except (TypeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         print(f"[ROOMS] Billing error: {e}")
         return jsonify({"error": "Failed to process room billing"}), 500
+
+
+LUDO_SEAT_COLORS = frozenset({'red', 'blue', 'green', 'yellow'})
+LUDO_TABLE_COST = 10
+LUDO_ROLL_COST = 15
+LUDO_BET_AMOUNT = 50
+LUDO_DEFAULT_TICKET_PRICE = 50
+
+
+def build_initial_ludo_tokens():
+    tokens = []
+    for color in ('red', 'blue', 'green', 'yellow'):
+        for i in range(4):
+            tokens.append({
+                'id': '%s-%d' % (color, i),
+                'color': color,
+                'index': i,
+                'position': -1,
+            })
+    return tokens
+
+
+def next_ludo_color(current, players):
+    colors = [p.get('color') for p in players if p.get('color')]
+    if not colors:
+        return current
+    if current not in colors:
+        return colors[0]
+    return colors[(colors.index(current) + 1) % len(colors)]
+
+
+@app.route('/api/v1/ludo/create-table', methods=['POST', 'OPTIONS'])
+def create_ludo_table_endpoint():
+    """Charge the table fee and create the room in one step.
+
+    Client create + separate deduct let a patched app skip payment, and an
+    honest app lose coins when create failed after the debit.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    game_mode = str(data.get('gameMode') or '').strip()
+    nickname = str(data.get('nickname') or '').strip()[:40] or 'Host'
+    avatar_data = data.get('avatarData')
+    if game_mode not in ('per_game', 'per_token'):
+        return jsonify({"error": "gameMode must be per_game or per_token"}), 400
+
+    try:
+        db_client = firestore.client()
+        user_ref = db_client.collection('users').document(uid)
+        room_ref = db_client.collection('ludo_rooms').document()
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            balance = get_coin_balance(user_ref.get(transaction=transaction))
+            if balance < LUDO_TABLE_COST:
+                raise ValueError("Insufficient Gengal balance")
+            transaction.update(user_ref, {"coins": balance - LUDO_TABLE_COST})
+            host_player = {
+                "uid": uid,
+                "nickname": nickname,
+                "avatarData": avatar_data if isinstance(avatar_data, dict) else None,
+                "color": "red",
+                "isHost": True,
+                "isOnline": True,
+                "score": 0,
+            }
+            transaction.set(room_ref, {
+                "hostUid": uid,
+                "phase": "waiting",
+                "status": "live",
+                "gameMode": game_mode,
+                "ticketPrice": LUDO_DEFAULT_TICKET_PRICE,
+                "audienceBets": {},
+                "players": [host_player],
+                "playerUids": [uid],
+                "activeMemberCount": 1,
+                "presentCount": 1,
+                "hostLastSeen": datetime.now(timezone.utc),
+                "tokens": build_initial_ludo_tokens(),
+                "currentTurn": "red",
+                "diceValue": None,
+                "diceRolled": False,
+                "consecutiveSixes": 0,
+                "turnStartedAt": None,
+                "turnTimeoutSecs": 15,
+                "finishRank": 1,
+                "winnersOrder": [],
+                "spectatorCount": 0,
+                "createdAt": firestore.SERVER_TIMESTAMP,
+            })
+            return balance - LUDO_TABLE_COST
+
+        new_balance = apply(transaction)
+        return jsonify({
+            "ok": True,
+            "roomId": room_ref.id,
+            "newBalance": new_balance,
+            "tableCost": LUDO_TABLE_COST,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Create table error: {e}")
+        return jsonify({"error": "Failed to create table"}), 500
+
+
+@app.route('/api/v1/ludo/buy-ticket', methods=['POST', 'OPTIONS'])
+def buy_ludo_ticket_endpoint():
+    """Atomically seats a player: read ticketPrice from the room, take payment,
+    then claim the colour. The old client path deducted first and claimed
+    second, so two buyers racing the same seat both paid and one lost the coins.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = str(data.get("roomId") or "").strip()
+    color = str(data.get("color") or "").strip().lower()
+    nickname = str(data.get("nickname") or "").strip()[:40] or "Player"
+    avatar_data = data.get("avatarData")
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    if color not in LUDO_SEAT_COLORS:
+        return jsonify({"error": "Invalid seat colour"}), 400
+
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        user_ref = db_client.collection('users').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            room_snap = room_ref.get(transaction=transaction)
+            if not room_snap.exists:
+                raise ValueError("Unknown room")
+            room = room_snap.to_dict() or {}
+            host_uid = room.get('hostUid')
+            if not host_uid:
+                raise ValueError("Room has no host")
+
+            ticket_price = float(room.get('ticketPrice') or 0)
+            if ticket_price <= 0:
+                raise ValueError("This table has no seat price")
+            if ticket_price > MAX_SINGLE_DEDUCT:
+                raise ValueError("Seat price exceeds maximum")
+
+            players = list(room.get('players') or [])
+            if any((p or {}).get('uid') == uid for p in players):
+                raise ValueError("Already seated")
+            if any((p or {}).get('color') == color for p in players):
+                raise ValueError("Color already taken")
+
+            commission = server_host_commission(ticket_price)
+            host_ref = db_client.collection('users').document(host_uid)
+            pay_host = commission > 0 and host_uid != uid
+
+            # All reads before writes.
+            user_balance = get_coin_balance(user_ref.get(transaction=transaction))
+            host_balance = (
+                get_coin_balance(host_ref.get(transaction=transaction))
+                if pay_host else None
+            )
+            if user_balance < ticket_price:
+                raise ValueError("Insufficient Gengal balance")
+
+            user_new = user_balance - ticket_price
+            host_new = None
+            transaction.update(user_ref, {"coins": user_new})
+            if pay_host:
+                host_new = host_balance + commission
+                transaction.update(host_ref, {"coins": host_new})
+
+            players.append({
+                "uid": uid,
+                "nickname": nickname,
+                "avatarData": avatar_data if isinstance(avatar_data, dict) else None,
+                "color": color,
+                "isHost": False,
+                "isOnline": True,
+                "score": 0,
+            })
+            transaction.update(room_ref, {
+                "players": players,
+                "playerUids": [p.get('uid') for p in players if p.get('uid')],
+                "activeMemberCount": int(room.get('activeMemberCount') or len(players)) + 1,
+            })
+            return user_new, host_new, ticket_price, commission
+
+        new_balance, host_new_balance, price, commission = apply(transaction)
+        return jsonify({
+            "ok": True,
+            "newBalance": new_balance,
+            "hostNewBalance": host_new_balance,
+            "ticketPrice": price,
+            "commission": commission,
+            "color": color,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Buy ticket error: {e}")
+        return jsonify({"error": "Failed to buy seat"}), 500
+
+
+@app.route('/api/v1/ludo/leave-seat', methods=['POST', 'OPTIONS'])
+def ludo_leave_seat_endpoint():
+    """Remove the caller from players / playerUids (server-owned seat list)."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    room_id = str((request.json or {}).get('roomId') or '').strip()
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = room_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("Unknown room")
+            room = snap.to_dict() or {}
+            players = [p for p in (room.get('players') or []) if (p or {}).get('uid') != uid]
+            if len(players) == len(room.get('players') or []):
+                return False
+            transaction.update(room_ref, {
+                "players": players,
+                "playerUids": [p.get('uid') for p in players if p.get('uid')],
+                "activeMemberCount": max(0, int(room.get('activeMemberCount') or 1) - 1),
+            })
+            return True
+
+        left = apply(transaction)
+        return jsonify({"ok": True, "left": left}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Leave seat error: {e}")
+        return jsonify({"error": "Failed to leave seat"}), 500
+
+
+@app.route('/api/v1/rooms/expert/leave-stage', methods=['POST', 'OPTIONS'])
+def expert_leave_stage_endpoint():
+    """Remove the caller from the speakers list (host still manages others)."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    room_id = str((request.json or {}).get('roomId') or '').strip()
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('expert_rooms').document(room_id)
+        snap = room_ref.get()
+        if not snap.exists:
+            return jsonify({"error": "Unknown room"}), 404
+        room = snap.to_dict() or {}
+        # Host stays on stage until the room closes — demoting them leaves no publisher.
+        if room.get('hostUid') == uid:
+            return jsonify({"ok": True, "left": False, "reason": "host"}), 200
+
+        def without_uid(values):
+            return [u for u in (values or []) if u != uid]
+
+        room_ref.update({
+            "speakers": [
+                s for s in (room.get('speakers') or []) if (s or {}).get('uid') != uid
+            ],
+            "handQueue": without_uid(room.get('handQueue')),
+            "handQueueBoy": without_uid(room.get('handQueueBoy')),
+            "handQueueGirl": without_uid(room.get('handQueueGirl')),
+        })
+        return jsonify({"ok": True, "left": True}), 200
+    except Exception as e:
+        print(f"[ROOMS] Leave stage error: {e}")
+        return jsonify({"error": "Failed to leave stage"}), 500
+
+
+@app.route('/api/v1/ludo/place-bet', methods=['POST', 'OPTIONS'])
+def place_ludo_bet_endpoint():
+    """Charge a fixed backing amount and record it on the room atomically."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = str(data.get("roomId") or "").strip()
+    color = str(data.get("color") or "").strip().lower()
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    if color not in LUDO_SEAT_COLORS:
+        return jsonify({"error": "Invalid colour"}), 400
+
+    amount = float(LUDO_BET_AMOUNT)
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        user_ref = db_client.collection('users').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            room_snap = room_ref.get(transaction=transaction)
+            if not room_snap.exists:
+                raise ValueError("Unknown room")
+            room = room_snap.to_dict() or {}
+            host_uid = room.get('hostUid')
+            if not host_uid:
+                raise ValueError("Room has no host")
+
+            commission = server_host_commission(amount)
+            host_ref = db_client.collection('users').document(host_uid)
+            pay_host = commission > 0 and host_uid != uid
+
+            user_balance = get_coin_balance(user_ref.get(transaction=transaction))
+            host_balance = (
+                get_coin_balance(host_ref.get(transaction=transaction))
+                if pay_host else None
+            )
+            if user_balance < amount:
+                raise ValueError("Insufficient Gengal balance")
+
+            user_new = user_balance - amount
+            host_new = None
+            transaction.update(user_ref, {"coins": user_new})
+            if pay_host:
+                host_new = host_balance + commission
+                transaction.update(host_ref, {"coins": host_new})
+
+            bets = dict(room.get('audienceBets') or {})
+            existing = bets.get(uid) or {}
+            prior = float(existing.get('amount') or 0) if isinstance(existing, dict) else 0
+            bets[uid] = {"color": color, "amount": prior + amount}
+            transaction.update(room_ref, {"audienceBets": bets})
+            return user_new, host_new
+
+        new_balance, host_new = apply(transaction)
+        return jsonify({
+            "ok": True,
+            "newBalance": new_balance,
+            "hostNewBalance": host_new,
+            "amount": amount,
+            "color": color,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Place bet error: {e}")
+        return jsonify({"error": "Failed to place bet"}), 500
+
+
+@app.route('/api/v1/ludo/roll', methods=['POST', 'OPTIONS'])
+def ludo_roll_endpoint():
+    """Charge per-token roll fee (when applicable) and set the dice server-side."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = str(data.get("roomId") or "").strip()
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        user_ref = db_client.collection('users').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            room_snap = room_ref.get(transaction=transaction)
+            if not room_snap.exists:
+                raise ValueError("Unknown room")
+            room = room_snap.to_dict() or {}
+            if room.get('phase') != 'playing':
+                raise ValueError("Game is not in play")
+            if room.get('diceRolled'):
+                raise ValueError("Dice already rolled")
+
+            players = list(room.get('players') or [])
+            me = next((p for p in players if (p or {}).get('uid') == uid), None)
+            if not me:
+                raise ValueError("Not a seated player")
+            if me.get('color') != room.get('currentTurn'):
+                raise ValueError("Not your turn")
+
+            host_uid = room.get('hostUid')
+            game_mode = room.get('gameMode')
+            user_new = None
+            host_new = None
+
+            if game_mode == 'per_token':
+                commission = server_host_commission(LUDO_ROLL_COST) if host_uid and host_uid != uid else 0
+                host_ref = db_client.collection('users').document(host_uid) if host_uid else None
+                pay_host = bool(host_ref and commission > 0)
+
+                user_balance = get_coin_balance(user_ref.get(transaction=transaction))
+                host_balance = (
+                    get_coin_balance(host_ref.get(transaction=transaction))
+                    if pay_host else None
+                )
+                if user_balance < LUDO_ROLL_COST:
+                    raise ValueError("Insufficient Gengal balance")
+                user_new = user_balance - LUDO_ROLL_COST
+                transaction.update(user_ref, {"coins": user_new})
+                if pay_host:
+                    host_new = host_balance + commission
+                    transaction.update(host_ref, {"coins": host_new})
+
+            value = random.randint(1, 6)
+            consec = int(room.get('consecutiveSixes') or 0)
+            new_consec = consec + 1 if value == 6 else 0
+            updates = {
+                "diceValue": value,
+                "diceRolled": True,
+                "consecutiveSixes": new_consec,
+            }
+            forfeited = False
+            if new_consec >= 3:
+                updates.update({
+                    "currentTurn": next_ludo_color(room.get('currentTurn'), players),
+                    "diceValue": None,
+                    "diceRolled": False,
+                    "consecutiveSixes": 0,
+                    "turnStartedAt": firestore.SERVER_TIMESTAMP,
+                })
+                forfeited = True
+            transaction.update(room_ref, updates)
+            return value, user_new, host_new, forfeited
+
+        value, user_new, host_new, forfeited = apply(transaction)
+        return jsonify({
+            "ok": True,
+            "diceValue": value,
+            "newBalance": user_new,
+            "hostNewBalance": host_new,
+            "forfeited": forfeited,
+            "rollCost": LUDO_ROLL_COST,
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Roll error: {e}")
+        return jsonify({"error": "Failed to roll"}), 500
+
 
 @app.route('/api/v1/coins/call-rewards', methods=['POST', 'OPTIONS'])
 def call_rewards_endpoint():
@@ -1308,32 +1887,54 @@ def call_rewards_endpoint():
     user_id = data.get("userId")
     if user_id != uid:
         return jsonify({"error": "Cannot update rewards for another user"}), 403
+    room_id = data.get("roomId")
+    if not isinstance(room_id, str) or not room_id.strip():
+        return jsonify({"error": "Missing roomId"}), 400
+    room_id = room_id.strip()
     try:
-        seconds_to_add = parse_positive_number(data.get("secondsToAdd"), "secondsToAdd")
-        # Cap: one reward increment cannot represent more than a full 2-hour call.
-        # A patched client could otherwise submit secondsToAdd=10^9 to farm hearts
-        # even after the threshold fix below.
-        seconds_to_add = min(seconds_to_add, MAX_REWARDS_SECONDS)
+        # Client secondsToAdd is a hint only. Hard ceiling is server-billed
+        # duration minus seconds already credited for this participant.
+        requested = None
+        if data.get("secondsToAdd") is not None:
+            requested = parse_positive_number(data.get("secondsToAdd"), "secondsToAdd")
         # Threshold comes from server pricing settings, NOT the client body.
-        # A patched client that sends thresholdMinutes=0.001 would otherwise
-        # turn a single second of call time into tens of thousands of hearts,
-        # each redeemable for real money via heartToInrRate.  The client-supplied
-        # field (thresholdMinutes) is intentionally ignored here.
         settings = pricing_settings()
         threshold_minutes = float(settings.get(
             'callDurationForHeart', DEFAULT_SETTINGS['callDurationForHeart']
         ))
-        is_receiver = bool(data.get("isReceiver"))
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
+        call_ref = db_client.collection('calls').document(room_id)
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
-            snap = user_ref.get(transaction=transaction)
-            if not snap.exists:
+            call_snap = call_ref.get(transaction=transaction)
+            user_snap = user_ref.get(transaction=transaction)
+            if not call_snap.exists:
+                raise ValueError("Call does not exist")
+            if not user_snap.exists:
                 raise ValueError("User does not exist")
-            user_data = snap.to_dict() or {}
+            call = call_snap.to_dict() or {}
+            caller_id = call.get('callerUid')
+            receiver_id = call.get('receiverUid')
+            if not caller_id or not receiver_id or caller_id == receiver_id:
+                raise ValueError("Invalid call participants")
+            if uid not in (caller_id, receiver_id):
+                raise PermissionError("Not a participant in this call")
+            is_receiver = uid == receiver_id
+            reward_key = (
+                'receiverRewardedSeconds' if is_receiver else 'callerRewardedSeconds'
+            )
+            already = float(call.get(reward_key) or 0)
+            remaining = max(0.0, float(call.get('durationSeconds') or 0) - already)
+            seconds_to_add = min(remaining, float(MAX_REWARDS_SECONDS))
+            if requested is not None:
+                seconds_to_add = min(seconds_to_add, requested)
+            if seconds_to_add <= 0:
+                return 0.0
+
+            user_data = user_snap.to_dict() or {}
             current_seconds = float(user_data.get("unrewardedCallSeconds") or 0) + seconds_to_add
             hearts = int(user_data.get("hearts") or 0)
             total_received = float(user_data.get("totalReceivedCallSeconds") or 0)
@@ -1351,9 +1952,14 @@ def call_rewards_endpoint():
             if is_receiver:
                 update_data["totalReceivedCallSeconds"] = total_received
             transaction.update(user_ref, update_data)
+            transaction.update(call_ref, {reward_key: already + seconds_to_add})
+            return seconds_to_add
 
-        apply(transaction)
-        return jsonify({"ok": True}), 200
+        try:
+            credited = apply(transaction)
+        except PermissionError as e:
+            return jsonify({"error": str(e)}), 403
+        return jsonify({"ok": True, "creditedSeconds": credited}), 200
     except (TypeError, ValueError) as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1895,7 +2501,10 @@ def resolve_withdrawal():
             # rejection refunding the same hearts twice.
             allowed_next = {
                 'pending': {'approved', 'rejected', 'paid'},
-                'approved': {'paid', 'rejected'},
+                # Once approved, only `paid` is allowed. Rejecting after approve
+                # used to refund hearts even when the INR transfer may already
+                # have left the building — a double payout.
+                'approved': {'paid'},
             }
             current_status = req.get('status')
             if new_status not in allowed_next.get(current_status, set()):
@@ -1914,11 +2523,13 @@ def resolve_withdrawal():
                 raise ValueError("User does not exist")
             user_data = user_snap.to_dict() or {}
 
-            user_update = {'pendingWithdrawalId': firestore.DELETE_FIELD}
-            # Refund only what was actually taken. Requests predating this
-            # endpoint were written straight from the client and never debited
-            # the balance, so paying them back would mint hearts — and hearts
-            # are convertible to rupees, so that is minting money.
+            user_update = {}
+            # Only clear when the marker still points at this request — a newer
+            # pending claim must keep its lock.
+            if user_data.get('pendingWithdrawalId') == request_id:
+                user_update['pendingWithdrawalId'] = firestore.DELETE_FIELD
+            # Refund only when hearts were actually debited (pre-endpoint
+            # client writes never deducted, so refunding those would mint).
             if new_status == 'rejected' and req.get('heartsDeducted'):
                 refund = int(req.get('hearts') or 0)
                 user_update['hearts'] = int(user_data.get('hearts') or 0) + refund
@@ -1928,7 +2539,8 @@ def resolve_withdrawal():
                 'resolvedAt': firestore.SERVER_TIMESTAMP,
                 'resolvedBy': admin_id,
             })
-            transaction.update(user_ref, user_update)
+            if user_update:
+                transaction.update(user_ref, user_update)
             return target_uid
 
         target_uid = apply(transaction)

@@ -25,7 +25,6 @@ import { auth } from '../config/firebase';
 import {
   createLudoRoom, joinLudoRoom, LudoRoom, subscribeToLudoRooms, TokenColor,
 } from '../services/ludoService';
-import { deductUserCoins } from '../services/coinService';
 import { GEMS, ludo, numeric } from '../theme/ludoTheme';
 import { skeuo } from '../theme/skeuomorphic';
 import { useLiveRooms } from '../hooks/useRoomPresence';
@@ -190,7 +189,6 @@ export default function LudoScreen({ navigate }: Props) {
     setModeSheet(false);
     setCreating(true);
     try {
-      await deductUserCoins(myUid, TABLE_COST);
       const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
     } catch (e: any) {

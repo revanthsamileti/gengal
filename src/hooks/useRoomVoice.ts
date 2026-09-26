@@ -15,6 +15,9 @@ export type VoiceRole = 'broadcaster' | 'audience';
  * The backend derives the Agora uid from the bearer token, so callers must not
  * send one — and must join with the numeric uid it returns, or the token will
  * not match the channel identity.
+ *
+ * Role changes remint: an audience token cannot publish, so promoting to
+ * broadcaster after the host accepts a hand must fetch a publisher token.
  */
 export function useRoomVoice(roomId: string | undefined, role: VoiceRole, enabled = true) {
   const voice = useGengalVoice('agora');
@@ -23,7 +26,6 @@ export function useRoomVoice(roomId: string | undefined, role: VoiceRole, enable
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Read at connect time so a role change before the token lands is not lost.
   const roleRef = useRef<VoiceRole>(role);
   roleRef.current = role;
 
@@ -33,17 +35,24 @@ export function useRoomVoice(roomId: string | undefined, role: VoiceRole, enable
     let active = true;
     (async () => {
       try {
-        const creds = await authedPost<{ token: string; uid?: number }>(
+        const creds = await authedPost<{ token: string; uid?: number; role?: string }>(
           '/api/v1/agora/generate-token',
-          { roomId }
+          { roomId, role: roleRef.current }
         );
         if (!active) return;
+
+        // Server is authoritative; fall back to the requested role if older
+        // backends omit the field.
+        let granted: VoiceRole = roleRef.current;
+        if (creds.role === 'broadcaster' || creds.role === 'audience') {
+          granted = creds.role;
+        }
 
         await connectSeat(
           roomId,
           creds.token,
           creds.uid != null ? String(creds.uid) : undefined,
-          roleRef.current
+          granted
         );
         if (!active) return;
         setConnected(true);
@@ -51,8 +60,6 @@ export function useRoomVoice(roomId: string | undefined, role: VoiceRole, enable
       } catch (e: any) {
         if (!active) return;
         setConnected(false);
-        // Voice is best-effort: a room stays usable without it, so surface the
-        // reason rather than throwing into an unhandled rejection.
         setError(e?.message ?? 'Voice is unavailable right now.');
         console.warn('[RoomVoice] Could not join voice:', e?.message ?? e);
       }
@@ -63,11 +70,11 @@ export function useRoomVoice(roomId: string | undefined, role: VoiceRole, enable
       setConnected(false);
       disconnectSeat();
     };
-    // connectSeat/disconnectSeat are re-created each render by useGengalVoice;
-    // including them would tear the channel down on every paint.
-  }, [roomId, enabled]);
+    // Remint when role flips (stage up / seat buy / chill actor). Including
+    // connectSeat would tear the channel down on every paint.
+  }, [roomId, enabled, role]);
 
-  // Promote/demote once the channel is live.
+  // Keep the native client role in sync when already on the right token privilege.
   useEffect(() => {
     if (!connected) return;
     changeRole(role).catch((e) =>

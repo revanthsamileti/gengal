@@ -21,7 +21,8 @@ sudo apt-get update -y
 sudo apt-get install -y \
     python3 python3-venv python3-dev \
     build-essential pkg-config \
-    git nginx curl jq
+    git nginx curl jq \
+    certbot python3-certbot-nginx
 
 echo "==> Service account: $APP_USER"
 # --system: no login shell, no home clutter. The app never needs to be a person.

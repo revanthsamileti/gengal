@@ -124,12 +124,14 @@ export const updateCallRewards = async (
   userId: string,
   secondsToAdd: number,
   thresholdMinutes: number,
+  roomId: string,
   isReceiver: boolean = false,
 ) => {
-  return authedPost<{ ok: boolean }>('/api/v1/coins/call-rewards', {
+  return authedPost<{ ok: boolean; creditedSeconds?: number }>('/api/v1/coins/call-rewards', {
     userId,
     secondsToAdd,
     thresholdMinutes,
     isReceiver,
+    roomId,
   });
 };

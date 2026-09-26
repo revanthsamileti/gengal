@@ -62,7 +62,8 @@ export default function EarningsScreen({ navigate, goBack }: any) {
   const earnings = hearts * rate;
   const totalMinutes = Math.floor((profile?.totalReceivedCallSeconds || 0) / 60);
   const unrewarded = profile?.unrewardedCallSeconds || 0;
-  const targetSeconds = (settings?.callDurationForHeart || 3) * 60;
+  const callMinutesForHeart = settings?.callDurationForHeart || 3;
+  const targetSeconds = callMinutesForHeart * 60;
   const progressPercent = Math.min((unrewarded / targetSeconds) * 100, 100);
   // Hearts-minimum AND no pending request must both be true to allow a new
   // submission. The hearts count comes from the live onSnapshot so it reflects
@@ -75,6 +76,7 @@ export default function EarningsScreen({ navigate, goBack }: any) {
   const minHearts = settings?.minWithdrawalHearts ?? 33;
   const canWithdraw = hearts >= minHearts && !hasPendingWithdrawal;
   const minWithdraw = minHearts * rate;
+  const profileLoading = profile == null;
 
   const handleWithdraw = () =>
     run(async () => {
@@ -84,6 +86,11 @@ export default function EarningsScreen({ navigate, goBack }: any) {
         // committed to paying, and the two can differ whenever a call reward
         // lands between this screen's last snapshot and the request.
         const { amountInr } = await requestWithdrawal();
+        // Hearts are zeroed server-side at request time; mirror that here so
+        // the hero does not keep showing the pre-withdraw total until the
+        // next snapshot arrives.
+        setProfile((prev: any) => (prev ? { ...prev, hearts: 0 } : prev));
+        setHasPendingWithdrawal(true);
         Alert.alert(
           'Request submitted',
           `Your withdrawal request for ₹${amountInr.toFixed(2)} has been recorded and is pending review. You'll be notified once it's processed.`,
@@ -118,11 +125,15 @@ export default function EarningsScreen({ navigate, goBack }: any) {
             {/* Balance Hero */}
             <LinearGradient colors={['#3B0044', '#7B0085']} style={styles.hero}>
               <Text style={styles.heroLabel}>TOTAL BALANCE</Text>
-              <Text style={styles.heroAmount}>₹{earnings.toFixed(2)}</Text>
+              <Text style={styles.heroAmount}>
+                {profileLoading ? '—' : `₹${earnings.toFixed(2)}`}
+              </Text>
               <View style={styles.heroChipRow}>
                 <View style={styles.heroChip}>
                   <MaterialIcons name="favorite" size={13} color="#C9504B" />
-                  <Text style={styles.heroChipText}>{hearts} Hearts</Text>
+                  <Text style={styles.heroChipText}>
+                    {profileLoading ? '—' : `${hearts} Hearts`}
+                  </Text>
                 </View>
                 <Text style={styles.heroRate}>× ₹{rate}/heart</Text>
               </View>
@@ -132,17 +143,17 @@ export default function EarningsScreen({ navigate, goBack }: any) {
             <View style={styles.statsRow}>
               <View style={styles.statCard}>
                 <MaterialIcons name="timer" size={26} color="#D49A0B" />
-                <Text style={styles.statValue}>{totalMinutes}m</Text>
+                <Text style={styles.statValue}>{profileLoading ? '—' : `${totalMinutes}m`}</Text>
                 <Text style={styles.statLabel}>Talk Time</Text>
               </View>
               <View style={styles.statCard}>
                 <MaterialIcons name="favorite" size={26} color="#C9504B" />
-                <Text style={styles.statValue}>{hearts}</Text>
+                <Text style={styles.statValue}>{profileLoading ? '—' : hearts}</Text>
                 <Text style={styles.statLabel}>Hearts</Text>
               </View>
               <View style={styles.statCard}>
                 <MaterialIcons name="account-balance-wallet" size={26} color="#4B0054" />
-                <Text style={styles.statValue}>₹{(hearts * rate).toFixed(0)}</Text>
+                <Text style={styles.statValue}>{profileLoading ? '—' : `₹${(hearts * rate).toFixed(0)}`}</Text>
                 <Text style={styles.statLabel}>Earned</Text>
               </View>
             </View>
@@ -169,9 +180,9 @@ export default function EarningsScreen({ navigate, goBack }: any) {
                 <Text style={styles.cardTitle}>How Earnings Work</Text>
               </View>
               {[
-                ['Every 3 min of received calls = 1 Heart', 'timer'],
+                [`Every ${callMinutesForHeart} min of received calls = 1 Heart`, 'timer'],
                 [`1 Heart = ₹${rate} in earnings`, 'favorite'],
-                ['Minimum withdrawal: 33 Hearts (₹' + minWithdraw.toFixed(0) + ')', 'account-balance'],
+                [`Minimum withdrawal: ${minHearts} Hearts (₹${minWithdraw.toFixed(0)})`, 'account-balance'],
                 ['Paid to your UPI or bank within 24h', 'payments'],
               ].map(([text, icon]) => (
                 <View key={text} style={styles.infoRow}>
@@ -189,19 +200,19 @@ export default function EarningsScreen({ navigate, goBack }: any) {
                   ? 'A withdrawal request is already pending review — you can submit another once this one is settled.'
                   : canWithdraw
                     ? `₹${earnings.toFixed(2)} available to withdraw`
-                    : `Need ${33 - hearts} more hearts to reach minimum (₹${minWithdraw.toFixed(0)})`}
+                    : `Need ${Math.max(0, minHearts - hearts)} more hearts to reach minimum (₹${minWithdraw.toFixed(0)})`}
               </Text>
               <TouchableOpacity
-                style={[styles.withdrawBtn, (!canWithdraw || isSubmitting) && styles.withdrawBtnOff]}
+                style={[styles.withdrawBtn, (!canWithdraw || isSubmitting || profileLoading) && styles.withdrawBtnOff]}
                 activeOpacity={0.82}
                 onPress={handleWithdraw}
-                disabled={!canWithdraw || isSubmitting}
+                disabled={!canWithdraw || isSubmitting || profileLoading}
                 accessibilityRole="button"
                 accessibilityLabel={`Withdraw ${earnings.toFixed(2)} rupees`}
-                accessibilityState={{ disabled: !canWithdraw || isSubmitting }}
+                accessibilityState={{ disabled: !canWithdraw || isSubmitting || profileLoading }}
               >
-                <MaterialIcons name="payments" size={18} color={canWithdraw && !isSubmitting ? '#FFFDF8' : '#C0B0C4'} />
-                <Text style={[styles.withdrawBtnText, (!canWithdraw || isSubmitting) && { color: '#C0B0C4' }]}>
+                <MaterialIcons name="payments" size={18} color={canWithdraw && !isSubmitting && !profileLoading ? '#FFFDF8' : '#C0B0C4'} />
+                <Text style={[styles.withdrawBtnText, (!canWithdraw || isSubmitting || profileLoading) && { color: '#C0B0C4' }]}>
                   {isSubmitting
                     ? 'Submitting…'
                     : hasPendingWithdrawal

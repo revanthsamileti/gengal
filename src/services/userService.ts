@@ -50,7 +50,7 @@ export const USER_HEARTBEAT_MS = 2 * 60 * 1000;
  * that user as permanently busy — invisible to callers, earning nothing. Here
  * the stamp simply stops being refreshed and ages out on its own.
  */
-export const CALL_BUSY_TTL_MS = 45 * 1000;
+export const CALL_BUSY_TTL_MS = 90 * 1000;
 
 /**
  * Whether this user is on a call right now.

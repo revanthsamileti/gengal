@@ -322,27 +322,6 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
   const isActor = room?.actorUid === myUid;
   const isGuesser = room?.guesserUid === myUid;
 
-  // Charades is played out loud: the actor describes and the guesser answers, so
-  // both need a live mic. The host keeps one to run the round. Everyone else
-  // listens. Previously this screen had no voice at all.
-  const voiceRole: VoiceRole =
-    (isHost || isActor || isGuesser) ? 'broadcaster' : 'audience';
-  const { toggleMic, micMuted, toggleSpeaker, speakerOn, error: voiceError } =
-    useRoomVoice(roomId, voiceRole, !!room);
-
-  // The answer is no longer on the room document. Only the actor and the host
-  // can read it; for everyone else this subscription errors and stays null,
-  // which is the point.
-  const [roundAnswer, setRoundAnswer] = useState<string | null>(null);
-  const [giftSheet, setGiftSheet] = useState(false);
-  const [giftTargetUid, setGiftTargetUid] = useState<string | null>(null);
-  useEffect(() => {
-    if (!roomId || !(isActor || isHost)) { setRoundAnswer(null); return; }
-    return subscribeToRoundAnswer(roomId, setRoundAnswer);
-  }, [roomId, isActor, isHost]);
-
-  const isPlaying = room?.phase === 'acting' || room?.phase === 'prompt';
-
   // Who is actually in the room right now.
   //
   // This was derived from the `scores` map, which nothing ever removes from —
@@ -357,8 +336,35 @@ export default function DumCharadesRoomScreen({ navigate, goBack, route }: Props
     nickname: myName,
     avatarData: myAvatarData,
     isHost,
-    enabled: !!room,
+    enabled: !!room && room.status === 'live',
   });
+
+  // Actor + guesser need a mic; host keeps one to run the round. Wait for
+  // presence so Agora membership exists before minting.
+  const voiceRole: VoiceRole =
+    isHost || isActor || isGuesser ? 'broadcaster' : 'audience';
+  const voiceEnabled = !!room && room.status === 'live' && connection === 'live';
+  const { toggleMic, micMuted, toggleSpeaker, speakerOn, error: voiceError } =
+    useRoomVoice(roomId, voiceRole, voiceEnabled);
+
+  // Kick everyone out when the host closes or the doc disappears.
+  useEffect(() => {
+    if (room === null) return;
+    if (room.status === 'closed') goBack?.();
+  }, [room, goBack]);
+
+  // The answer is no longer on the room document. Only the actor and the host
+  // can read it; for everyone else this subscription errors and stays null,
+  // which is the point.
+  const [roundAnswer, setRoundAnswer] = useState<string | null>(null);
+  const [giftSheet, setGiftSheet] = useState(false);
+  const [giftTargetUid, setGiftTargetUid] = useState<string | null>(null);
+  useEffect(() => {
+    if (!roomId || !(isActor || isHost)) { setRoundAnswer(null); return; }
+    return subscribeToRoundAnswer(roomId, setRoundAnswer);
+  }, [roomId, isActor, isHost]);
+
+  const isPlaying = room?.phase === 'acting' || room?.phase === 'prompt';
 
   const members = useMemo(
     () => presentMembers.map((m) => ({ uid: m.uid, nickname: m.nickname })),

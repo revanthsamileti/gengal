@@ -320,7 +320,19 @@ class TestResolve:
         self._open(client)
         req_id = request_id_of(store)
         become_admin(monkeypatch)
-        client.post("/api/v1/withdrawals/resolve", json={"requestId": req_id, "status": "paid"})
+        # pending → approved → paid is the real operator sequence; jumping
+        # straight to paid would not exercise the terminal-state guard the way
+        # production traffic does.
+        approve = client.post(
+            "/api/v1/withdrawals/resolve",
+            json={"requestId": req_id, "status": "approved"},
+        )
+        assert approve.status_code == 200
+        paid = client.post(
+            "/api/v1/withdrawals/resolve",
+            json={"requestId": req_id, "status": "paid"},
+        )
+        assert paid.status_code == 200
 
         response = client.post(
             "/api/v1/withdrawals/resolve",

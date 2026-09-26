@@ -232,9 +232,11 @@ export const joinChillRoom = async (
   nickname: string,
   avatarData: any,
 ) => {
+  // Guests may only bump occupancy. Scores are initialised by the host when
+  // awarding points (missing keys read as 0), so writing `scores.{uid}` here
+  // was both unnecessary and denied by rules.
   await updateDoc(doc(db, 'chill_rooms', roomId), {
     activeMemberCount: increment(1),
-    [`scores.${uid}`]: 0,
   });
   await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
 };

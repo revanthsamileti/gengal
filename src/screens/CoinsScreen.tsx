@@ -224,7 +224,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
             </View>
             {Number(customAmount) > 0 && (
               <Text style={styles.customOutput}>
-                You will get roughly <Text style={{fontWeight: '800', color: '#D49A0B'}}>{Math.floor(Number(customAmount) * (settings.inrToCoinRechargeRate || 1.12))} Coins</Text>
+                You will get roughly <Text style={{fontWeight: '800', color: '#D49A0B'}}>{coinsFor(Number(customAmount))} Coins</Text>
               </Text>
             )}
           </View>

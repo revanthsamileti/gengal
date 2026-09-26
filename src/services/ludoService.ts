@@ -17,6 +17,7 @@ import {
   getDoc,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
+import { authedPost } from './authService';
 
 // ── Board constants ───────────────────────────────────────────────────────────
 
@@ -283,40 +284,14 @@ export const createLudoRoom = async (
   hostAvatarData: any,
   gameMode: 'per_game' | 'per_token'
 ): Promise<string> => {
-  const hostPlayer: LudoPlayer = {
-    uid: hostUid,
+  // Table fee is charged server-side in the same write that creates the room,
+  // so a patched client cannot skip payment and a failed create cannot eat coins.
+  const data = await authedPost<{ roomId: string }>('/api/v1/ludo/create-table', {
+    gameMode,
     nickname: hostNickname,
     avatarData: hostAvatarData || null,
-    color: 'red',
-    isHost: true,
-    isOnline: true,
-    score: 0,
-  };
-  const ref = await addDoc(collection(db, 'ludo_rooms'), {
-    hostUid,
-    phase: 'waiting',
-    status: 'live',
-    gameMode,
-    ticketPrice: 50,
-    audienceBets: {},
-    players: [hostPlayer],
-    activeMemberCount: 1,
-    presentCount: 1,
-    // Seeded so a host that dies before its first heartbeat still ages out.
-    hostLastSeen: Timestamp.now(),
-    tokens: buildInitialTokens(),
-    currentTurn: 'red',
-    diceValue: null,
-    diceRolled: false,
-    consecutiveSixes: 0,
-    turnStartedAt: null,
-    turnTimeoutSecs: 15,
-    finishRank: 1,
-    winnersOrder: [],
-    spectatorCount: 0,
-    createdAt: serverTimestamp() as any,
-  } as Omit<LudoRoom, 'id'>);
-  return ref.id;
+  });
+  return data.roomId;
 };
 
 export const closeLudoRoom = async (roomId: string) => {
@@ -376,8 +351,6 @@ export const subscribeToLudoEvents = (
 
 // ── Join / Leave ──────────────────────────────────────────────────────────────
 
-const COLORS_ORDER: TokenColor[] = ['red', 'blue', 'green', 'yellow'];
-
 export const joinLudoRoom = async (
   roomId: string,
   uid: string,
@@ -393,35 +366,16 @@ export const joinLudoRoom = async (
     return { joined: true, asSpectator: false };
   }
 
-  if (room.phase !== 'waiting' || room.players.length >= 4) {
-    // Join as spectator
-    // Spectator headcount comes from heartbeat presence now, so there is no
-    // counter to bump — and none to leak when this client dies without leaving.
-    await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
-    return { joined: true, asSpectator: true };
-  }
-
-  // Join as spectator initially for all new monetized games unless host
-  if (uid !== room.hostUid) {
-    await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined as spectator' });
-    return { joined: true, asSpectator: true };
-  }
-
-  // Assign next available color
-  const taken = new Set(room.players.map(p => p.color));
-  const color = COLORS_ORDER.find(c => !taken.has(c))!;
-  const newPlayer: LudoPlayer = {
-    uid, nickname, avatarData: avatarData || null,
-    color, isHost: false, isOnline: true, score: 0,
-  };
-
-  const updatedPlayers = [...room.players, newPlayer];
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    players: updatedPlayers,
-    activeMemberCount: increment(1),
+  // Seats are paid via buy-ticket (or the host seat from create-table). A free
+  // client-side `players` write is denied by rules and was the unpaid seat hole.
+  await logEvent(roomId, {
+    type: 'join',
+    senderUid: uid,
+    senderName: nickname,
+    senderAvatarData: avatarData,
+    text: 'joined as spectator',
   });
-  await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: 'joined the table' });
-  return { joined: true, asSpectator: false };
+  return { joined: true, asSpectator: true };
 };
 
 export const buyLudoTicket = async (
@@ -429,31 +383,26 @@ export const buyLudoTicket = async (
   uid: string,
   nickname: string,
   avatarData: any,
-  ticketPrice: number,
-  hostUid: string,
+  _ticketPrice: number,
+  _hostUid: string,
   targetColor: TokenColor
 ) => {
-  const { deductUserCoinsWithCommission } = await import('./coinService');
-  const commission = Math.floor(ticketPrice * 0.1);
-  await deductUserCoinsWithCommission(uid, ticketPrice, hostUid, commission);
-
-  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
-  const room = snap.data() as LudoRoom;
-  
-  if (room.players.find(p => p.color === targetColor)) {
-    throw new Error('Color already taken');
-  }
-
-  const newPlayer: LudoPlayer = {
-    uid, nickname, avatarData: avatarData || null,
-    color: targetColor, isHost: false, isOnline: true, score: 0,
-  };
-
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    players: [...room.players, newPlayer],
-    activeMemberCount: increment(1),
+  // Seat price and host cut come from the room document on the server so a
+  // race for the same colour cannot charge both buyers, and a patched client
+  // cannot underpay.
+  await authedPost('/api/v1/ludo/buy-ticket', {
+    roomId,
+    color: targetColor,
+    nickname,
+    avatarData: avatarData || null,
   });
-  await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, senderAvatarData: avatarData, text: `bought a ticket and joined the table!` });
+  await logEvent(roomId, {
+    type: 'system',
+    senderUid: uid,
+    senderName: nickname,
+    senderAvatarData: avatarData,
+    text: `bought a ticket and joined the table!`,
+  });
 };
 
 export const placeLudoBet = async (
@@ -461,40 +410,31 @@ export const placeLudoBet = async (
   uid: string,
   nickname: string,
   color: TokenColor,
-  amount: number,
-  hostUid: string
+  _amount: number,
+  _hostUid: string
 ) => {
-  const { deductUserCoinsWithCommission } = await import('./coinService');
-  const commission = Math.floor(amount * 0.1);
-  await deductUserCoinsWithCommission(uid, amount, hostUid, commission);
-
-  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
-  const room = snap.data() as LudoRoom;
-  const newBets = { ...room.audienceBets };
-  
-  if (newBets[uid]) {
-    newBets[uid].amount += amount;
-  } else {
-    newBets[uid] = { color, amount };
-  }
-
-  await updateDoc(doc(db, 'ludo_rooms', roomId), { audienceBets: newBets });
-  await logEvent(roomId, { type: 'system', senderUid: uid, senderName: nickname, text: `placed a ${amount} 💎 bet on ${color}!` });
+  // Amount is fixed server-side (50). Client cannot underpay or forge bets.
+  const data = await authedPost<{ amount: number }>('/api/v1/ludo/place-bet', {
+    roomId,
+    color,
+  });
+  await logEvent(roomId, {
+    type: 'system',
+    senderUid: uid,
+    senderName: nickname,
+    text: `placed a ${data.amount} 💎 bet on ${color}!`,
+  });
 };
 
 export const leaveLudoRoom = async (roomId: string, uid: string, nickname: string, asSpectator: boolean) => {
-  if (asSpectator) {
-    // Presence expiry handles this; see joinLudoRoom.
-    return;
+  if (!asSpectator) {
+    // players / playerUids are server-owned; guests cannot rewrite them.
+    try {
+      await authedPost('/api/v1/ludo/leave-seat', { roomId });
+    } catch (e) {
+      console.warn('[Ludo] leave-seat failed:', (e as Error)?.message ?? e);
+    }
   }
-  const snap = await getDoc(doc(db, 'ludo_rooms', roomId));
-  if (!snap.exists()) return;
-  const room = snap.data() as LudoRoom;
-  const updated = room.players.filter(p => p.uid !== uid);
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    players: updated,
-    activeMemberCount: increment(-1),
-  });
   await logEvent(roomId, { type: 'leave', senderUid: uid, senderName: nickname });
 };
 
@@ -515,22 +455,21 @@ export const startGame = async (roomId: string) => {
   await logEvent(roomId, { type: 'system', senderUid: '', senderName: 'Game', text: 'Game started!' });
 };
 
-// Host (or current player) rolls dice — returns rolled value
+// Host (or current player) rolls dice — returns rolled value.
+// Per-token mode is charged on the server in the same write that sets the die.
 export const rollDice = async (
   roomId: string,
   rollerUid: string,
   rollerName: string,
   rollerAvatarData: any,
-  room: LudoRoom,
+  _room: LudoRoom,
 ): Promise<number> => {
-  const value = Math.floor(Math.random() * 6) + 1;
-  const newConsec = value === 6 ? room.consecutiveSixes + 1 : 0;
+  const data = await authedPost<{ diceValue: number; forfeited?: boolean }>(
+    '/api/v1/ludo/roll',
+    { roomId },
+  );
+  const value = data.diceValue;
 
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    diceValue: value,
-    diceRolled: true,
-    consecutiveSixes: newConsec,
-  });
   await logEvent(roomId, {
     type: 'roll',
     senderUid: rollerUid,
@@ -539,17 +478,13 @@ export const rollDice = async (
     diceValue: value,
   });
 
-  // Three sixes = forfeit turn automatically
-  if (newConsec >= 3) {
-    const next = nextTurn(room.currentTurn, room.players, room.tokens);
-    await updateDoc(doc(db, 'ludo_rooms', roomId), {
-      currentTurn: next,
-      diceValue: null,
-      diceRolled: false,
-      consecutiveSixes: 0,
-      turnStartedAt: serverTimestamp(),
+  if (data.forfeited) {
+    await logEvent(roomId, {
+      type: 'system',
+      senderUid: '',
+      senderName: 'Game',
+      text: `${rollerName} rolled three 6s — turn forfeited!`,
     });
-    await logEvent(roomId, { type: 'system', senderUid: '', senderName: 'Game', text: `${rollerName} rolled three 6s — turn forfeited!` });
   }
 
   return value;

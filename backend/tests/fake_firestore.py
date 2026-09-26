@@ -44,6 +44,9 @@ class FakeDocRef:
         """Trailing path segment, matching the real DocumentReference.id."""
         return self._path.rsplit("/", 1)[-1]
 
+    def collection(self, name):
+        return FakeCollection(self._store, "%s/%s" % (self._path, name), self._reads)
+
     def get(self, transaction=None):
         # Records whether the caller passed `transaction=`. The fake cannot
         # simulate optimistic concurrency, so it cannot *observe* a double

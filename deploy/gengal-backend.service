@@ -5,6 +5,11 @@ Description=GenGal backend (Flask under waitress)
 # after a reboot fail and sit in the restart loop below until it happens to win.
 After=network-online.target
 Wants=network-online.target
+# Start-limit belongs on the unit, not the service: systemd ignores these
+# keys under [Service] on current releases, so a crash loop would restart
+# forever without them here.
+StartLimitIntervalSec=120
+StartLimitBurst=6
 
 [Service]
 Type=simple
@@ -30,9 +35,6 @@ ExecStart=/opt/gengal/venv/bin/waitress-serve \
 
 Restart=always
 RestartSec=3
-# A crash loop from bad config should stop, not hammer forever.
-StartLimitIntervalSec=120
-StartLimitBurst=6
 
 # The app writes debug_events.log under WorkingDirectory, so ProtectSystem=full
 # (read-only /usr and /etc, /opt still writable) rather than strict, which
