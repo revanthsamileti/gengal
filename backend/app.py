@@ -365,7 +365,11 @@ def generate_agora_token():
             if user_uid not in (call.get('callerUid'), call.get('receiverUid')):
                 return jsonify({"error": "Not a participant in this call"}), 403
             if call.get('status') == 'ended':
-                return jsonify({"error": "Call has ended"}), 403
+                # Carries a code because the app has to tell this apart from a
+                # real connection failure. The receiver of a call the caller
+                # hung up mid-ring lands here, and showing them "connection
+                # failed" blames the network for an ordinary cancelled call.
+                return jsonify({"error": "Call has ended", "code": "call_ended"}), 403
             role = AGORA_ROLE_PUBLISHER
         else:
             room_collection, room = find_room_document(db_client, room_id)

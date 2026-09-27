@@ -89,6 +89,23 @@ class TestAgoraTokenMembership:
         assert response.status_code == 200
         assert response.get_json()["role"] == "broadcaster"
 
+    def test_a_call_that_ended_says_so_in_a_code(self, client, rooms_store, monkeypatch):
+        """The receiver of a call the caller hung up mid-ring asks for a token
+        and is refused. Without a code the app cannot tell that apart from a
+        network failure, and blamed the connection for an ordinary cancel."""
+        rooms_store["calls/ended_call_1"] = {
+            "callerUid": HOST_UID,
+            "receiverUid": GUEST_UID,
+            "status": "ended",
+        }
+        auth_as(monkeypatch, GUEST_UID)
+        response = client.post(
+            "/api/v1/agora/generate-token",
+            json={"roomId": "ended_call_1"},
+        )
+        assert response.status_code == 403
+        assert response.get_json()["code"] == "call_ended"
+
     def test_closed_room_rejected(self, client, rooms_store, monkeypatch):
         rooms_store["expert_rooms/%s" % ROOM_ID]["status"] = "closed"
         auth_as(monkeypatch, HOST_UID)

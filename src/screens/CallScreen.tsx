@@ -766,6 +766,17 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           return;
         }
 
+        // The caller hung up while this phone was still ringing, so the token
+        // was refused because the call is over -- not because anything failed.
+        // Falling through to the waterfall retried other providers against a
+        // dead call and ended on "connection failed", which blamed the network
+        // for an ordinary cancelled call and left the receiver confused.
+        if (error?.code === 'call_ended') {
+          if (isMounted) setIsConnecting(false);
+          endCallWithNotice('Call ended', 'They hung up before the call connected.');
+          return;
+        }
+
         console.error(`[Waterfall] Provider ${currentProvider} failed:`, error);
 
         // Trigger Waterfall Fallback. Only the caller publishes the switch — it
@@ -903,14 +914,21 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     });
 
     return () => {
-      if (isCaller && ringSlotUid && callRef.callerUid) {
+      // `endedRef` because endCall() already did this and then navigated away,
+      // which unmounts us -- so both ran for every ordinary hang-up. The second
+      // one found the offer already deleted and the server answered 403, which
+      // meant no "Missed call" push, which meant the sticky ringing
+      // notification was never replaced and sat stuck on the receiver's phone.
+      // closeCallRecord below always had this guard; this call was missing it.
+      if (isCaller && ringSlotUid && callRef.callerUid && !endedRef.current) {
         clearCallOffer(ringSlotUid, callRef).catch(() => {});
         // Leaving without a teardown -- the navigator replacing this screen,
         // which is what happens when we yield to the same person calling us
         // back -- would otherwise strand the record it opened, leaving a call
         // that never happened showing as still in progress in two histories.
-        // When endCall did run it has already closed it.
-        if (!endedRef.current && roomId) closeCallRecord(roomId);
+        // When endCall did run it has already closed it, and the guard above
+        // means we are not here at all in that case.
+        if (roomId) closeCallRecord(roomId);
       }
     };
   }, [isCaller, roomId, matchData?.uid, currentUserProfile]);
