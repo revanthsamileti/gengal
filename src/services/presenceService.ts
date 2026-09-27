@@ -237,9 +237,15 @@ export const markRoomAlive = async (collectionName: PresenceCollection, roomId: 
  * are treated as live rather than swept away, so deploying this doesn't blank
  * out every room already open.
  */
-export const isRoomLive = (room: { status?: string; hostLastSeen?: any }, now: number = Date.now()): boolean => {
+export const isRoomLive = (
+  room: { status?: string; hostLastSeen?: any; createdAt?: any },
+  now: number = Date.now(),
+): boolean => {
   if (room.status && room.status !== 'live') return false;
   const beat = toMillis(room.hostLastSeen);
-  if (beat === 0) return true;
-  return now - beat <= ROOM_STALE_MS;
+  if (beat > 0) return now - beat <= ROOM_STALE_MS;
+  // Pre-presence rooms have no heartbeat — use createdAt as a short grace so
+  // abandoned legacy docs do not stay listed forever.
+  const created = toMillis(room.createdAt);
+  return created > 0 && now - created <= ROOM_STALE_MS;
 };

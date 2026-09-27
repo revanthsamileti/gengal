@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { ActivityIndicator, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
@@ -24,6 +24,7 @@ type Props = {
  */
 export default function CheckoutModal({ url, onSuccess, onCancel, onFailure }: Props) {
   const [isLoading, setIsLoading] = useState(true);
+  const handledRef = useRef(false);
 
   // Each new checkout session needs a fresh loading state. Without this a
   // second purchase (after cancel) shows the WebView with no spinner while
@@ -31,7 +32,10 @@ export default function CheckoutModal({ url, onSuccess, onCancel, onFailure }: P
   // the previous session — `useState` persists across re-renders of the same
   // component instance, and the modal is never unmounted, only hidden.
   useEffect(() => {
-    if (url) setIsLoading(true);
+    if (url) {
+      setIsLoading(true);
+      handledRef.current = false;
+    }
   }, [url]);
 
   const handleMessage = (event: WebViewMessageEvent) => {
@@ -41,15 +45,19 @@ export default function CheckoutModal({ url, onSuccess, onCancel, onFailure }: P
     } catch {
       return; // Not one of ours; the checkout script chatters on this channel.
     }
+    if (handledRef.current) return;
     if (payload?.type === 'success') {
+      handledRef.current = true;
       onSuccess({
         razorpay_order_id: payload.razorpay_order_id,
         razorpay_payment_id: payload.razorpay_payment_id,
         razorpay_signature: payload.razorpay_signature,
       });
     } else if (payload?.type === 'failed') {
+      handledRef.current = true;
       onFailure(payload.message || 'Payment failed');
     } else if (payload?.type === 'dismissed') {
+      handledRef.current = true;
       onCancel();
     }
   };

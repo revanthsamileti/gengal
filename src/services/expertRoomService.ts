@@ -1,4 +1,4 @@
-import { db } from '../config/firebase';
+import { auth, db } from '../config/firebase';
 import { RosterPreviewEntry } from './presenceService';
 import { snapshotError, SubscriptionErrorHandler } from './subscriptionError';
 import {
@@ -23,6 +23,7 @@ import {
   QueryConstraint,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
+import { authedPost } from './authService';
 
 export type RoomStatus = 'live' | 'closed';
 export type RoomTier = 'VIP' | 'Advance' | 'Standard';
@@ -284,7 +285,16 @@ export const joinRoom = async (roomId: string, uid: string, nickname: string, av
   await logEvent(roomId, { type: 'join', senderUid: uid, senderName: nickname, senderAvatarData: avatarData });
 };
 
+export const leaveStage = async (roomId: string) => {
+  await authedPost('/api/v1/rooms/expert/leave-stage', { roomId });
+};
+
 export const leaveRoom = async (roomId: string, uid: string, nickname: string) => {
+  // Speakers are server/host-owned; guests cannot scrub themselves from the
+  // array via Firestore rules, so the leave-stage endpoint does it.
+  try {
+    await leaveStage(roomId);
+  } catch (e) {}
   try {
     await deleteDoc(doc(db, 'expert_rooms', roomId, 'hand_requests', uid));
   } catch (e) {}
@@ -302,16 +312,21 @@ export const leaveRoom = async (roomId: string, uid: string, nickname: string) =
 /**
  * Advances billing for the caller's time in this room. The server derives the
  * elapsed time and the rate, so the client cannot understate either.
+ * Hosts may pass `memberUid` to collect for a guest who is not ticking.
  */
-export const tickRoomBilling = async (roomId: string) => {
-  const { authedPost } = await import('./authService');
+export const tickRoomBilling = async (roomId: string, memberUid?: string) => {
   return authedPost<{
     success: boolean;
     billedAmount: number;
     billedSeconds: number;
     newBalance: number | null;
     hasInsufficientFunds: boolean;
-  }>('/api/v1/rooms/billing', { roomId, collection: 'expert_rooms' });
+    memberUid?: string;
+  }>('/api/v1/rooms/billing', {
+    roomId,
+    collection: 'expert_rooms',
+    ...(memberUid ? { memberUid } : {}),
+  });
 };
 
 // ── Raise Hand / Stage ─────────────────────────────────────────────────────
@@ -417,8 +432,14 @@ const mutateSpeakers = async (
   });
 };
 
-export const removeFromStage = async (roomId: string, uid: string) =>
-  mutateSpeakers(roomId, (speakers) => speakers.filter((s) => s.uid !== uid));
+export const removeFromStage = async (roomId: string, uid: string) => {
+  // Guests cannot write `speakers` — self-demote goes through the backend.
+  if (auth.currentUser?.uid === uid) {
+    await leaveStage(roomId);
+    return;
+  }
+  await mutateSpeakers(roomId, (speakers) => speakers.filter((s) => s.uid !== uid));
+};
 
 export const toggleMute = async (roomId: string, uid: string) =>
   mutateSpeakers(roomId, (speakers) =>

@@ -41,7 +41,7 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/users/$(receiverId))
         && get(/databases/$(database)/documents/users/$(receiverId))
              .data.get('inCallSince', request.time - duration.value(1, 'h'))
-           > request.time - duration.value(45, 's');
+           > request.time - duration.value(90, 's');
     }
 
     // Public profile fields only. Phone numbers and push tokens live in
@@ -140,23 +140,39 @@ service cloud.firestore {
             || get(/databases/$(database)/documents/chats/$(chatId)).data.participants.hasAny([request.auth.uid]));
     }
 
-    // Ownership and pricing fields on a room may only ever be set by its host.
-    // Everything else (membership counts, queues, turn state) is writable by
-    // participants, which is what the gameplay clients actually need.
-    function roomProtectedKeys() {
-      return ['hostUid', 'createdAt', 'ticketPrice', 'ratePerMin', 'gameMode', 'tier', 'status'];
-    }
-
     /** Reads a field off a room document, for subcollection rules. */
     function roomField(collectionName, roomId, field) {
       return get(/databases/$(database)/documents/$(collectionName)/$(roomId)).data[field];
     }
 
-    function canUpdateRoom() {
-      return signedIn() && (
-        resource.data.hostUid == request.auth.uid
-        || !changedKeys().hasAny(roomProtectedKeys())
-      );
+    function isRoomHost() {
+      return resource.data.hostUid == request.auth.uid;
+    }
+
+    // Host may run the room but cannot rewrite pricing after create.
+    function hostCanManageRoom() {
+      return signedIn()
+        && isRoomHost()
+        && !changedKeys().hasAny(['hostUid', 'createdAt', 'ticketPrice', 'ratePerMin']);
+    }
+
+    // Guests may only touch presence-derived / queue-self fields — never stage,
+    // scores, seats, or game state. The old "any signed-in user may update
+    // non-protected keys" branch let strangers rewrite speakers and seats.
+    function guestPresenceOrQueueKeys() {
+      return changedKeys().hasOnly([
+        'activeMemberCount',
+        'handQueue',
+        'handQueueBoy',
+        'handQueueGirl',
+      ]);
+    }
+
+    function validRoomRate() {
+      return !('ratePerMin' in request.resource.data)
+        || (request.resource.data.ratePerMin is number
+            && request.resource.data.ratePerMin >= 0
+            && request.resource.data.ratePerMin <= 500);
     }
 
     match /users/{userId} {
@@ -327,6 +343,8 @@ service cloud.firestore {
         && !request.resource.data.keys().hasAny(['lastBilledAt']);
       // Counters stay Admin SDK-only. endedAt must be request.time so clients
       // cannot backdate hang-up to shrink what they owe.
+      // status is one-way to 'ended': flipping back to 'active' would reopen
+      // server billing and inflate durationSeconds / heart rewards.
       allow update: if signedIn()
         && (resource.data.callerUid == request.auth.uid
             || resource.data.receiverUid == request.auth.uid)
@@ -335,6 +353,11 @@ service cloud.firestore {
           'lastBilledAt', 'durationSeconds', 'coinsDeducted', 'heartsEarned',
           'callerRewardedSeconds', 'receiverRewardedSeconds'
         ])
+        && (
+          !changedKeys().hasAny(['status'])
+          || (resource.data.status != 'ended'
+              && request.resource.data.status == 'ended')
+        )
         && (
           !changedKeys().hasAny(['endedAt'])
           || request.resource.data.endedAt == request.time
@@ -382,8 +405,14 @@ service cloud.firestore {
 
     match /chill_rooms/{roomId} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
-      allow update: if canUpdateRoom();
+      // Chill is free — ratePerMin must not be set on create (billing would
+      // otherwise charge presence members via /rooms/billing).
+      allow create: if signedIn()
+        && request.resource.data.hostUid == request.auth.uid
+        && !('ratePerMin' in request.resource.data);
+      // Host runs the round / presence heartbeat. Guests may only bump occupancy.
+      allow update: if hostCanManageRoom()
+        || (signedIn() && changedKeys().hasOnly(['activeMemberCount']));
       allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
 
       match /events/{eventId} {
@@ -417,8 +446,13 @@ service cloud.firestore {
 
     match /expert_rooms/{roomId} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
-      allow update: if canUpdateRoom();
+      allow create: if signedIn()
+        && request.resource.data.hostUid == request.auth.uid
+        && validRoomRate();
+      // Host owns stage / review / matchmaking. Guests may only adjust queues
+      // and occupancy — never speakers or reviewingUid.
+      allow update: if hostCanManageRoom()
+        || (signedIn() && guestPresenceOrQueueKeys());
       allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
 
       match /events/{eventId} {
@@ -464,8 +498,35 @@ service cloud.firestore {
 
     match /ludo_rooms/{roomId} {
       allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.hostUid == request.auth.uid;
-      allow update: if canUpdateRoom();
+      // Rooms are created by /api/v1/ludo/create-table after the table fee is
+      // taken — a client create would skip that charge.
+      allow create: if false;
+      // Seats (players) and bets/dice are server-only. Host runs startGame /
+      // presence. Seated players may update board fields (tokens, turns) but
+      // never rewrite the player list.
+      allow update: if signedIn() && (
+        (
+          hostCanManageRoom()
+          && !changedKeys().hasAny(['players', 'audienceBets', 'playerUids'])
+          && (
+            !changedKeys().hasAny(['diceValue', 'diceRolled', 'consecutiveSixes'])
+            || (
+              request.resource.data.diceRolled == false
+              && request.resource.data.diceValue == null
+            )
+          )
+        )
+        || (
+          // Current seated player moves — must already be in playerUids.
+          'playerUids' in resource.data
+          && request.auth.uid in resource.data.playerUids
+          && !changedKeys().hasAny([
+            'players', 'audienceBets', 'playerUids', 'hostUid', 'createdAt',
+            'ticketPrice', 'gameMode', 'status', 'diceValue', 'diceRolled',
+            'consecutiveSixes'
+          ])
+        )
+      );
       allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
 
       match /events/{eventId} {

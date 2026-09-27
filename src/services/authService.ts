@@ -94,8 +94,10 @@ async function withAuthRetry<T>(
       return data as T;
     } catch (e: any) {
       lastError = e;
-      // Auth / validation errors must not be retried.
-      if (e?.status && e.status < 500) throw e;
+      // Any response with an HTTP status was already decided (including
+      // non-gateway 5xx). Only retry true network / parse failures that have
+      // no status — gateway retries happen via `continue` above.
+      if (e?.status) throw e;
       if (attempt >= AUTH_MAX_ATTEMPTS) throw e;
       await sleep(400 * attempt);
     }

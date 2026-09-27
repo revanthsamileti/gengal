@@ -53,6 +53,19 @@ const CALL_SETUP_TIMEOUT_MS = 20000;
 const PEER_JOIN_TIMEOUT_MS = 45000;
 
 /**
+ * After media was once up, how long a missing remote uid may last before we
+ * hang up. Matches heartbeat hangup so the healthy side does not kill the
+ * call at 45 s while the peer is still healing (Agora can take longer).
+ */
+const PEER_REJOIN_TIMEOUT_MS = 75000;
+
+/**
+ * Cap on local Agora RECONNECTING. Without this the SDK can sit in
+ * reconnecting for minutes while billing/busy/UI stall.
+ */
+const RECONNECT_GRACE_MS = 45000;
+
+/**
  * How long the RTC join itself may take before we retry / fail. 7 s was too
  * short on 3G and congested Wi-Fi — the join often succeeded a beat later.
  */
@@ -132,6 +145,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [videoDowngraded, setVideoDowngraded] = useState(false);
   const isVideo = mode === 'video' && !videoDowngraded;
   const [isGifting, setIsGifting] = useState(false);
+  const giftConfirmOpenRef = React.useRef(false);
   const [globalSettings, setGlobalSettings] = useState<GlobalSettings | null>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<any>(null);
   const [isConnecting, setIsConnecting] = useState(!isIncomingPending);
@@ -150,10 +164,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const [callDurationSeconds, setCallDurationSeconds] = useState(0);
   const [callerLiveCoins, setCallerLiveCoins] = useState(0);
   const [isPeerUnstable, setIsPeerUnstable] = useState(false);
-  /** Same value, readable from inside long-lived interval callbacks. */
-  const isPeerUnstableRef = React.useRef(false);
-  /** Local Agora reconnect — same ref pattern as peer-unstable above. */
+  /** Local Agora reconnect — readable from heartbeat interval callbacks. */
   const isReconnectingRef = React.useRef(false);
+  /** Invalidates in-flight connect attempts after teardown / remount. */
+  const connectGenerationRef = React.useRef(0);
   /**
    * Whether the RTC peer has ever actually shown up (`remoteUids` non-empty).
    *
@@ -445,7 +459,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       .then(p => {
         if (cancelled) return;
         setCurrentUserProfile(p);
-        if (p?.coins) setCallerLiveCoins(p.coins);
+        if (p?.coins != null && typeof p.coins === 'number') setCallerLiveCoins(p.coins);
       })
       .catch(e => {
         // This had no .catch() at all, which was the original cause of calls
@@ -473,7 +487,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   const initialProvider = (matchData?.audioProvider || 'agora') as FreeProvider;
   const audioToken = matchData?.audioTokenOrUrl || '';
   const [currentProvider, setCurrentProvider] = useState<FreeProvider>(initialProvider);
-  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn, toggleCamera, cameraOn, flipCamera, localUid, remoteUids, isReconnecting } = useGengalVoice(currentProvider);
+  const { connectSeat, disconnectSeat, toggleMic, micMuted, toggleSpeaker, speakerOn, toggleCamera, cameraOn, flipCamera, localUid, remoteUids, isReconnecting, rtcFailed } = useGengalVoice(currentProvider);
 
   /**
    * The RTC token round-trip used to start only *after* the call was answered,
@@ -642,15 +656,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
         }
       }
     }, (error) => {
-      // This listener is what ends the receiver's call when the offer is
-      // cleared. Left unhandled it surfaced as an uncaught snapshot error and
-      // the listener was dropped, stranding the receiver on a call screen that
-      // nothing could close.
-      // Clearing the offer rather than just leaving also tells the caller the
-      // call is over — their own listener sees the delete. A bare goBack() left
-      // the caller talking to a screen nobody was on.
-      console.warn('[CallScreen] Offer listener failed; ending call.', error?.message);
-      void endCall();
+      // Transport flaps must not hang up a live call. The peer hang-up path is
+      // the call record status / offer delete / heartbeat watchdog — not a
+      // momentary Firestore glitch that tears this listener down.
+      console.warn('[CallScreen] Offer listener error (not ending call):', error?.message);
     });
     return unsub;
   }, [isCaller, isPending, callRef]);
@@ -658,19 +667,25 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
   // 2. Automatically connect to the voice room when the screen mounts or provider changes
   React.useEffect(() => {
     let isMounted = true;
-    
+
     if (isPending) return; // Wait until accepted!
     if (isCaller && callerStatus !== 'accepted') return; // Wait for receiver to accept!
+
+    // Bumped on cleanup / retry so a late join from a timed-out attempt cannot
+    // mark the screen connected after we have already torn the seat down.
+    const connectGeneration = ++connectGenerationRef.current;
+    const isCurrentAttempt = () =>
+      isMounted && connectGeneration === connectGenerationRef.current;
 
     const establishSecureCall = async () => {
       if (!roomId) return;
       if (isMounted) setIsConnecting(true);
-      
+
       let connectionToken = audioToken;
       let extraParam = auth.currentUser?.uid || '';
       const user = auth.currentUser;
 
-      const connectionPromise = async () => {
+      const joinProvider = async () => {
         // Ephemeral RTC keys are minted by the backend, which derives the uid
         // from the bearer token rather than trusting the request body.
         if (isMounted) setJoinPhase('securing');
@@ -696,28 +711,22 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           connectionToken = tokenPayload.token;
         }
 
-        if (isMounted) {
-          setJoinPhase('joining');
-          // A video call belongs on the loudspeaker: the phone is held away
-          // from the ear to see the other person. This argument was never
-          // passed, so every video call started on the earpiece and sounded
-          // silent until the user found the speaker button. `isVideo` rather
-          // than the mode prop, so a call that fell back to voice is not put
-          // on the loudspeaker.
-          await connectSeat(roomId, connectionToken, extraParam, undefined, isVideo);
-          if (isMounted) setIsConnecting(false);
-        }
+        if (!isCurrentAttempt()) return;
+        setJoinPhase('joining');
+        // Video → loudspeaker; voice → earpiece. Matches phone-call defaults.
+        await connectSeat(roomId, connectionToken, extraParam, undefined, isVideo);
+        if (isCurrentAttempt()) setIsConnecting(false);
       };
 
       const raceConnect = () =>
         Promise.race([
-          connectionPromise(),
+          joinProvider(),
           new Promise((_, reject) =>
             setTimeout(() => reject(new Error('Connection Timeout')), PROVIDER_CONNECT_TIMEOUT_MS)
           ),
         ]);
 
-      try {
+      const connectWithOneRetry = async () => {
         try {
           await raceConnect();
         } catch (firstError: any) {
@@ -725,15 +734,22 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
           if (firstError?.message !== 'Connection Timeout' || !isMounted) {
             throw firstError;
           }
+          if (!isCurrentAttempt()) return;
           console.warn('[Waterfall] First connect timed out; retrying once…');
           try {
             await disconnectSeat();
           } catch {
             // Best-effort teardown before the retry.
           }
+          if (!isCurrentAttempt()) return;
           await raceConnect();
         }
+      };
+
+      try {
+        await connectWithOneRetry();
       } catch (error: any) {
+        if (!isCurrentAttempt()) return;
         // A denied microphone is not a connection failure to route around —
         // there is no provider that makes a call work without one. Previously
         // this fell into the same waterfall path as a network error, and with
@@ -801,6 +817,7 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
     return () => {
       isMounted = false;
+      connectGenerationRef.current += 1;
       disconnectSeat();
     };
   }, [roomId, currentProvider, isPending, isCaller, callerStatus]);
@@ -1021,18 +1038,41 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     isReconnectingRef.current = isReconnecting;
   }, [isReconnecting]);
 
-  // Hang up if the peer never appears. Paused while we are reconnecting so a
-  // local blip that clears remoteUids does not end a call Agora is still healing.
+  // Agora gave up on the media path — hang up rather than billing over silence.
+  React.useEffect(() => {
+    if (!rtcFailed || !isCallActive) return;
+    endCallWithNotice(
+      'Call ended',
+      'The connection could not be restored. Please try again.'
+    );
+  }, [rtcFailed, isCallActive]);
+
+  // Cap local RECONNECTING so we do not sit forever on "Reconnecting…".
+  React.useEffect(() => {
+    if (!isReconnecting || !isCallActive) return;
+    const id = setTimeout(() => {
+      endCallWithNotice(
+        'Call ended',
+        'We could not restore your connection. Please try again.'
+      );
+    }, RECONNECT_GRACE_MS);
+    return () => clearTimeout(id);
+  }, [isReconnecting, isCallActive]);
+
+  // Hang up if the peer never appears — or, after they were once connected,
+  // if they stay gone longer than the rejoin window. Local Agora reconnect
+  // pauses this; a peer-side drop does not set isReconnecting on our device.
   React.useEffect(() => {
     if (isPending || isConnecting || remoteUids.length > 0 || isReconnecting) return;
 
+    const timeoutMs = peerEverConnected ? PEER_REJOIN_TIMEOUT_MS : PEER_JOIN_TIMEOUT_MS;
     const timeout = setTimeout(() => {
-      console.log("[CallScreen] Peer connection timeout. Terminating call.");
+      console.log(`[CallScreen] Peer connection timeout (${timeoutMs}ms). Terminating call.`);
       endCallWithNotice('Call ended', 'The connection to the other person was lost.');
-    }, PEER_JOIN_TIMEOUT_MS);
+    }, timeoutMs);
 
     return () => clearTimeout(timeout);
-  }, [isPending, isConnecting, remoteUids.length, isReconnecting]);
+  }, [isPending, isConnecting, remoteUids.length, isReconnecting, peerEverConnected]);
 
   // 3. Fetch global billing settings
   React.useEffect(() => {
@@ -1057,6 +1097,13 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
     lastObservedCallerHeartbeatRef.current = null;
     lastObservedReceiverHeartbeatRef.current = null;
 
+    const peerHeartbeatRef = isCaller
+      ? lastObservedReceiverHeartbeatRef
+      : lastObservedCallerHeartbeatRef;
+    const peerSeenAtRef = isCaller
+      ? lastObservedReceiverTimeRef
+      : lastObservedCallerTimeRef;
+
     const interval = setInterval(() => {
       // Judge the peer only once they have actually been heard from. If their
       // beats never arrive at all -- a call record listener that could not be
@@ -1064,22 +1111,21 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       // gone", and hanging up on a working call for want of a status document
       // is the worse failure. A peer who genuinely never joins is caught by
       // the RTC peer timeout above instead.
-      const lastBeat = isCaller ? lastObservedReceiverHeartbeatRef.current : lastObservedCallerHeartbeatRef.current;
-      if (lastBeat === null) return;
+      if (peerHeartbeatRef.current === null) return;
 
       const now = Date.now();
-      const lastTime = isCaller ? lastObservedReceiverTimeRef.current : lastObservedCallerTimeRef.current;
-      const elapsed = now - lastTime;
+      const elapsed = now - peerSeenAtRef.current;
 
       const unstable = elapsed > HEARTBEAT_UNSTABLE_MS;
       setIsPeerUnstable(unstable);
-      // Mirrored into a ref because the billing loop reads it from a long-lived
-      // setInterval that closed over the mount-time `false` value.
-      isPeerUnstableRef.current = unstable;
 
-      // Do not hang up on silence while Agora is reconnecting — heartbeats
-      // cannot land on a dead uplink either.
-      if (isReconnectingRef.current) return;
+      // Do not hang up on silence while Agora is reconnecting — but only up to
+      // RECONNECT_GRACE_MS (separate effect). Reset the silence baseline so a
+      // long reconnect does not instantly fire hangup the moment it ends.
+      if (isReconnectingRef.current) {
+        peerSeenAtRef.current = now;
+        return;
+      }
 
       if (elapsed > HEARTBEAT_HANGUP_MS) {
         console.log(`[CallScreen] Heartbeat timed out after ${elapsed}ms. Ending call.`);
@@ -1142,11 +1188,10 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
       const user = auth.currentUser;
       if (!user) return;
 
-      // Pause ticks while the peer link is down or we are reconnecting.
-      if (isPeerUnstableRef.current || isReconnectingRef.current) {
-        console.log("[CallScreen] Connection unstable/reconnecting. Pausing billing ticks.");
-        return;
-      }
+      // Keep ticking the server during reconnect/unstable so `inCallSince`
+      // stays fresh (busy presence) and wall-clock charges stay aligned. The
+      // old client "pause" left people dialable mid-call after ~45s while the
+      // next successful tick still charged the gap anyway.
 
       if (isCaller) {
         setCallerLiveCoins(prev => Math.max(0, prev - billingRatePerSec));
@@ -1245,28 +1290,48 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
 
   const sendGift = async (amount: number) => {
     const user = auth.currentUser;
-    if (!user || !matchData?.uid) return;
+    if (!user || !matchData?.uid || endedRef.current) return;
+
+    const alertIfActive = (title: string, message: string) => {
+      if (!endedRef.current) Alert.alert(title, message, [{ text: 'OK' }]);
+    };
 
     setIsGifting(true);
     try {
-      await transferCoins(user.uid, matchData.uid, amount);
-      Alert.alert('Gift sent', `You sent a ${amount}G gift to ${profile.name}.`, [{ text: 'OK' }]);
+      const result = await transferCoins(user.uid, matchData.uid, amount);
+      if (typeof result.senderNewBalance === 'number') {
+        setCallerLiveCoins(result.senderNewBalance);
+      }
+      alertIfActive('Gift sent', `You sent a ${amount}G gift to ${profile.name}.`);
     } catch (error: any) {
-      Alert.alert('Gift failed', error?.message || 'Could not send the gift.', [{ text: 'OK' }]);
+      alertIfActive('Gift failed', error?.message || 'Could not send the gift.');
+    } finally {
+      setIsGifting(false);
     }
-    setIsGifting(false);
   };
 
   // Confirm before moving coins — this used to fire on a single tap with no
   // way back, so a mis-tap during a call cost the user real balance.
   const handleGift = (amount: number) => {
-    if (isGifting) return;
+    if (isGifting || giftConfirmOpenRef.current || endedRef.current) return;
+    giftConfirmOpenRef.current = true;
+
+    const releaseConfirm = () => {
+      giftConfirmOpenRef.current = false;
+    };
+
     Alert.alert(
       'Send gift?',
       `This will send ${amount}G to ${profile.name}.`,
       [
-        { text: 'Cancel', style: 'cancel' },
-        { text: `Send ${amount}G`, onPress: () => { void sendGift(amount); } },
+        { text: 'Cancel', style: 'cancel', onPress: releaseConfirm },
+        {
+          text: `Send ${amount}G`,
+          onPress: () => {
+            releaseConfirm();
+            if (!endedRef.current) void sendGift(amount);
+          },
+        },
       ]
     );
   };
@@ -1302,6 +1367,12 @@ export default function CallScreen({ profileName, mode = 'call', roomId: initial
             // they were when the phone rang.
             if (endedRef.current) return;
             endedRef.current = true;
+            disconnectSeat();
+            if (roomId) {
+              // Do not rely on the caller to close history — if they are offline
+              // the record would stay 'active' forever.
+              void closeCallRecord(roomId).catch(() => {});
+            }
             if (ringSlotUid && callRef.callerUid) {
               rejectCallOffer(ringSlotUid, callRef).catch(e =>
                 console.warn('Failed to reject call:', e)

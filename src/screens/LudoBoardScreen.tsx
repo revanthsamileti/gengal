@@ -113,15 +113,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const captureFlash = useRef(new Animated.Value(0)).current;
   const lastCaptureId = useRef<string | null>(null);
 
-  // Players talk, spectators listen. The token is minted by the backend — the
-  // previous code passed the literal string `ludo_<roomId>` where the Agora
-  // token belongs, so the channel was never actually joined.
-  const { toggleMic, micMuted, toggleSpeaker, speakerOn } =
-    useRoomVoice(roomId, asSpectator ? 'audience' : 'broadcaster', !!roomId && !!myUid);
-
-  // ── Board sizing ───────────────────────────────────────────────────────────
-  // Budget for header, both seat rows, the action dock and the utility rail, so
-  // the board never pushes the controls off-screen on a short device.
+  // Players talk, spectators listen. Gate on presence so members/{uid} exists
+  // before the Agora mint (channel id is the room doc id).
+  // Board sizing budget: header, seat rows, action dock, utility rail.
   const CHROME = 52 + 64 * 2 + 118 + 56 + 26;
   const boardSize = Math.max(
     204,
@@ -163,10 +157,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const myPlayer = room?.players.find((p) => p.uid === myUid) ?? null;
   const isHost = room?.hostUid === myUid;
 
-  // Heartbeat presence for everyone at the table. Seats are deliberately not
-  // driven by this — a player who drops off the network for a moment keeps the
-  // seat they paid for. What it fixes is the watcher count, which was a bare
-  // counter that only ever grew as spectators' clients died without leaving.
+  // Heartbeat for watcher count only — paid seats are not presence-driven.
   const { liveCount, connection } = useRoomPresence({
     collectionName: 'ludo_rooms',
     roomId,
@@ -175,8 +166,21 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     avatarData: myAvatarData,
     isHost,
     countField: 'presentCount',
-    enabled: !!room,
+    enabled: !!room && room.status === 'live',
   });
+
+  const voiceEnabled =
+    !!roomId && !!myUid && !!room && room.status === 'live' && connection === 'live';
+  const { toggleMic, micMuted, toggleSpeaker, speakerOn } = useRoomVoice(
+    roomId,
+    asSpectator ? 'audience' : 'broadcaster',
+    voiceEnabled,
+  );
+
+  // Closed tables must not keep players on a dead board with an open mic.
+  useEffect(() => {
+    if (room?.status === 'closed') goBack?.();
+  }, [room?.status, goBack]);
 
   const watcherCount = Math.max(0, liveCount - (room?.players.length ?? 0));
   const isMyTurn = !!myPlayer && myPlayer.color === room?.currentTurn;
@@ -250,16 +254,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
 
     setRolling(true);
     try {
-      if (room.gameMode === 'per_token') {
-        const { deductUserCoins, deductUserCoinsWithCommission } = await import('../services/coinService');
-        if (room.hostUid !== myUid) {
-          await deductUserCoinsWithCommission(myUid, ROLL_COST, room.hostUid, 2);
-        } else {
-          await deductUserCoins(myUid, ROLL_COST);
-        }
-      }
       // Let the tumble read before the value lands.
       await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 520));
+      // Fee (per_token) + die are applied server-side atomically.
       await rollDice(roomId, myUid, myName, myAvatarData, room);
     } catch (e: any) {
       Alert.alert('Roll failed', e?.message || 'That roll did not go through. Try again.');

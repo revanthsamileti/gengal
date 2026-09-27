@@ -51,13 +51,15 @@ function UserCard({
   profile: any;
   index: number;
   navigate: Props['navigate'];
-  rates: { call: number; video: number };
+  rates: { call: number; video: number } | null;
 }) {
   const fadeAnim = useRef(new Animated.Value(0)).current;
   const slideAnim = useRef(new Animated.Value(16)).current;
   const tier = profile.tier === 'VIP' ? 'VIP' : 'Standard';
   const tierColor = tier === 'VIP' ? '#9A1E8A' : '#B99916';
   const isActive = profile.isActiveMode === true;
+  const callLabel = rates ? `${rates.call}` : '—';
+  const videoLabel = rates ? `${rates.video}` : '—';
   const { locked: callLocked, run: runCall } = useActionLock();
   const startCall = (mode: 'call' | 'video') =>
     runCall(() =>
@@ -138,7 +140,7 @@ function UserCard({
               hitSlop={tap38}
               disabled={!isActive || callLocked}
               accessibilityRole="button"
-              accessibilityLabel={`Call ${profile.name}, ${rates.call} coins per minute`}
+              accessibilityLabel={`Call ${profile.name}, ${callLabel} coins per minute`}
               accessibilityState={{ disabled: !isActive || callLocked }}
               onPress={() => startCall('call')}
             >
@@ -146,7 +148,7 @@ function UserCard({
             </TouchableOpacity>
             <View style={styles.priceRow}>
               <MaterialIcons name="star" size={9} color="#D9A404" />
-              <Text style={styles.priceText}>{rates.call}/m</Text>
+              <Text style={styles.priceText}>{callLabel}/m</Text>
             </View>
           </View>
 
@@ -156,7 +158,7 @@ function UserCard({
               hitSlop={tap38}
               disabled={!isActive || callLocked}
               accessibilityRole="button"
-              accessibilityLabel={`Video call ${profile.name}, ${rates.video} coins per minute`}
+              accessibilityLabel={`Video call ${profile.name}, ${videoLabel} coins per minute`}
               accessibilityState={{ disabled: !isActive || callLocked }}
               onPress={() => startCall('video')}
             >
@@ -164,7 +166,7 @@ function UserCard({
             </TouchableOpacity>
             <View style={styles.priceRow}>
               <MaterialIcons name="star" size={9} color="#D9A404" />
-              <Text style={styles.priceText}>{rates.video}/m</Text>
+              <Text style={styles.priceText}>{videoLabel}/m</Text>
             </View>
           </View>
         </View>
@@ -187,7 +189,7 @@ export default function ActiveConnectsScreen({ navigate, goBack }: Props) {
   const [picker, setPicker] = useState<null | 'language' | 'status' | 'state'>(null);
   // Subscribed once here rather than inside each card: a listener per button
   // would open a dozen for a screen of six profiles. Defaults match CallPriceTag.
-  const [rates, setRates] = useState({ call: 15, video: 30 });
+  const [rates, setRates] = useState<{ call: number; video: number } | null>(null);
 
   const { profile: myProfile } = useUser();
 

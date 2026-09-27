@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { User } from 'firebase/auth';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '../config/firebase';
 import { subscribeToIncomingCalls, rejectCallOffer, IncomingCall } from '../services/liveRoomService';
 import {
   registerForPushNotificationsAsync,
@@ -144,6 +146,30 @@ export function useIncomingCallWatcher(
       };
     };
 
+    /** Push taps can outlive the offer — confirm it is still ringing. */
+    const deliverIfOfferLive = async (call: IncomingCall, options?: { autoAnswer?: boolean }) => {
+      try {
+        const snap = await getDoc(doc(db, 'incoming_calls', user.uid));
+        if (!snap.exists()) {
+          console.log('[IncomingCalls] Offer gone; ignoring notification tap.');
+          return;
+        }
+        const live = snap.data() as IncomingCall;
+        if (
+          live.status !== 'calling'
+          || live.callerUid !== call.callerUid
+          || live.roomId !== call.roomId
+        ) {
+          console.log('[IncomingCalls] Offer no longer calling; ignoring notification tap.');
+          return;
+        }
+        handleCall({ ...call, ...live, status: 'calling' }, options);
+      } catch (e) {
+        console.warn('[IncomingCalls] Could not verify offer; delivering from push:', e);
+        handleCall(call, options);
+      }
+    };
+
     // BACKGROUND DELIVERY: fired when the user taps the notification while the
     // app is backgrounded (JS was frozen) and comes to foreground as a result.
     // The Firestore listener will re-connect and fire shortly after, but this
@@ -174,14 +200,10 @@ export function useIncomingCallWatcher(
         return;
       }
       const call = callFromNotificationData(data);
-      if (call) handleCall(call, { autoAnswer: action === CALL_ACTION_ANSWER });
+      if (call) void deliverIfOfferLive(call, { autoAnswer: action === CALL_ACTION_ANSWER });
     });
 
-    // KILLED-APP DELIVERY: the response that caused the app to open is not
-    // delivered via the listener above; it must be read once from
-    // getLastNotificationResponseAsync. We check it after registering the
-    // Firestore listener so that if BOTH fire for the same call, the
-    // handledRef dedup prevents double navigation.
+    // Killed-app delivery: verify the offer is still calling before navigate.
     getInitialNotificationResponse().then((response: any) => {
       if (!response) return;
       const data = response?.notification?.request?.content?.data;
@@ -203,7 +225,7 @@ export function useIncomingCallWatcher(
         return;
       }
       const call = callFromNotificationData(data);
-      if (call) handleCall(call, { autoAnswer: response?.actionIdentifier === CALL_ACTION_ANSWER });
+      if (call) void deliverIfOfferLive(call, { autoAnswer: response?.actionIdentifier === CALL_ACTION_ANSWER });
     });
 
     return () => {

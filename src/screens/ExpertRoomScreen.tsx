@@ -176,69 +176,87 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
     return () => { unsubRoom(); unsubEvents(); unsubGifters(); unsubRequests(); };
   }, [roomId]);
 
-  // Speakers, the host, and whoever is under review may talk; everyone listens.
+  // Speakers, host, and profile-under-review may talk; everyone else listens.
+  // Voice waits for joinRoom so members/{uid} exists before Agora mint.
   const isUnderReview = room?.reviewingUid === myUid;
-  const voiceRole: VoiceRole = (isHost || isSpeaker || isUnderReview) ? 'broadcaster' : 'audience';
-  const { toggleMic, micMuted } = useRoomVoice(roomId, voiceRole, !!room);
+  const voiceRole: VoiceRole =
+    isHost || isSpeaker || isUnderReview ? 'broadcaster' : 'audience';
+  const { toggleMic, micMuted } = useRoomVoice(
+    roomId,
+    voiceRole,
+    !!room && hasJoined,
+  );
 
-  // Occupancy that expires. `room.activeMemberCount` is a stored counter and
-  // drifts upward whenever a client dies without running its leave path, so the
-  // header reads the live heartbeat roster instead.
-  const { liveCount, connection } = useRoomPresence({
+  const { liveCount, connection, members } = useRoomPresence({
     collectionName: 'expert_rooms',
     roomId,
     uid: myUid,
     nickname: myName,
     avatarData: myAvatarData,
     isHost,
-    enabled: !!room,
+    enabled: !!room && room.status === 'live' && hasJoined,
   });
+  const membersRef = useRef(members);
+  membersRef.current = members;
 
-  // 1. Join room event
+  // Join before enabling voice/presence so membership lands first.
   useEffect(() => {
     if (!roomId || !room || hasJoined) return;
-    setHasJoined(true);
-    // A failed join leaves the user looking at a room they are not actually in
-    // — no presence, no stage, no chat delivery. Say so rather than swallow it.
-    joinRoom(roomId, myUid, myName, myAvatarData).catch((e: any) => {
-      console.warn('[ExpertRoom] Join failed:', e?.message ?? e);
-      showInfo('Could not join', 'We could not put you in this room. Please check your connection and try again.');
-      goBack?.();
-    });
+    let cancelled = false;
+    joinRoom(roomId, myUid, myName, myAvatarData)
+      .then(() => {
+        if (!cancelled) setHasJoined(true);
+      })
+      .catch((e: any) => {
+        console.warn('[ExpertRoom] Join failed:', e?.message ?? e);
+        showInfo('Could not join', 'We could not put you in this room. Please check your connection and try again.');
+        goBack?.();
+      });
     return () => {
+      cancelled = true;
       if (roomId) leaveRoom(roomId, myUid, myName).catch(() => {});
     };
   }, [roomId, !!room]);
 
-  // 2. Per-minute billing. The host is being paid, so they are never charged;
-  // the server enforces that too. Ticks every 15s and on unmount so the last
-  // partial interval is collected.
+  // 2. Per-minute billing. Guests tick themselves; hosts also tick every
+  // present guest so a patched client that never bills cannot sit for free.
   useEffect(() => {
-    if (!roomId || !room || !hasJoined) return;
-    if (isHost || !(room.ratePerMin > 0)) return;
+    if (!roomId || !room || !hasJoined || !(room.ratePerMin > 0)) return;
 
     let stopped = false;
     let consecutiveFailures = 0;
+
+    const billGuest = async (memberUid: string, nickname?: string) => {
+      const result = await tickRoomBilling(roomId, memberUid);
+      if (result.hasInsufficientFunds) {
+        leaveRoom(roomId, memberUid, nickname || 'Guest').catch(() => {});
+      }
+      return result;
+    };
+
     const tick = async () => {
       try {
-        const result = await tickRoomBilling(roomId);
-        if (stopped) return;
-        consecutiveFailures = 0;
-        setSpentInRoom((prev) => prev + (result.billedAmount || 0));
-        if (result.hasInsufficientFunds) {
-          stopped = true;
-          showInfo('Out of coins', `This room costs ${room.ratePerMin} coins a minute. Top up to keep listening.`);
-          // Unmounting runs the join effect's cleanup, which leaves the room and
-          // flushes the final billing tick.
-          goBack?.();
+        if (isHost) {
+          for (const m of membersRef.current) {
+            if (stopped || m.uid === myUid) continue;
+            await billGuest(m.uid, m.nickname);
+          }
+        } else {
+          const result = await tickRoomBilling(roomId);
+          if (stopped) return;
+          setSpentInRoom((prev) => prev + (result.billedAmount || 0));
+          if (result.hasInsufficientFunds) {
+            stopped = true;
+            showInfo('Out of coins', `This room costs ${room.ratePerMin} coins a minute. Top up to keep listening.`);
+            goBack?.();
+            return;
+          }
         }
+        consecutiveFailures = 0;
       } catch (e: any) {
         console.warn('[ExpertRoom] Billing tick failed:', e?.message ?? e);
-        if (stopped) return;
+        if (stopped || isHost) return;
         consecutiveFailures += 1;
-        // The server keeps accumulating unbilled seconds while we can't reach
-        // it, so staying silent means the next successful tick lands as one
-        // large unexplained deduction. Leave instead, and say why.
         if (consecutiveFailures >= 3) {
           stopped = true;
           showInfo(
@@ -255,8 +273,9 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
     return () => {
       stopped = true;
       clearInterval(id);
-      // Final tick collects the remaining seconds.
-      tickRoomBilling(roomId).catch(() => {});
+      if (!isHost) {
+        tickRoomBilling(roomId).catch(() => {});
+      }
     };
   }, [roomId, hasJoined, isHost, room?.ratePerMin]);
 
@@ -290,16 +309,25 @@ export default function ExpertRoomScreen({ navigate, goBack, route }: Props) {
   }, [roomId, room]);
 
   const handleDirectSeatJoin = useCallback(async (gender: 'boy' | 'girl') => {
+    // Guests cannot write `speakers` — empty seats queue a hand for the host.
     if (!roomId) return;
     setActionLoading(true);
     try {
-      await acceptOnStage(roomId, myUid, myName, myAvatarData, gender);
+      await raiseHand(roomId, myUid, myName, myAvatarData, gender);
     } catch (e: any) {
-      showInfo('Error', e.message || 'Failed to join stage directly.');
+      showInfo('Error', e.message || 'Could not request the seat.');
     } finally {
       setActionLoading(false);
     }
   }, [roomId, myUid, myName, myAvatarData]);
+
+  // Closed / deleted rooms must kick everyone out — staying would keep mic + billing.
+  useEffect(() => {
+    if (loading) return;
+    if (room === null || room?.status === 'closed') {
+      goBack?.();
+    }
+  }, [loading, room, room?.status, goBack]);
 
   const handleShareLink = useCallback(async () => {
     if (!roomId) return;

@@ -105,11 +105,63 @@ export class CallGoneError extends Error {
  */
 const OFFER_WRITE_TIMEOUT_MS = 10000;
 
+/** Cap for exponential backoff when a Firestore listener hits a transport flap. */
+const LISTENER_RETRY_CAP_MS = 15000;
+
 export class CallSetupTimeoutError extends Error {
   constructor() {
     super('CALL_SETUP_TIMEOUT');
     this.name = 'CallSetupTimeoutError';
   }
+}
+
+/**
+ * onSnapshot that re-attaches after transport errors instead of dying for good.
+ *
+ * Returning true from `onFatalError` treats the error as terminal (no retry).
+ * Success snapshots reset the backoff attempt counter.
+ */
+function subscribeWithRetry(
+  ref: ReturnType<typeof doc>,
+  onNext: (snap: { exists: () => boolean; data: () => unknown }) => void,
+  opts: {
+    label: string;
+    onFatalError?: (error: unknown) => boolean;
+  }
+): () => void {
+  let stopped = false;
+  let unsub: (() => void) | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let attempt = 0;
+
+  const attach = () => {
+    if (stopped) return;
+    unsub = onSnapshot(
+      ref,
+      (snap) => {
+        attempt = 0;
+        onNext(snap);
+      },
+      (error) => {
+        if (opts.onFatalError?.(error)) return;
+        console.warn(`[liveRoomService] ${opts.label} listener error; will retry:`, error);
+        unsub?.();
+        unsub = null;
+        if (stopped) return;
+        const delay = Math.min(1000 * 2 ** attempt, LISTENER_RETRY_CAP_MS);
+        attempt += 1;
+        retryTimer = setTimeout(attach, delay);
+      }
+    );
+  };
+
+  attach();
+
+  return () => {
+    stopped = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    unsub?.();
+  };
 }
 
 /**
@@ -205,20 +257,24 @@ export const createCallOffer = async (
   })();
 
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
   try {
     await Promise.race([
       offerWrite,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new CallSetupTimeoutError()), OFFER_WRITE_TIMEOUT_MS);
+        timer = setTimeout(() => {
+          timedOut = true;
+          reject(new CallSetupTimeoutError());
+        }, OFFER_WRITE_TIMEOUT_MS);
       }),
     ]);
   } finally {
     if (timer) clearTimeout(timer);
-    // The write is not cancellable, so it may still land after we have given up
-    // on it. Swallow its eventual outcome rather than letting a late rejection
-    // surface as an unhandled promise rejection long after the caller has
-    // already been told the call failed.
-    offerWrite.catch(() => {});
+    // Write is not cancellable. A late success after timeout would still ring
+    // the peer for a call the caller already abandoned — clear that offer.
+    void offerWrite
+      .then(() => (timedOut ? clearCallOffer(receiverUid, { callerUid, roomId }) : undefined))
+      .catch(() => {});
   }
 
   // Push delivery is server-side: the receiver's Expo token lives in a
@@ -333,7 +389,10 @@ export const subscribeToIncomingCalls = (uid: string, onUpdate: (call: IncomingC
   let firstSeenAt: number | null = null;
   let firstSeenKey: string | null = null;
 
-  return onSnapshot(callRef, (docSnap) => {
+  // Transport flaps must not call onUpdate(null): that dismisses a live ring
+  // and clears the watcher's handledRef, after which the account looks online
+  // but never rings again. Retry only — never treat a flap as "no offer".
+  return subscribeWithRetry(callRef, (docSnap) => {
     if (!docSnap.exists()) {
       firstSeenAt = null;
       firstSeenKey = null;
@@ -362,15 +421,7 @@ export const subscribeToIncomingCalls = (uid: string, onUpdate: (call: IncomingC
     } else {
       onUpdate(data);
     }
-  }, (error) => {
-    // Without this the SDK reports "Uncaught Error in snapshot listener" and
-    // the rejection surfaces as a redbox on whatever screen happens to be
-    // mounted. Worse, the listener is torn down: this is how the app learns it
-    // is being called, so losing it silently means the account looks online and
-    // simply never rings.
-    console.error('[liveRoomService] Incoming-call listener stopped:', error);
-    onUpdate(null);
-  });
+  }, { label: 'Incoming-call' });
 };
 
 /**
@@ -389,7 +440,8 @@ export const subscribeToOutboundCallStatus = (
   onUpdate: (status: OutboundCallStatus, data?: IncomingCall) => void
 ) => {
   const callRef = doc(db, 'incoming_calls', receiverUid);
-  return onSnapshot(callRef, (docSnap) => {
+
+  return subscribeWithRetry(callRef, (docSnap) => {
     if (!docSnap.exists()) {
       onUpdate('gone');
       return;
@@ -404,17 +456,17 @@ export const subscribeToOutboundCallStatus = (
       return;
     }
     onUpdate(data.status, data);
-  }, (error) => {
-    // The caller watches the *receiver's* document, so the rule's
-    // `request.auth.uid == receiverId` arm is false and it falls through to
-    // `resource.data.callerUid`. A document that does not exist is explicitly
-    // readable (the `resource == null` arm), so a denial here means the slot
-    // exists and belongs to a different caller -- our offer was replaced.
-    // Anything else is a transport failure; either way this listener is
-    // terminal, so the call has to end rather than sit with no signalling.
-    const displaced = (error as any)?.code === 'permission-denied';
-    console.warn('[liveRoomService] Outbound-call listener stopped:', error);
-    onUpdate(displaced ? 'taken' : 'gone');
+  }, {
+    label: 'Outbound-call',
+    onFatalError: (error) => {
+      // permission-denied on the receiver's slot means our offer was replaced
+      // (we are not the callerUid on the live doc). Anything else is transport
+      // — retry instead of reporting 'gone', which used to hang up live calls.
+      if ((error as { code?: string })?.code !== 'permission-denied') return false;
+      console.warn('[liveRoomService] Outbound-call listener denied; offer taken.', error);
+      onUpdate('taken');
+      return true;
+    },
   });
 };
 
