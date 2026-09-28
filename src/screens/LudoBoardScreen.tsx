@@ -375,6 +375,14 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     : null;
 
   const isWaiting = room.phase === 'waiting';
+  /** handleStart refuses below this, so the lobby must not imply otherwise. */
+  const enoughToStart = room.players.length >= 2;
+  /**
+   * The host by uid. This used to read the player holding `currentTurn`, which
+   * on a table that has not started is just the default colour -- so the card
+   * could name somebody who is not the host at all.
+   */
+  const hostName = room.players.find((p) => p.uid === room.hostUid)?.nickname ?? 'The host';
   const isOver = room.phase === 'finished';
   const canRoll = isMyTurn && !room.diceRolled && room.phase === 'playing' && !asSpectator && !rolling;
 
@@ -574,28 +582,42 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
           <View style={styles.lobbyCard}>
             <Text style={ludoType.eyebrow}>Waiting to start</Text>
             <Text style={styles.lobbyTitle}>
-              {room.players.length} of 4 seated
+              {/* "1 of 4" read as "four are required" and the card gave no
+                  other clue, so a table that only needed one more person
+                  looked like one that was stuck. Two is the real threshold
+                  handleStart enforces, so the card says that instead. */}
+              {room.players.length === 1
+                ? 'One more player to start'
+                : `${room.players.length} of 4 seated`}
             </Text>
             <Text style={styles.lobbyBody}>
-              {isHost
-                ? 'Start when everyone is in. Empty seats sit out the game.'
-                : `${byColor[room.currentTurn]?.nickname ?? 'The host'} starts the game.`}
+              {!enoughToStart
+                ? 'Ludo needs at least two. Tap an open seat to join, or wait for somebody else.'
+                : isHost
+                  ? 'Start when everyone is in. Empty seats sit out the game.'
+                  : `${hostName} starts the game.`}
             </Text>
             {isHost ? (
               <Pressable
                 onPress={handleStart}
-                disabled={coinBusy}
+                disabled={coinBusy || !enoughToStart}
                 accessibilityRole="button"
                 accessibilityLabel="Start the game"
-                accessibilityState={{ disabled: coinBusy }}
-                style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed, coinBusy && { opacity: 0.5 }]}
+                accessibilityState={{ disabled: coinBusy || !enoughToStart }}
+                style={({ pressed }) => [
+                  styles.primaryBtn,
+                  pressed && styles.pressed,
+                  (coinBusy || !enoughToStart) && { opacity: 0.5 },
+                ]}
               >
                 <MaterialIcons name="play-arrow" size={18} color="#FFFFFF" />
                 <Text style={styles.primaryBtnText}>Start game</Text>
               </Pressable>
-            ) : (
+            ) : enoughToStart ? (
+              // Only spin while something really is being waited on. Below the
+              // threshold nothing is loading, and a spinner said otherwise.
               <ActivityIndicator color={ludo.ink} />
-            )}
+            ) : null}
           </View>
         </View>
       )}
