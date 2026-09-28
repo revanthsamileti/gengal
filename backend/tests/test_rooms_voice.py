@@ -175,3 +175,55 @@ class TestLeaveSeatAndStage:
         assert response.status_code == 200
         speakers = rooms_store["expert_rooms/%s" % ROOM_ID]["speakers"]
         assert any(s.get("uid") == HOST_UID for s in speakers)
+
+
+class TestLudoSkip:
+    """A dead turn has to be clearable by somebody who is still present.
+
+    skipTurn was a client write, and the room rules only let the host touch the
+    dice fields -- so when the host was the one who walked away mid-turn, no
+    remaining player was permitted to advance it and the table sat at "0s left"
+    for ever.
+    """
+
+    def seat_two(self, rooms_store, started_secs_ago):
+        rooms_store["ludo_rooms/%s" % LUDO_ID].update({
+            "phase": "playing",
+            "currentTurn": "red",
+            "turnTimeoutSecs": 15,
+            "turnStartedAt": datetime.now(timezone.utc) - timedelta(seconds=started_secs_ago),
+            "players": [
+                {"uid": HOST_UID, "color": "red", "nickname": "Host"},
+                {"uid": GUEST_UID, "color": "green", "nickname": "Guest"},
+            ],
+            "playerUids": [HOST_UID, GUEST_UID],
+            "tokens": [],
+        })
+
+    def test_any_seated_player_can_clear_an_expired_turn(self, client, rooms_store, monkeypatch):
+        self.seat_two(rooms_store, started_secs_ago=40)
+        auth_as(monkeypatch, GUEST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 200, response.get_json()
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "green"
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["diceRolled"] is False
+
+    def test_a_live_turn_cannot_be_skipped(self, client, rooms_store, monkeypatch):
+        """Otherwise anyone could rob the current player of their roll."""
+        self.seat_two(rooms_store, started_secs_ago=2)
+        auth_as(monkeypatch, GUEST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 409
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "red"
+
+    def test_a_stranger_cannot_skip(self, client, as_user, rooms_store):
+        self.seat_two(rooms_store, started_secs_ago=40)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 403
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "red"

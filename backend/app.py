@@ -1940,6 +1940,106 @@ def place_ludo_bet_endpoint():
         return jsonify({"error": "Failed to place bet"}), 500
 
 
+LUDO_FINISHED_POSITION = 58
+# Slack on top of the room's own turn clock. Phone clocks drift and a snapshot
+# takes a moment to arrive, so without it a player could lose a turn they were
+# still legitimately taking.
+LUDO_SKIP_GRACE_SECONDS = 3
+
+
+def ludo_next_turn(current_turn, players, tokens):
+    """Port of nextTurn in src/services/ludoService.ts -- next colour still in play."""
+    active = []
+    for player in players:
+        colour = (player or {}).get('color')
+        mine = [t for t in (tokens or []) if (t or {}).get('color') == colour]
+        if mine and all(t.get('position') == LUDO_FINISHED_POSITION for t in mine):
+            continue
+        active.append(colour)
+    if not active:
+        return current_turn
+    try:
+        index = active.index(current_turn)
+    except ValueError:
+        return active[0]
+    return active[(index + 1) % len(active)]
+
+
+@app.route('/api/v1/ludo/skip', methods=['POST', 'OPTIONS'])
+def ludo_skip_endpoint():
+    """Advance a turn whose clock has run out.
+
+    This was a client-side write, permitted by the room rules only to the host.
+    When the host was the player who went away mid-turn -- phone locked, app
+    closed -- nobody left at the table was allowed to move the game on, and it
+    sat at "0s left" until somebody abandoned it. Found by playing a table over
+    two phones and watching the clock stick at zero.
+
+    Any seated player may ask, and the server decides: the turn is advanced
+    only once it has genuinely expired, so this cannot be used to rob somebody
+    of a roll they are still taking.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = str(data.get("roomId") or "").strip()
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            room_snap = room_ref.get(transaction=transaction)
+            if not room_snap.exists:
+                raise ValueError("Unknown room")
+            room = room_snap.to_dict() or {}
+            if room.get('phase') != 'playing':
+                raise ValueError("Game is not in play")
+
+            players = list(room.get('players') or [])
+            if not any((p or {}).get('uid') == uid for p in players):
+                raise PermissionError("Not a seated player")
+
+            started_at = room.get('turnStartedAt')
+            if not hasattr(started_at, 'timestamp'):
+                raise ValueError("Turn has no start time")
+            timeout_secs = int(room.get('turnTimeoutSecs') or 15)
+            deadline = started_at.timestamp() + timeout_secs + LUDO_SKIP_GRACE_SECONDS
+            if time.time() < deadline:
+                raise LookupError("Turn is still live")
+
+            nxt = ludo_next_turn(room.get('currentTurn'), players, room.get('tokens') or [])
+            transaction.update(room_ref, {
+                "currentTurn": nxt,
+                "diceValue": None,
+                "diceRolled": False,
+                "consecutiveSixes": 0,
+                "turnStartedAt": firestore.SERVER_TIMESTAMP,
+            })
+            return nxt
+
+        nxt = apply(transaction)
+        return jsonify({"ok": True, "currentTurn": nxt}), 200
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except LookupError as e:
+        # 409: nothing is wrong, the turn simply has not run out yet.
+        return jsonify({"error": str(e)}), 409
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Skip error: {e}")
+        return jsonify({"error": "Could not skip the turn"}), 500
+
+
 @app.route('/api/v1/ludo/roll', methods=['POST', 'OPTIONS'])
 def ludo_roll_endpoint():
     """Charge per-token roll fee (when applicable) and set the dice server-side."""

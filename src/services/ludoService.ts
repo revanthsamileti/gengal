@@ -568,15 +568,19 @@ export const moveToken = async (
 };
 
 // Host skips a player's turn (timeout)
-export const skipTurn = async (roomId: string, room: LudoRoom) => {
-  const next = nextTurn(room.currentTurn, room.players, room.tokens);
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    currentTurn: next,
-    diceValue: null,
-    diceRolled: false,
-    consecutiveSixes: 0,
-    turnStartedAt: serverTimestamp(),
-  });
+/**
+ * Clear a turn whose clock has run out.
+ *
+ * Server-side, and asked for by whoever is still at the table. This used to be
+ * a direct write, which the room rules only permit the host to make -- so when
+ * the host was the player who went away mid-turn, nobody left was allowed to
+ * move the game on and the table sat at "0s left" for ever.
+ *
+ * The server re-checks that the turn really has expired, so asking early is
+ * refused rather than stealing a roll somebody is still taking.
+ */
+export const skipTurn = async (roomId: string, _room?: LudoRoom) => {
+  await authedPost<{ currentTurn: string }>('/api/v1/ludo/skip', { roomId });
 };
 
 // ── Chat & Gifts ──────────────────────────────────────────────────────────────

@@ -155,6 +155,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   }, [roomId, myUid]);
 
   const myPlayer = room?.players.find((p) => p.uid === myUid) ?? null;
+  /** Seated players drive the turn clock; spectators only watch it. */
+  const isSeated = Boolean(myPlayer);
   const isHost = room?.hostUid === myUid;
 
   // Heartbeat for watcher count only — paid seats are not presence-driven.
@@ -207,13 +209,16 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       setSecondsLeft(rem);
       if (rem === 0) {
         if (timerRef.current) clearInterval(timerRef.current);
-        if (isMyTurn || isHost) skipTurn(roomId, room).catch(() => {});
+        // Any seated player may ask; the server decides whether the turn has
+        // really expired. Restricting it to the current player or the host
+        // meant a host who walked away mid-turn froze the table for everyone.
+        if (isSeated) skipTurn(roomId).catch(() => {});
       }
     };
     tick();
     timerRef.current = setInterval(tick, 250);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [room?.currentTurn, room?.turnStartedAt, room?.phase, isMyTurn, isHost, roomId]);
+  }, [room?.currentTurn, room?.turnStartedAt, room?.phase, isSeated, roomId]);
 
   // A roll with nothing to move passes immediately instead of burning the clock.
   useEffect(() => {
