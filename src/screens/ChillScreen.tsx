@@ -141,6 +141,9 @@ function LudoRoomCard({
   room: LudoRoom; onJoin: () => void; loading: boolean;
 }) {
   const fade = useRef(new Animated.Value(0)).current;
+  // Somebody who already holds a seat is going back to their game, not watching.
+  const amSeated = room.players.some((p) => p.uid === auth.currentUser?.uid);
+  const canSit = room.players.length < 4 && room.phase === 'waiting';
   useEffect(() => {
     Animated.timing(fade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
   }, []);
@@ -188,12 +191,12 @@ function LudoRoomCard({
             ? <ActivityIndicator size="small" color="#FFF" />
             : <>
                 <MaterialIcons
-                  name={room.players.length < 4 && room.phase === 'waiting' ? 'login' : 'visibility'}
+                  name={amSeated || canSit ? 'login' : 'visibility'}
                   size={13}
                   color="#FFFDF8"
                 />
                 <Text style={lrStyles.joinText}>
-                  {room.players.length < 4 && room.phase === 'waiting' ? 'Join' : 'Watch'}
+                  {amSeated ? 'Rejoin' : canSit ? 'Join' : 'Watch'}
                 </Text>
               </>}
         </TouchableOpacity>

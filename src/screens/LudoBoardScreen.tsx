@@ -38,7 +38,7 @@ import {
   FINISHED_POSITION,
   subscribeToLudoRoom, subscribeToLudoEvents,
   joinLudoRoom, leaveLudoRoom,
-  startGame, rollDice, moveToken, skipTurn, closeLudoRoom,
+  startGame, rollDice, moveToken, skipTurn, SKIP_GRACE_MS, closeLudoRoom,
   getLegalMoves,
   sendLudoChat, sendLudoGift,
   buyLudoTicket, placeLudoBet,
@@ -97,7 +97,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const [chatText, setChatText] = useState('');
   const [rolling, setRolling] = useState(false);
   const [busyToken, setBusyToken] = useState<string | null>(null);
-  const [asSpectator, setAsSpectator] = useState(false);
+  const [takingSeat, setTakingSeat] = useState<TokenColor | null>(null);
+  const [joinedAsSpectator, setJoinedAsSpectator] = useState(false);
   const [sheet, setSheet] = useState<null | 'chat' | 'gift'>(null);
   // One lock across every coin-moving control on this screen: taking a seat,
   // backing a colour and gifting all debit the same balance, so they must not
@@ -148,8 +149,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   useEffect(() => {
     if (!roomId || !myUid) return;
     joinLudoRoom(roomId, myUid, myName, myAvatarData).then(({ asSpectator: spec }) => {
-      spectatorRef.current = spec;
-      setAsSpectator(spec);
+      setJoinedAsSpectator(spec);
     });
     return () => { leaveLudoRoom(roomId, myUid, myName, spectatorRef.current); };
   }, [roomId, myUid]);
@@ -158,6 +158,13 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   /** Seated players drive the turn clock; spectators only watch it. */
   const isSeated = Boolean(myPlayer);
   const isHost = room?.hostUid === myUid;
+  // Whether we are watching follows the live seat list, not how we walked in.
+  // It used to be fixed at entry, so somebody who came in to watch and then
+  // paid for a seat stayed a spectator: dice dead on their own turn, "Watching"
+  // in the dock, audience-only voice, and the seat never released on leaving.
+  // The entry answer only stands in until the room document has loaded.
+  const asSpectator = room ? !isSeated : joinedAsSpectator;
+  spectatorRef.current = asSpectator;
 
   // Heartbeat for watcher count only — paid seats are not presence-driven.
   const { liveCount, connection } = useRoomPresence({
@@ -204,16 +211,30 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       return;
     }
     const endsAt = room.turnStartedAt.toMillis() + room.turnTimeoutSecs * 1000;
+    // Any seated player may ask; the server decides whether the turn has
+    // really expired. Restricting it to the current player or the host
+    // meant a host who walked away mid-turn froze the table for everyone.
+    //
+    // The server allows a grace period past zero, so the one request this used
+    // to send at zero was always refused and nothing asked again: the table sat
+    // at "0s left" until some unrelated write happened to nudge it. Ask once
+    // the grace has passed, and keep asking until the turn really changes --
+    // which re-runs this effect and starts a fresh clock.
+    let askAt = endsAt + SKIP_GRACE_MS;
+    let retryMs = 1000;
+    let asking = false;
     const tick = () => {
-      const rem = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000));
-      setSecondsLeft(rem);
-      if (rem === 0) {
-        if (timerRef.current) clearInterval(timerRef.current);
-        // Any seated player may ask; the server decides whether the turn has
-        // really expired. Restricting it to the current player or the host
-        // meant a host who walked away mid-turn froze the table for everyone.
-        if (isSeated) skipTurn(roomId).catch(() => {});
-      }
+      const now = Date.now();
+      setSecondsLeft(Math.max(0, Math.ceil((endsAt - now) / 1000)));
+      if (!isSeated || asking || now < askAt) return;
+      asking = true;
+      skipTurn(roomId)
+        .then(() => { askAt = Infinity; })
+        .catch(() => {
+          askAt = Date.now() + retryMs;
+          retryMs = Math.min(retryMs * 2, 5000);
+        })
+        .finally(() => { asking = false; });
     };
     tick();
     timerRef.current = setInterval(tick, 250);
@@ -264,7 +285,12 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       // Fee (per_token) + die are applied server-side atomically.
       await rollDice(roomId, myUid, myName, myAvatarData, room);
     } catch (e: any) {
-      Alert.alert('Roll failed', e?.message || 'That roll did not go through. Try again.');
+      // The clock can run out between the tap and the server. The board is
+      // already showing whose turn it is now; a dialog about it only gets in
+      // the way.
+      if (!/not your turn|already rolled/i.test(e?.message ?? '')) {
+        Alert.alert('Roll failed', e?.message || 'That roll did not go through. Try again.');
+      }
     } finally {
       setRolling(false);
     }
@@ -289,10 +315,13 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       Alert.alert('Not enough coins', `A seat costs ${price} coins. Top up in the store.`);
       return;
     }
+    setTakingSeat(color);
     try {
       await buyLudoTicket(roomId, myUid, myName, myAvatarData, price, room.hostUid, color);
     } catch (e: any) {
       Alert.alert('Could not take that seat', e?.message || 'Someone may have taken it first.');
+    } finally {
+      setTakingSeat(null);
     }
   }), [room, profile, roomId, myUid, myName, myAvatarData, runCoin]);
 
@@ -394,9 +423,22 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const turnPlayer = byColor[room.currentTurn];
   const turnName = turnPlayer?.nickname ?? GEMS[room.currentTurn].name;
 
+  // "0s left" sat on screen while the server's grace ran out, reading as a
+  // frozen clock. Say what is happening instead.
+  const clockOn = secondsLeft !== null && room.phase === 'playing';
+  const clockUrgent = clockOn && secondsLeft <= 3;
+  const clockText = !clockOn ? ' ' : secondsLeft === 0 ? 'Time is up — passing' : `${secondsLeft}s left`;
+
   let eyebrow: string;
   let instruction: string;
-  if (asSpectator) {
+  if (isWaiting) {
+    // `currentTurn` is only a default colour until the game starts; reading it
+    // here told the host "Your turn -- roll the dice" on a table still filling.
+    eyebrow = 'Not started';
+    instruction = !enoughToStart
+      ? 'Waiting for players'
+      : isHost ? 'Start when everyone is in' : `Waiting for ${hostName}`;
+  } else if (asSpectator) {
     eyebrow = 'Watching';
     instruction = `${turnName} is playing`;
   } else if (isMyTurn) {
@@ -456,6 +498,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
         rank={rankIdx >= 0 ? rankIdx + 1 : null}
         seatPrice={isWaiting && !myPlayer ? (room.ticketPrice ?? DEFAULT_SEAT_PRICE) : null}
         onTakeSeat={isWaiting && !myPlayer && !coinBusy ? () => handleTakeSeat(color) : undefined}
+        taking={takingSeat === color}
         betLabel={room.gameMode === 'per_token' && player && player.uid !== myUid ? `Back ${BET_AMOUNT}` : null}
         onBet={room.gameMode === 'per_token' && player && player.uid !== myUid && !coinBusy ? () => handleBet(color) : undefined}
       />
@@ -519,17 +562,26 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             <Text
               style={[
                 ludoType.eyebrow,
-                isMyTurn && !asSpectator && { color: GEMS[room.currentTurn].ink },
+                isMyTurn && !asSpectator && !isWaiting && { color: GEMS[room.currentTurn].ink },
               ]}
             >
               {eyebrow}
             </Text>
-            <Text style={styles.dockInstruction}>{instruction}</Text>
-            {secondsLeft !== null && room.phase === 'playing' && (
-              <Text style={[styles.dockClock, numeric, secondsLeft <= 3 && { color: ludo.danger }]}>
-                {secondsLeft}s left
-              </Text>
-            )}
+            {/* One line, always, and the clock line always reserved. The board
+                is centred in whatever the dock leaves, so an instruction that
+                wrapped on a larger font, or a clock line coming and going,
+                shifted the whole board a few pixels every turn. */}
+            <Text
+              style={styles.dockInstruction}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.7}
+            >
+              {instruction}
+            </Text>
+            <Text style={[styles.dockClock, numeric, clockUrgent && { color: ludo.danger }]}>
+              {clockText}
+            </Text>
           </View>
           <LudoDie
             value={room.diceValue}
@@ -597,7 +649,10 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             </Text>
             <Text style={styles.lobbyBody}>
               {!enoughToStart
-                ? 'Ludo needs at least two. Tap an open seat to join, or wait for somebody else.'
+                // Somebody already seated has no seat left to tap.
+                ? (myPlayer
+                  ? 'Ludo needs at least two. Waiting for somebody to take a seat.'
+                  : 'Ludo needs at least two. Tap an open seat to join, or wait for somebody else.')
                 : isHost
                   ? 'Start when everyone is in. Empty seats sit out the game.'
                   : `${hostName} starts the game.`}

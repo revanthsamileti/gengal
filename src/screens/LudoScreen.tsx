@@ -98,6 +98,9 @@ function TableCard({
   const seated = room.players.length;
   const open = seated < 4 && room.phase === 'waiting';
   const host = room.players.find((p) => p.uid === room.hostUid) ?? room.players[0];
+  // Somebody who already holds a seat is going back to their game, not watching.
+  const amSeated = room.players.some((p) => p.uid === auth.currentUser?.uid);
+  const cta = amSeated ? 'Rejoin' : open ? 'Take a seat' : 'Watch';
 
   return (
     <Animated.View style={{ opacity: fade }}>
@@ -106,7 +109,7 @@ function TableCard({
         disabled={busy}
         accessibilityRole="button"
         accessibilityLabel={
-          `${host?.nickname ?? 'Host'}'s table, ${seated} of 4 seated. ${open ? 'Join' : 'Watch'}.`
+          `${host?.nickname ?? 'Host'}'s table, ${seated} of 4 seated. ${amSeated ? 'Rejoin' : open ? 'Join' : 'Watch'}.`
         }
         style={({ pressed }) => [cardStyles.card, pressed && cardStyles.pressed]}
       >
@@ -155,8 +158,8 @@ function TableCard({
               <ActivityIndicator size="small" color="#FFFDF8" />
             ) : (
               <>
-                <MaterialIcons name={open ? 'login' : 'visibility'} size={14} color="#FFFDF8" />
-                <Text style={cardStyles.ctaText}>{open ? 'Take a seat' : 'Watch'}</Text>
+                <MaterialIcons name={amSeated || open ? 'login' : 'visibility'} size={14} color="#FFFDF8" />
+                <Text style={cardStyles.ctaText}>{cta}</Text>
               </>
             )}
           </View>

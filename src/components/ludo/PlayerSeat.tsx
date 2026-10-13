@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 import { MaterialIcons } from '@expo/vector-icons';
 import GengalAvatar from '../GengalAvatar';
@@ -33,6 +33,8 @@ type Props = {
   /** Shown on an empty seat when a seat can be bought. */
   seatPrice: number | null;
   onTakeSeat?: () => void;
+  /** This seat is being bought right now. */
+  taking?: boolean;
   onBet?: () => void;
   betLabel?: string | null;
   align: 'left' | 'right';
@@ -40,7 +42,7 @@ type Props = {
 
 export function PlayerSeat({
   color, player, isActive, isYou, turnProgress, secondsLeft, tokensHome,
-  rank, seatPrice, onTakeSeat, onBet, betLabel, align,
+  rank, seatPrice, onTakeSeat, taking, onBet, betLabel, align,
 }: Props) {
   const gem = GEMS[color];
 
@@ -51,7 +53,7 @@ export function PlayerSeat({
         disabled={!onTakeSeat}
         accessibilityRole="button"
         accessibilityLabel={
-          seatPrice ? `Take the ${gem.name} seat for ${seatPrice} coins` : `${gem.name} seat is open`
+          seatPrice ? `Take the ${gem.name} seat for ${seatPrice} coins` : `${gem.name} seat is empty`
         }
         style={({ pressed }) => [
           styles.seat,
@@ -61,12 +63,20 @@ export function PlayerSeat({
         ]}
       >
         <View style={[styles.emptyDot, { borderColor: gem.core }]}>
-          <MaterialIcons name="add" size={16} color={gem.ink} />
+          {/* Buying a seat is a round trip to the server; with nothing on the
+              seat to say so, the tap looked ignored for a couple of seconds.
+              And a plus on a seat that cannot be taken -- mid-game, or when you
+              already have one -- invited a tap that did nothing. */}
+          {taking
+            ? <ActivityIndicator size="small" color={gem.ink} />
+            : seatPrice
+              ? <MaterialIcons name="add" size={16} color={gem.ink} />
+              : null}
         </View>
         <View style={styles.meta}>
-          <Text style={styles.emptyName}>{gem.name}</Text>
-          <Text style={[styles.emptySub, numeric]}>
-            {seatPrice ? `Open · ${seatPrice} coins` : 'Open seat'}
+          <Text style={styles.emptyName} numberOfLines={1}>{gem.name}</Text>
+          <Text style={[styles.emptySub, numeric]} numberOfLines={1}>
+            {taking ? 'Taking seat…' : seatPrice ? `${seatPrice} coins` : 'Empty seat'}
           </Text>
         </View>
       </Pressable>

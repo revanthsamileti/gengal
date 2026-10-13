@@ -583,6 +583,13 @@ export const skipTurn = async (roomId: string, _room?: LudoRoom) => {
   await authedPost<{ currentTurn: string }>('/api/v1/ludo/skip', { roomId });
 };
 
+/**
+ * How long past zero the server waits before it will retire a turn -- mirrors
+ * LUDO_SKIP_GRACE_SECONDS in backend/app.py, plus a little for the round trip.
+ * Asking any sooner is always refused.
+ */
+export const SKIP_GRACE_MS = 3500;
+
 // ── Chat & Gifts ──────────────────────────────────────────────────────────────
 
 export const sendLudoChat = async (
