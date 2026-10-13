@@ -220,6 +220,25 @@ class TestLudoSkip:
         assert response.status_code == 409
         assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "red"
 
+    def test_the_next_turn_starts_soon_after_the_clock_runs_out(self, client, rooms_store, monkeypatch):
+        """Two seconds past a 15 second clock is long enough. The grace used to
+        be three, and the table sat on a finished clock for all of it."""
+        self.seat_two(rooms_store, started_secs_ago=17)
+        auth_as(monkeypatch, GUEST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 200, response.get_json()
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "green"
+
+    def test_a_turn_that_ran_out_this_instant_is_not_skipped_yet(self, client, rooms_store, monkeypatch):
+        self.seat_two(rooms_store, started_secs_ago=15)
+        auth_as(monkeypatch, GUEST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 409
+
     def test_a_stranger_cannot_skip(self, client, as_user, rooms_store):
         self.seat_two(rooms_store, started_secs_ago=40)
 

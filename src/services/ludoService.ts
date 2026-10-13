@@ -469,21 +469,23 @@ export const rollDice = async (
   );
   const value = data.diceValue;
 
-  await logEvent(roomId, {
+  // The feed entries are not waited for. They used to be, so the die kept
+  // tumbling for a second write to finish after the value was already known.
+  logEvent(roomId, {
     type: 'roll',
     senderUid: rollerUid,
     senderName: rollerName,
     senderAvatarData: rollerAvatarData,
     diceValue: value,
-  });
+  }).catch(() => {});
 
   if (data.forfeited) {
-    await logEvent(roomId, {
+    logEvent(roomId, {
       type: 'system',
       senderUid: '',
       senderName: 'Game',
       text: `${rollerName} rolled three 6s — turn forfeited!`,
-    });
+    }).catch(() => {});
   }
 
   return value;
@@ -588,7 +590,7 @@ export const skipTurn = async (roomId: string, _room?: LudoRoom) => {
  * LUDO_SKIP_GRACE_SECONDS in backend/app.py, plus a little for the round trip.
  * Asking any sooner is always refused.
  */
-export const SKIP_GRACE_MS = 3500;
+export const SKIP_GRACE_MS = 1200;
 
 // ── Chat & Gifts ──────────────────────────────────────────────────────────────
 

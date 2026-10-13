@@ -1943,8 +1943,9 @@ def place_ludo_bet_endpoint():
 LUDO_FINISHED_POSITION = 58
 # Slack on top of the room's own turn clock. Phone clocks drift and a snapshot
 # takes a moment to arrive, so without it a player could lose a turn they were
-# still legitimately taking.
-LUDO_SKIP_GRACE_SECONDS = 3
+# still legitimately taking. Kept short: for as long as it runs the table shows
+# a clock at zero and nobody playing, and at three seconds that read as stuck.
+LUDO_SKIP_GRACE_SECONDS = 1
 
 
 def ludo_next_turn(current_turn, players, tokens):

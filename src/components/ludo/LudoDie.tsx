@@ -21,7 +21,7 @@ const PERSPECTIVE = 420;
 const FACE_PERSPECTIVE = facePerspective(SIZE, PERSPECTIVE);
 /** How far round the resting die sits, in quarter turns: enough to show an edge. */
 const REST = 0.13;
-const QUARTER_MS = 190;
+const QUARTER_MS = 150;
 /** A roll whose value never arrives must not spin for ever. */
 const SPIN_LIMIT_MS = 1500;
 
@@ -65,10 +65,36 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
   /** The last `value` seen, so a roll of the same number again still tumbles. */
   const lastValue = useRef(value);
   const spinning = useRef(false);
+  /** While tumbling: the listener that deals new numbers, and where it is up to. */
+  const dealer = useRef<string | null>(null);
+  const dealt = useRef({ step: -1, next: 0 });
+
+  const stopDealing = useCallback(() => {
+    if (dealer.current) turn.removeListener(dealer.current);
+    dealer.current = null;
+  }, [turn]);
+  useEffect(() => stopDealing, [stopDealing]);
 
   const spin = useCallback(() => {
     spinning.current = true;
     Animated.spring(settle, { toValue: 0.88, friction: 7, tension: 160, useNativeDriver: true }).start();
+    // Four views would otherwise show the same four numbers lap after lap. Each
+    // time a face comes square-on, the view that has just gone out of sight is
+    // given the next number -- it is two quarter turns from being seen again,
+    // which is ample time for the change to land -- so all six sides go by.
+    stopDealing();
+    dealt.current.step = -1;
+    dealer.current = turn.addListener(({ value: t }) => {
+      const step = Math.floor(t) % RING;
+      if (step === dealt.current.step) return;
+      dealt.current.step = step;
+      const face = ((dealt.current.next++) % 6) + 1;
+      setRing((prev) => {
+        const out = [...prev];
+        out[(step + RING - 1) % RING] = face;
+        return out;
+      });
+    });
     turn.stopAnimation((current) => {
       // The pose repeats every lap, so starting from the same place one lap
       // back keeps the numbers small without anything moving.
@@ -80,11 +106,12 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
         })
       ).start();
     });
-  }, [turn, settle]);
+  }, [turn, settle, stopDealing]);
 
   const land = useCallback((next: number) => {
     shown.current = next;
     spinning.current = false;
+    stopDealing();
     turn.stopAnimation((current) => {
       const from = current % RING;
       turn.setValue(from);
@@ -100,7 +127,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
       const run = () => {
         Animated.timing(turn, {
           toValue: target + REST,
-          duration: Math.round((target + REST - from) * QUARTER_MS * 1.5),
+          duration: Math.round((target + REST - from) * QUARTER_MS * 1.4),
           easing: Easing.out(Easing.back(1.3)),
           useNativeDriver: true,
         }).start(({ finished }) => {
@@ -114,19 +141,20 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
       // Let the new pips reach the screen before those views swing into sight.
       requestAnimationFrame(() => requestAnimationFrame(run));
     });
-  }, [turn, settle]);
+  }, [turn, settle, stopDealing]);
 
   /** No tumble: put the value on the face that is already showing. */
   const show = useCallback((next: number) => {
     shown.current = next;
     spinning.current = false;
+    stopDealing();
     turn.stopAnimation((current) => {
       const at = Math.floor(current % RING);
       turn.setValue(at + REST);
       settle.setValue(1);
       setRing(ringShowing(next, at));
     });
-  }, [turn, settle]);
+  }, [turn, settle, stopDealing]);
 
   // Our own roll: tumble until the value comes back.
   useEffect(() => {

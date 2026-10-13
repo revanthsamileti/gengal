@@ -98,6 +98,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const [rolling, setRolling] = useState(false);
   const [busyToken, setBusyToken] = useState<string | null>(null);
   const [takingSeat, setTakingSeat] = useState<TokenColor | null>(null);
+  // Our own roll, from the moment the server answers. The room document says
+  // the same thing a beat later; the die should not wait for it.
+  const [rolled, setRolled] = useState<number | null>(null);
   const [joinedAsSpectator, setJoinedAsSpectator] = useState(false);
   const [sheet, setSheet] = useState<null | 'chat' | 'gift'>(null);
   // One lock across every coin-moving control on this screen: taking a seat,
@@ -221,7 +224,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     // the grace has passed, and keep asking until the turn really changes --
     // which re-runs this effect and starts a fresh clock.
     let askAt = endsAt + SKIP_GRACE_MS;
-    let retryMs = 1000;
+    let retryMs = 600;
+    let tries = 0;
     let asking = false;
     const tick = () => {
       const now = Date.now();
@@ -231,8 +235,11 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       skipTurn(roomId)
         .then(() => { askAt = Infinity; })
         .catch(() => {
+          // A refusal this early is almost always the two clocks disagreeing
+          // by a moment, so the first few retries come quickly.
           askAt = Date.now() + retryMs;
-          retryMs = Math.min(retryMs * 2, 5000);
+          tries += 1;
+          if (tries > 5) retryMs = Math.min(retryMs * 2, 5000);
         })
         .finally(() => { asking = false; });
     };
@@ -280,10 +287,10 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
 
     setRolling(true);
     try {
-      // Let the tumble read before the value lands.
-      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 520));
-      // Fee (per_token) + die are applied server-side atomically.
-      await rollDice(roomId, myUid, myName, myAvatarData, room);
+      // Fee (per_token) + die are applied server-side atomically. The die
+      // tumbles for as long as this takes and no longer: there used to be a
+      // half-second pause in front of it for show, on top of the round trip.
+      setRolled(await rollDice(roomId, myUid, myName, myAvatarData, room));
     } catch (e: any) {
       // The clock can run out between the tap and the server. The board is
       // already showing whose turn it is now; a dialog about it only gets in
@@ -294,7 +301,10 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     } finally {
       setRolling(false);
     }
-  }, [room, isMyTurn, rolling, profile, roomId, myUid, myName, myAvatarData, reduceMotion]);
+  }, [room, isMyTurn, rolling, profile, roomId, myUid, myName, myAvatarData]);
+
+  // A new turn (or the same player's next roll) starts from the room again.
+  useEffect(() => { setRolled(null); }, [room?.currentTurn, room?.turnStartedAt]);
 
   const handleTokenPress = useCallback(async (tokenId: string) => {
     if (!room || busyToken || !room.diceRolled) return;
@@ -584,7 +594,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             </Text>
           </View>
           <LudoDie
-            value={room.diceValue}
+            value={rolled ?? room.diceValue}
             rolling={rolling}
             enabled={canRoll}
             turnColor={room.currentTurn as PlayerColor}
