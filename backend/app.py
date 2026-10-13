@@ -1965,6 +1965,45 @@ def ludo_next_turn(current_turn, players, tokens):
     return active[(index + 1) % len(active)]
 
 
+# Board geometry. Ports of the constants in src/services/ludoService.ts, which
+# still draws the board and highlights legal moves; the server is what decides.
+LUDO_BASE_POSITION = -1
+LUDO_HOME_COLUMN_START = 52
+LUDO_HOME_COLUMN_END = 57
+LUDO_COLOR_ENTRY = {'red': 0, 'blue': 13, 'green': 26, 'yellow': 39}
+
+
+def ludo_new_position(token, steps):
+    """Port of computeNewPosition: where `token` lands after `steps`, or None."""
+    pos = token.get('position')
+    entry = LUDO_COLOR_ENTRY.get(token.get('color'))
+    if entry is None or not isinstance(pos, int) or pos == LUDO_FINISHED_POSITION:
+        return None
+    if pos == LUDO_BASE_POSITION:
+        return entry if steps == 6 else None
+    if pos >= LUDO_HOME_COLUMN_START:
+        new_pos = pos + steps
+        if new_pos > LUDO_HOME_COLUMN_END:
+            return None
+        return LUDO_FINISHED_POSITION if new_pos == LUDO_HOME_COLUMN_END else new_pos
+    travelled = (pos - entry + 52) % 52
+    remaining = 51 - travelled
+    if steps <= remaining:
+        return (pos + steps) % 52
+    home_pos = LUDO_HOME_COLUMN_START + (steps - remaining - 1)
+    if home_pos > LUDO_HOME_COLUMN_END:
+        return None
+    return LUDO_FINISHED_POSITION if home_pos == LUDO_HOME_COLUMN_END else home_pos
+
+
+def ludo_legal_moves(tokens, color, dice):
+    """Port of getLegalMoves: ids of `color`'s tokens that can move `dice`."""
+    return [
+        t.get('id') for t in (tokens or [])
+        if (t or {}).get('color') == color and ludo_new_position(t, dice) is not None
+    ]
+
+
 @app.route('/api/v1/ludo/skip', methods=['POST', 'OPTIONS'])
 def ludo_skip_endpoint():
     """Advance a turn whose clock has run out.
@@ -2008,13 +2047,24 @@ def ludo_skip_endpoint():
             if not any((p or {}).get('uid') == uid for p in players):
                 raise PermissionError("Not a seated player")
 
+            # A roll that nothing can move with passes at once. The board says
+            # "No legal moves -- passing" and asks straight away, but this used
+            # to wait out the whole turn clock regardless, so every dead roll
+            # froze the table for the best part of twenty seconds.
+            dice = room.get('diceValue')
+            dead_roll = (
+                bool(room.get('diceRolled')) and isinstance(dice, int)
+                and not ludo_legal_moves(room.get('tokens') or [], room.get('currentTurn'), dice)
+            )
+
             started_at = room.get('turnStartedAt')
-            if not hasattr(started_at, 'timestamp'):
-                raise ValueError("Turn has no start time")
-            timeout_secs = int(room.get('turnTimeoutSecs') or 15)
-            deadline = started_at.timestamp() + timeout_secs + LUDO_SKIP_GRACE_SECONDS
-            if time.time() < deadline:
-                raise LookupError("Turn is still live")
+            if not dead_roll:
+                if not hasattr(started_at, 'timestamp'):
+                    raise ValueError("Turn has no start time")
+                timeout_secs = int(room.get('turnTimeoutSecs') or 15)
+                deadline = started_at.timestamp() + timeout_secs + LUDO_SKIP_GRACE_SECONDS
+                if time.time() < deadline:
+                    raise LookupError("Turn is still live")
 
             nxt = ludo_next_turn(room.get('currentTurn'), players, room.get('tokens') or [])
             transaction.update(room_ref, {

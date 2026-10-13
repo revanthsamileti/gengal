@@ -227,3 +227,62 @@ class TestLudoSkip:
 
         assert response.status_code == 403
         assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "red"
+
+    def roll(self, rooms_store, dice, red_positions):
+        rooms_store["ludo_rooms/%s" % LUDO_ID].update({
+            "diceRolled": True,
+            "diceValue": dice,
+            "tokens": [
+                {"id": "red-%d" % i, "color": "red", "index": i, "position": pos}
+                for i, pos in enumerate(red_positions)
+            ] + [
+                {"id": "green-%d" % i, "color": "green", "index": i, "position": -1}
+                for i in range(4)
+            ],
+        })
+
+    def test_a_roll_nothing_can_move_with_passes_at_once(self, client, rooms_store, monkeypatch):
+        """The board says "No legal moves -- passing"; it must not then sit out
+        the whole clock. Seen on two phones: a 1 with every pawn in the yard
+        held the table for 23 seconds."""
+        self.seat_two(rooms_store, started_secs_ago=2)
+        self.roll(rooms_store, dice=1, red_positions=[-1, -1, -1, -1])
+        auth_as(monkeypatch, HOST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 200, response.get_json()
+        room = rooms_store["ludo_rooms/%s" % LUDO_ID]
+        assert room["currentTurn"] == "green"
+        assert room["diceRolled"] is False
+        assert room["diceValue"] is None
+
+    def test_a_roll_that_can_still_be_played_is_not_skipped_early(self, client, rooms_store, monkeypatch):
+        self.seat_two(rooms_store, started_secs_ago=2)
+        self.roll(rooms_store, dice=3, red_positions=[5, -1, -1, -1])
+        auth_as(monkeypatch, GUEST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 409
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "red"
+
+    def test_a_six_in_the_yard_is_playable_so_it_is_not_a_dead_roll(self, client, rooms_store, monkeypatch):
+        self.seat_two(rooms_store, started_secs_ago=2)
+        self.roll(rooms_store, dice=6, red_positions=[-1, -1, -1, -1])
+        auth_as(monkeypatch, HOST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 409
+
+    def test_overshooting_home_is_a_dead_roll(self, client, rooms_store, monkeypatch):
+        """One pawn left, two squares from home, and a 5: nothing can move."""
+        self.seat_two(rooms_store, started_secs_ago=2)
+        self.roll(rooms_store, dice=5, red_positions=[55, 58, 58, 58])
+        auth_as(monkeypatch, HOST_UID)
+
+        response = client.post("/api/v1/ludo/skip", json={"roomId": LUDO_ID})
+
+        assert response.status_code == 200, response.get_json()
+        assert rooms_store["ludo_rooms/%s" % LUDO_ID]["currentTurn"] == "green"
