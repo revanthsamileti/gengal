@@ -693,6 +693,10 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     instruction = !enoughToStart
       ? 'Waiting for players'
       : isHost ? 'Start when everyone is in' : `Waiting for ${hostName}`;
+  } else if (isOver) {
+    // `currentTurn` keeps its last value, so this said "Your turn" after the end.
+    eyebrow = 'Game over';
+    instruction = room.settlement?.reason === 'empty_table' ? 'Nobody came back' : 'Thanks for playing';
   } else if (paused) {
     eyebrow = 'Paused';
     instruction = canTakeSeat ? 'Take a free seat to play' : 'Waiting for a player';
@@ -1181,8 +1185,8 @@ const FILL = { position: 'absolute' as const, left: 0, right: 0, top: 0, bottom:
 
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: ludo.surface },
-  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  loadingText: { color: ludo.inkSoft, fontSize: 13, fontWeight: '700' },
+  center: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 28 },
+  loadingText: { color: ludo.inkSoft, fontSize: 13, fontWeight: '700', textAlign: 'center' },
   goneTitle: { color: ludo.ink, fontSize: 20, fontWeight: '800' },
   goneBtn: {
     marginTop: 8, paddingHorizontal: 22, paddingVertical: 12,

@@ -122,20 +122,22 @@ export function LudoTableCard({
   }, [fade]);
 
   const seated = room.players.length;
-  const open = seated < 4 && room.phase === 'waiting';
+  const perMinute = isPerMinute(room);
+  // Everyone left a per-minute game: its seats are free to take, as on the board.
+  const paused = perMinute && room.phase === 'playing' && !!room.emptySince;
+  const open = seated < 4 && (room.phase === 'waiting' || paused);
   const host = room.players.find((p) => p.uid === room.hostUid) ?? room.players[0];
   // Somebody who already holds a seat is going back to their game, not watching.
   const amSeated = room.players.some((p) => p.uid === auth.currentUser?.uid);
   const cta = amSeated ? 'Rejoin' : open ? 'Take a seat' : 'Watch';
   const watching = Math.max(0, (room.presentCount ?? seated) - seated);
-  const perMinute = isPerMinute(room);
   const paying = payingPlayers(room).length;
   // A newcomer sees what *they* would pay; everyone else what is being paid now.
   const rate = ludoRate(room.terms, amSeated || !open ? paying : paying + 1);
   const modeName = perMinute
     ? `${rate} coins/min`
     : room.gameMode === 'per_token' ? 'Roll & back' : 'Ticket table';
-  const playing = room.phase === 'playing';
+  const playing = room.phase === 'playing' && !paused;
 
   return (
     <Animated.View style={{ opacity: fade }}>
@@ -148,7 +150,7 @@ export function LudoTableCard({
         accessibilityState={{ busy }}
         accessibilityLabel={
           `${host?.nickname ?? 'Host'}'s table, ${perMinute ? `${rate} coins a minute` : modeName.toLowerCase()}, ` +
-          `${playing ? 'game in progress' : 'waiting to start'}, ${seated} of 4 seated. ${cta}.`
+          `${paused ? 'paused, seats free' : playing ? 'game in progress' : 'waiting to start'}, ${seated} of 4 seated. ${cta}.`
         }
         style={({ pressed }) => [cardStyles.card, pressed && cardStyles.pressed]}
       >
@@ -165,7 +167,7 @@ export function LudoTableCard({
           <View style={[cardStyles.status, playing && cardStyles.statusLive]}>
             {playing && <View style={cardStyles.liveDot} />}
             <Text style={[cardStyles.statusText, playing && cardStyles.statusTextLive]}>
-              {playing ? 'PLAYING' : 'OPEN'}
+              {paused ? 'PAUSED' : playing ? 'PLAYING' : 'OPEN'}
             </Text>
           </View>
         </View>
