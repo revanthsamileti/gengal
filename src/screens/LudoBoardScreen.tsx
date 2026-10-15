@@ -318,6 +318,29 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     }
   }, [room, busyToken, roomId, myUid, myName, myAvatarData]);
 
+  // When the roll leaves nothing to decide -- one pawn can move, or every pawn
+  // that can is sitting on the same square (a six with everyone still in the
+  // yard, most often) -- make the move instead of waiting on a tap. Each of
+  // those taps used to cost a turn's worth of thumb-hunting, and a missed one
+  // cost the whole turn.
+  const autoMoved = useRef<string | null>(null);
+  useEffect(() => {
+    if (!room || !isMyTurn || !room.diceRolled || rolling || busyToken || asSpectator) return;
+    if (legalMoveIds.length === 0) return;
+    const squares = new Set(
+      legalMoveIds.map((id) => room.tokens.find((t) => t.id === id)?.position)
+    );
+    if (squares.size !== 1) return;
+    const key = `${room.turnStartedAt?.toMillis?.() ?? ''}:${room.diceValue}`;
+    if (autoMoved.current === key) return;
+    // Long enough to see the die come down and which pawn it picked.
+    const t = setTimeout(() => {
+      autoMoved.current = key;
+      handleTokenPress(legalMoveIds[0]);
+    }, 650);
+    return () => clearTimeout(t);
+  }, [room, isMyTurn, rolling, busyToken, asSpectator, legalMoveIds, handleTokenPress]);
+
   const handleTakeSeat = useCallback((color: TokenColor) => runCoin(async () => {
     if (!room) return;
     const price = room.ticketPrice ?? DEFAULT_SEAT_PRICE;
