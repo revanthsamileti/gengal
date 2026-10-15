@@ -150,6 +150,10 @@ service cloud.firestore {
     }
 
     // Host may run the room but cannot rewrite pricing after create.
+    function isPerMinuteLudo() {
+      return resource.data.get('gameMode', '') == 'per_minute';
+    }
+
     function hostCanManageRoom() {
       return signedIn()
         && isRoomHost()
@@ -504,9 +508,21 @@ service cloud.firestore {
       // Seats (players) and bets/dice are server-only. Host runs startGame /
       // presence. Seated players may update board fields (tokens, turns) but
       // never rewrite the player list.
+      //
+      // A per-minute table is played entirely on the server: every move, every
+      // minute's charge, the host's limits and the money at the end. Its doc
+      // carries the terms the money is computed from (the deposit a refund
+      // pays back, the rates), so a client rewriting any of it could mint or
+      // dodge coins. Phones may only touch the presence fields they keep up.
       allow update: if signedIn() && (
         (
-          hostCanManageRoom()
+          isPerMinuteLudo()
+          && (isRoomHost() || request.auth.uid in resource.data.get('playerUids', []))
+          && changedKeys().hasOnly(['hostLastSeen', 'presentCount', 'roster'])
+        )
+        || (
+          !isPerMinuteLudo()
+          && hostCanManageRoom()
           && !changedKeys().hasAny(['players', 'audienceBets', 'playerUids'])
           && (
             !changedKeys().hasAny(['diceValue', 'diceRolled', 'consecutiveSixes'])
@@ -518,7 +534,8 @@ service cloud.firestore {
         )
         || (
           // Current seated player moves — must already be in playerUids.
-          'playerUids' in resource.data
+          !isPerMinuteLudo()
+          && 'playerUids' in resource.data
           && request.auth.uid in resource.data.playerUids
           && !changedKeys().hasAny([
             'players', 'audienceBets', 'playerUids', 'hostUid', 'createdAt',
@@ -527,7 +544,9 @@ service cloud.firestore {
           ])
         )
       );
-      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid;
+      // A per-minute table ends on the server, which pays out what it owes.
+      allow delete: if signedIn() && resource.data.hostUid == request.auth.uid
+        && !isPerMinuteLudo();
 
       match /events/{eventId} {
         allow read: if signedIn();
