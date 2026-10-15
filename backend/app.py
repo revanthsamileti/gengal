@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+import copy
 import json
 import os
 try:
@@ -1613,21 +1614,35 @@ def create_ludo_table_endpoint():
     game_mode = str(data.get('gameMode') or '').strip()
     nickname = str(data.get('nickname') or '').strip()[:40] or 'Host'
     avatar_data = data.get('avatarData')
-    if game_mode not in ('per_game', 'per_token'):
-        return jsonify({"error": "gameMode must be per_game or per_token"}), 400
+    if game_mode not in ('per_game', 'per_token', LUDO_PER_MINUTE):
+        return jsonify({"error": "gameMode must be per_minute, per_game or per_token"}), 400
 
     try:
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
         room_ref = db_client.collection('ludo_rooms').document()
+        # Older apps still open the original two table types; only the
+        # per-minute table takes a deposit and plays by the newer rules.
+        terms = ludo_terms(pricing_settings()) if game_mode == LUDO_PER_MINUTE else None
+        cost = terms['deposit'] if terms else LUDO_TABLE_COST
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
-            balance = get_coin_balance(user_ref.get(transaction=transaction))
-            if balance < LUDO_TABLE_COST:
+            now = time.time()
+            user_snap = user_ref.get(transaction=transaction)
+            if not user_snap.exists:
+                raise ValueError("User does not exist")
+            ledger = LudoLedger(transaction, db_client)
+            lock_writes = ludo_check_lock(
+                transaction, db_client, uid, user_snap.to_dict(), room_ref.id, now, ledger,
+            )
+            if ledger.balance(uid) < cost:
                 raise ValueError("Insufficient Gengal balance")
-            transaction.update(user_ref, {"coins": balance - LUDO_TABLE_COST})
+            ledger.add(uid, -cost)
+            ledger.write(extra={uid: {"activeLudoRoomId": room_ref.id}})
+            for ref, fields in lock_writes:
+                transaction.update(ref, fields)
             host_player = {
                 "uid": uid,
                 "nickname": nickname,
@@ -1637,12 +1652,27 @@ def create_ludo_table_endpoint():
                 "isOnline": True,
                 "score": 0,
             }
-            transaction.set(room_ref, {
+            per_minute_fields = {
+                "terms": terms,
+                "billedUntil": None,
+                "emptySince": None,
+                "hostAway": False,
+                "hostLeaves": 0,
+                "hostMissed": 0,
+                "hostBenched": False,
+                "departedUids": [],
+                "paidBy": {},
+                "hostEarned": 0,
+                "lastActive": {},
+                "settled": False,
+                "settlement": None,
+            } if terms else {}
+            transaction.set(room_ref, dict(per_minute_fields, **{
                 "hostUid": uid,
                 "phase": "waiting",
                 "status": "live",
                 "gameMode": game_mode,
-                "ticketPrice": LUDO_DEFAULT_TICKET_PRICE,
+                "ticketPrice": 0 if terms else LUDO_DEFAULT_TICKET_PRICE,
                 "audienceBets": {},
                 "players": [host_player],
                 "playerUids": [uid],
@@ -1660,16 +1690,18 @@ def create_ludo_table_endpoint():
                 "winnersOrder": [],
                 "spectatorCount": 0,
                 "createdAt": firestore.SERVER_TIMESTAMP,
-            })
-            return balance - LUDO_TABLE_COST
+            }))
+            return ledger.balance(uid)
 
         new_balance = apply(transaction)
         return jsonify({
             "ok": True,
             "roomId": room_ref.id,
             "newBalance": new_balance,
-            "tableCost": LUDO_TABLE_COST,
+            "tableCost": cost,
         }), 200
+    except LudoBusy as e:
+        return ludo_busy_response(e)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1716,6 +1748,10 @@ def buy_ludo_ticket_endpoint():
                 raise ValueError("Room has no host")
             if room.get('status') == 'closed':
                 raise ValueError("This table has closed.")
+            if ludo_is_per_minute(room):
+                return ludo_take_free_seat(
+                    transaction, db_client, room_ref, room, uid, color, nickname, avatar_data,
+                )
             if room.get('phase', 'waiting') != 'waiting':
                 raise ValueError("This game has already started.")
 
@@ -1738,7 +1774,9 @@ def buy_ludo_ticket_endpoint():
             pay_host = commission > 0 and host_uid != uid
 
             # All reads before writes.
-            user_balance = get_coin_balance(user_ref.get(transaction=transaction))
+            user_snap = user_ref.get(transaction=transaction)
+            ludo_check_lock(transaction, db_client, uid, user_snap.to_dict(), room_id, time.time())
+            user_balance = get_coin_balance(user_snap)
             host_balance = (
                 get_coin_balance(host_ref.get(transaction=transaction))
                 if pay_host else None
@@ -1748,7 +1786,7 @@ def buy_ludo_ticket_endpoint():
 
             user_new = user_balance - ticket_price
             host_new = None
-            transaction.update(user_ref, {"coins": user_new})
+            transaction.update(user_ref, {"coins": user_new, "activeLudoRoomId": room_id})
             if pay_host:
                 host_new = host_balance + commission
                 transaction.update(host_ref, {"coins": host_new})
@@ -1778,6 +1816,8 @@ def buy_ludo_ticket_endpoint():
             "commission": commission,
             "color": color,
         }), 200
+    except LudoBusy as e:
+        return ludo_busy_response(e)
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:
@@ -1807,6 +1847,8 @@ def ludo_leave_seat_endpoint():
             if not snap.exists:
                 raise ValueError("Unknown room")
             room = snap.to_dict() or {}
+            if ludo_is_per_minute(room):
+                return ludo_leave_per_minute(transaction, db_client, room_ref, room, uid)
             players = [p for p in (room.get('players') or []) if (p or {}).get('uid') != uid]
             if len(players) == len(room.get('players') or []):
                 return False
@@ -2005,6 +2047,929 @@ def ludo_legal_moves(tokens, color, dice):
     ]
 
 
+# ==========================================
+# LUDO: PER-MINUTE TABLES
+# ==========================================
+#
+# The table type the app now opens. Its rules, as the product owner set them:
+#
+# - Opening a table takes a deposit from the host (50). If the host sees the
+#   game through, the deposit is the app's. If the host breaks a limit -- comes
+#   back to the table more than 3 times, or lets more than 3 of their turns run
+#   out -- their turns are passed over for the rest of the game and the deposit
+#   is split among the players still seated at the end (3 left: 10 each, 2 left:
+#   15 each, 1 left: 25), the remainder to the app.
+# - Seats are free. Each player pays per minute at the start of the minute
+#   (3 players: 15, 2: 12, 1: 10). The host plays free and keeps 30% of it.
+#   A player who cannot pay for the next minute loses the seat.
+# - The winner gets a fixed bonus from the app.
+# - With no players left the board pauses; the host may go and fetch friends
+#   without it counting against them. Five minutes empty and the table ends.
+# - A host, or a player, cannot open or sit at another Ludo table until their
+#   game is over (for a player: or all their pawns are home).
+#
+# Every amount is an admin setting, copied onto the room as `terms` when the
+# table opens, so editing a setting never changes a game already being played.
+
+LUDO_PER_MINUTE = 'per_minute'
+# Squares where a pawn cannot be captured. Port of SAFE_CELLS in ludoService.ts.
+LUDO_SAFE_CELLS = frozenset({0, 8, 13, 21, 26, 34, 39, 47})
+LUDO_BILL_SECONDS = 60
+# A player counts as at the table if their heartbeat, or their last roll or
+# move, is this recent. Nobody pays for minutes their phone was closed.
+LUDO_PRESENT_SECONDS = 60
+# The host's heartbeat going quiet this long counts as leaving the table.
+LUDO_HOST_AWAY_SECONDS = 60
+# A table nobody has taken a turn on for this long holds nobody to it.
+LUDO_DEAD_TABLE_SECONDS = 10 * 60
+# Matches ROOM_STALE_MS on the client: a lobby hides a table whose host has not
+# heartbeated for this long, so it cannot hold anybody either.
+LUDO_ROOM_STALE_SECONDS = 90
+
+LUDO_SETTING_DEFAULTS = {
+    "ludoHostDeposit": 50,
+    "ludoRateOnePlayer": 10,
+    "ludoRateTwoPlayers": 12,
+    "ludoRateThreePlayers": 15,
+    "ludoHostSharePercent": 30,
+    "ludoForfeitOnePlayer": 25,
+    "ludoForfeitTwoPlayers": 15,
+    "ludoForfeitThreePlayers": 10,
+    "ludoWinnerPrize": 20,
+    "ludoHostMaxLeaves": 3,
+    "ludoHostMaxMissedTurns": 3,
+    "ludoEmptyCloseMinutes": 5,
+}
+
+LUDO_SETTING_BOUNDS = {
+    "ludoHostDeposit": (0, 10000),
+    "ludoRateOnePlayer": (0, 10000),
+    "ludoRateTwoPlayers": (0, 10000),
+    "ludoRateThreePlayers": (0, 10000),
+    "ludoHostSharePercent": (0, 100),
+    "ludoForfeitOnePlayer": (0, 10000),
+    "ludoForfeitTwoPlayers": (0, 10000),
+    "ludoForfeitThreePlayers": (0, 10000),
+    "ludoWinnerPrize": (0, 10000),
+    "ludoHostMaxLeaves": (0, 100),
+    "ludoHostMaxMissedTurns": (0, 100),
+    "ludoEmptyCloseMinutes": (1, 120),
+}
+
+# Fields the per-minute logic may change; written back in one update.
+LUDO_STATE_FIELDS = (
+    'players', 'playerUids', 'activeMemberCount', 'tokens', 'currentTurn',
+    'diceValue', 'diceRolled', 'consecutiveSixes', 'turnStartedAt', 'phase',
+    'status', 'finishRank', 'winnersOrder', 'billedUntil', 'emptySince',
+    'hostAway', 'hostLeaves', 'hostMissed', 'hostBenched', 'departedUids',
+    'paidBy', 'hostEarned', 'lastActive', 'settled', 'settlement',
+)
+
+
+class LudoBusy(Exception):
+    """The caller is already committed to another Ludo table."""
+
+    def __init__(self, room_id):
+        super().__init__("You're already in a Ludo game. Finish it before joining or opening another.")
+        self.room_id = room_id
+
+
+def ludo_terms(settings):
+    """The rules a new per-minute table is played under."""
+    def num(key):
+        return float(settings.get(key, LUDO_SETTING_DEFAULTS[key]))
+    return {
+        "deposit": num("ludoHostDeposit"),
+        "rates": {
+            "1": num("ludoRateOnePlayer"),
+            "2": num("ludoRateTwoPlayers"),
+            "3": num("ludoRateThreePlayers"),
+        },
+        "hostSharePercent": num("ludoHostSharePercent"),
+        "forfeitEach": {
+            "1": num("ludoForfeitOnePlayer"),
+            "2": num("ludoForfeitTwoPlayers"),
+            "3": num("ludoForfeitThreePlayers"),
+        },
+        "winnerPrize": num("ludoWinnerPrize"),
+        "hostMaxLeaves": int(num("ludoHostMaxLeaves")),
+        "hostMaxMissed": int(num("ludoHostMaxMissedTurns")),
+        "emptyCloseSecs": int(num("ludoEmptyCloseMinutes") * 60),
+    }
+
+
+def ludo_secs(value):
+    """Epoch seconds for a stored time, or None for anything else."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    if hasattr(value, 'timestamp'):
+        try:
+            return value.timestamp()
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return None
+
+
+def ludo_is_per_minute(room):
+    return (room or {}).get('gameMode') == LUDO_PER_MINUTE
+
+
+def ludo_paying(room):
+    """Seated players other than the host -- the ones who pay per minute."""
+    host = room.get('hostUid')
+    return [p for p in (room.get('players') or []) if (p or {}).get('uid') != host]
+
+
+def ludo_rate(terms, count):
+    if count <= 0:
+        return 0.0
+    return float((terms.get('rates') or {}).get(str(min(count, 3))) or 0)
+
+
+def ludo_color_done(tokens, color):
+    mine = [t for t in (tokens or []) if (t or {}).get('color') == color]
+    return bool(mine) and all(t.get('position') == LUDO_FINISHED_POSITION for t in mine)
+
+
+def ludo_room_holds(room, uid, now):
+    """True while `room` still commits `uid`: they may not open or sit elsewhere.
+
+    Judged from the room as it is now, rather than a flag that has to be
+    cleared, so a table that died without anyone closing it -- every phone
+    switched off -- lets its players go instead of locking them out for good.
+    """
+    if not room or room.get('status') != 'live' or room.get('settled'):
+        return False
+    phase = room.get('phase', 'waiting')
+    if phase == 'finished':
+        return False
+    is_host = room.get('hostUid') == uid
+    seated = uid in (room.get('playerUids') or [])
+    departed = uid in (room.get('departedUids') or [])
+    if not (is_host or seated or departed):
+        return False
+    if phase == 'waiting':
+        beat = ludo_secs(room.get('hostLastSeen'))
+        return beat is not None and now - beat <= LUDO_ROOM_STALE_SECONDS
+    turn = ludo_secs(room.get('turnStartedAt'))
+    if turn is not None and now - turn > LUDO_DEAD_TABLE_SECONDS:
+        return False
+    empty = ludo_secs(room.get('emptySince'))
+    close_after = int((room.get('terms') or {}).get('emptyCloseSecs') or 300)
+    if empty is not None and now - empty > close_after:
+        return False
+    if seated and not is_host:
+        me = next((p for p in room.get('players') or [] if (p or {}).get('uid') == uid), None)
+        if me and ludo_color_done(room.get('tokens'), me.get('color')):
+            return False
+    return True
+
+
+class LudoLedger:
+    """Coin changes for one transaction: every balance is read before any write."""
+
+    def __init__(self, transaction, db_client):
+        self._transaction = transaction
+        self._db = db_client
+        self._balances = {}
+        self._deltas = {}
+
+    def _ref(self, uid):
+        return self._db.collection('users').document(uid)
+
+    def balance(self, uid):
+        if uid not in self._balances:
+            self._balances[uid] = get_coin_balance(self._ref(uid).get(transaction=self._transaction))
+        return self._balances[uid] + self._deltas.get(uid, 0.0)
+
+    def add(self, uid, amount):
+        if not uid or not amount:
+            return
+        self.balance(uid)
+        self._deltas[uid] = round(self._deltas.get(uid, 0.0) + amount, 2)
+
+    def write(self, extra=None):
+        for uid, delta in self._deltas.items():
+            if delta:
+                fields = {"coins": round(self._balances[uid] + delta, 2)}
+                fields.update((extra or {}).get(uid) or {})
+                self._transaction.update(self._ref(uid), fields)
+        for uid, fields in (extra or {}).items():
+            if not self._deltas.get(uid):
+                self._transaction.update(self._ref(uid), fields)
+
+
+def ludo_check_lock(transaction, db_client, uid, user_data, this_room_id, now, ledger=None):
+    """Raise LudoBusy if `uid` is still committed to a different table.
+
+    A waiting per-minute table its own host abandoned is closed on the way
+    past, and the deposit refunded -- otherwise that host would have paid 50
+    for a table nobody could ever play at. Returns the writes that takes, for
+    the caller to make after its own reads.
+    """
+    other_id = (user_data or {}).get('activeLudoRoomId')
+    if not other_id or other_id == this_room_id:
+        return []
+    other_ref = db_client.collection('ludo_rooms').document(other_id)
+    other_snap = other_ref.get(transaction=transaction)
+    if not other_snap.exists:
+        return []
+    other = other_snap.to_dict() or {}
+    if ludo_room_holds(other, uid, now):
+        raise LudoBusy(other_id)
+    abandoned_deposit = (
+        ledger is not None and ludo_is_per_minute(other) and other.get('hostUid') == uid
+        and other.get('phase', 'waiting') == 'waiting' and other.get('status') == 'live'
+        and not other.get('settled')
+    )
+    if not abandoned_deposit:
+        return []
+    deposit = float((other.get('terms') or {}).get('deposit') or 0)
+    ledger.add(uid, deposit)
+    return [(other_ref, {
+        "status": "closed",
+        "phase": "finished",
+        "settled": True,
+        "settlement": {"refund": {uid: deposit}, "reason": "closed_before_start"},
+    })]
+
+
+def ludo_next_color(room, current, players, tokens, gone=()):
+    """Next colour to play, passing over finished colours, a benched host and `gone`."""
+    host = room.get('hostUid')
+    benched = room.get('hostBenched')
+    order = [(p or {}).get('color') for p in players]
+    live = [
+        (p or {}).get('color') for p in players
+        if not ludo_color_done(tokens, (p or {}).get('color'))
+        and not (benched and (p or {}).get('uid') == host)
+        and (p or {}).get('color') not in gone
+    ]
+    if not live:
+        return current
+    if current in order:
+        start = order.index(current)
+        for step in range(1, len(order) + 1):
+            colour = order[(start + step) % len(order)]
+            if colour in live:
+                return colour
+    return live[0]
+
+
+def ludo_new_turn(room, colour, now_dt):
+    room.update({
+        "currentTurn": colour,
+        "diceValue": None,
+        "diceRolled": False,
+        "consecutiveSixes": 0,
+        "turnStartedAt": now_dt,
+    })
+
+
+def ludo_settle(room, ledger, reason):
+    """Pay out a per-minute game once: forfeited deposit, then the winner's bonus."""
+    if room.get('settled'):
+        return
+    terms = room.get('terms') or {}
+    deposit = float(terms.get('deposit') or 0)
+    paying = [p.get('uid') for p in ludo_paying(room) if p.get('uid')]
+    to_players = {}
+    if room.get('hostBenched') and paying:
+        count = len(paying)
+        each = float((terms.get('forfeitEach') or {}).get(str(min(count, 3))) or 0)
+        # A setting edited past the deposit must not mint coins.
+        # Rounded down: rounding up paid out 50.01 from a deposit of 50.
+        each = math.floor(min(each, deposit / count) * 100) / 100
+        for uid in paying:
+            to_players[uid] = each
+            ledger.add(uid, each)
+    prize = None
+    winners = list(room.get('winnersOrder') or [])
+    amount = float(terms.get('winnerPrize') or 0)
+    if winners and amount > 0:
+        prize = {"uid": winners[0], "amount": amount}
+        ledger.add(winners[0], amount)
+    room['settled'] = True
+    room['settlement'] = {
+        "reason": reason,
+        "deposit": deposit,
+        "depositToPlayers": to_players,
+        "depositToApp": round(deposit - sum(to_players.values()), 2),
+        "prize": prize,
+    }
+
+
+def ludo_finish(room, ledger, reason, now_dt):
+    room['phase'] = 'finished'
+    room['diceRolled'] = False
+    room['diceValue'] = None
+    ludo_settle(room, ledger, reason)
+
+
+def ludo_update_empty(room, now_dt):
+    """Pause the board when the last player goes; resume when one sits down."""
+    if room.get('phase') != 'playing':
+        return
+    if not ludo_paying(room):
+        if not room.get('emptySince'):
+            room['emptySince'] = now_dt
+    elif room.get('emptySince'):
+        room['emptySince'] = None
+        room['billedUntil'] = None
+        room['turnStartedAt'] = now_dt
+
+
+def ludo_maybe_finish(room, ledger, now_dt):
+    """End the game once at most one colour is still racing."""
+    if room.get('phase') != 'playing' or not ludo_paying(room):
+        return
+    players = room.get('players') or []
+    racing = [p for p in players if not ludo_color_done(room.get('tokens'), (p or {}).get('color'))]
+    if len(racing) <= 1 and room.get('winnersOrder'):
+        ludo_finish(room, ledger, 'game_over', now_dt)
+
+
+def ludo_remove_player(room, uid, now_dt):
+    """Take a player out of a game in progress. They stay committed to it."""
+    players = list(room.get('players') or [])
+    me = next((p for p in players if (p or {}).get('uid') == uid), None)
+    if not me:
+        return
+    colour = me.get('color')
+    remaining = [p for p in players if p is not me]
+    room['players'] = remaining
+    room['playerUids'] = [p.get('uid') for p in remaining if p.get('uid')]
+    room['activeMemberCount'] = len(remaining)
+    if room.get('phase') == 'playing':
+        departed = list(room.get('departedUids') or [])
+        if uid not in departed:
+            departed.append(uid)
+        room['departedUids'] = departed
+        # Their pawns leave the board rather than sit in everybody's way.
+        room['tokens'] = [
+            dict(t, position=LUDO_BASE_POSITION) if (t or {}).get('color') == colour else t
+            for t in room.get('tokens') or []
+        ]
+        if room.get('currentTurn') == colour:
+            nxt = ludo_next_color(room, colour, players, room['tokens'], gone=(colour,))
+            ludo_new_turn(room, nxt, now_dt)
+
+
+def ludo_host_left(room, now_dt):
+    """Count one departure of the host from a game in progress."""
+    if room.get('hostAway'):
+        return
+    room['hostAway'] = True
+    # Leaving an empty, paused table to fetch friends is free.
+    if room.get('phase') != 'playing' or room.get('emptySince') or room.get('settled'):
+        return
+    room['hostLeaves'] = int(room.get('hostLeaves') or 0) + 1
+    limit = int((room.get('terms') or {}).get('hostMaxLeaves') or 0)
+    if room['hostLeaves'] > limit:
+        ludo_bench_host(room, now_dt)
+
+
+def ludo_bench_host(room, now_dt):
+    if room.get('hostBenched'):
+        return
+    room['hostBenched'] = True
+    host = room.get('hostUid')
+    me = next((p for p in room.get('players') or [] if (p or {}).get('uid') == host), None)
+    if me and room.get('currentTurn') == me.get('color'):
+        nxt = ludo_next_color(room, me.get('color'), room.get('players') or [], room.get('tokens'))
+        ludo_new_turn(room, nxt, now_dt)
+
+
+def ludo_mark_active(room, uid, now):
+    active = dict(room.get('lastActive') or {})
+    active[uid] = now
+    room['lastActive'] = active
+
+
+def ludo_bill(transaction, db_client, room_ref, room, ledger, now, now_dt):
+    """Charge the minute that has come due, if one has. Mutates `room`."""
+    if (room.get('phase') != 'playing' or room.get('settled') or room.get('emptySince')
+            or not ludo_is_per_minute(room)):
+        return
+    due = ludo_secs(room.get('billedUntil'))
+    if due is not None and now < due:
+        return
+    terms = room.get('terms') or {}
+    paying = ludo_paying(room)
+    rate = ludo_rate(terms, len(paying))
+    share_pct = 0.0 if room.get('hostBenched') else float(terms.get('hostSharePercent') or 0)
+    host = room.get('hostUid')
+    last_active = room.get('lastActive') or {}
+    paid_by = dict(room.get('paidBy') or {})
+    host_earned = float(room.get('hostEarned') or 0)
+    broke = []
+    for player in paying:
+        uid = player.get('uid')
+        seen = ludo_secs(last_active.get(uid))
+        member = room_ref.collection('members').document(uid).get(transaction=transaction)
+        if member.exists:
+            beat = ludo_secs((member.to_dict() or {}).get('lastSeen'))
+            if beat is not None and (seen is None or beat > seen):
+                seen = beat
+        if seen is None or now - seen > LUDO_PRESENT_SECONDS:
+            continue
+        if ledger.balance(uid) < rate:
+            broke.append(uid)
+            continue
+        ledger.add(uid, -rate)
+        paid_by[uid] = round(float(paid_by.get(uid) or 0) + rate, 2)
+        cut = round(rate * share_pct / 100.0, 2)
+        if cut and host:
+            ledger.add(host, cut)
+            host_earned = round(host_earned + cut, 2)
+    room['paidBy'] = paid_by
+    room['hostEarned'] = host_earned
+    # A gap with nobody asking (every phone asleep) is not billed in arrears.
+    start = due if due is not None and now - due < LUDO_BILL_SECONDS else now
+    room['billedUntil'] = datetime.fromtimestamp(start + LUDO_BILL_SECONDS, timezone.utc)
+    for uid in broke:
+        ludo_remove_player(room, uid, now_dt)
+    ludo_update_empty(room, now_dt)
+    ludo_maybe_finish(room, ledger, now_dt)
+
+
+def ludo_housekeeping(transaction, db_client, room_ref, room, ledger, now, now_dt):
+    """Everything time alone moves on: host gone quiet, empty table closing, the minute bill."""
+    if not ludo_is_per_minute(room) or room.get('settled'):
+        return
+    if room.get('phase') == 'playing':
+        beat = ludo_secs(room.get('hostLastSeen'))
+        if beat is not None and now - beat > LUDO_HOST_AWAY_SECONDS:
+            ludo_host_left(room, now_dt)
+        empty = ludo_secs(room.get('emptySince'))
+        close_after = int((room.get('terms') or {}).get('emptyCloseSecs') or 300)
+        if empty is not None and now - empty > close_after:
+            ludo_finish(room, ledger, 'empty_table', now_dt)
+            room['status'] = 'closed'
+            return
+    ludo_bill(transaction, db_client, room_ref, room, ledger, now, now_dt)
+
+
+def ludo_write_state(transaction, room_ref, before, room):
+    changed = {k: room[k] for k in LUDO_STATE_FIELDS if k in room and room.get(k) != before.get(k)}
+    if changed:
+        transaction.update(room_ref, changed)
+
+
+def ludo_busy_response(e):
+    return jsonify({"error": str(e), "code": "ludo_busy", "roomId": e.room_id}), 409
+
+
+@app.route('/api/v1/ludo/tick', methods=['POST', 'OPTIONS'])
+def ludo_tick_endpoint():
+    """Keep a per-minute table's clock honest.
+
+    Every phone at the table calls this about every quarter of a minute (and
+    the host once more, with `here: false`, on stepping away). Whichever call
+    lands first does the work; the rest find nothing due. Nothing here trusts
+    the caller beyond whether *they* are at the table.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    room_id = str(data.get('roomId') or '').strip()
+    here = data.get('here', True) is not False
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = room_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("Unknown room")
+            before = snap.to_dict() or {}
+            if not ludo_is_per_minute(before):
+                return before
+            room = copy.deepcopy(before)
+            now = time.time()
+            now_dt = datetime.fromtimestamp(now, timezone.utc)
+            ledger = LudoLedger(transaction, db_client)
+            if room.get('hostUid') == uid and room.get('phase') == 'playing':
+                if here:
+                    room['hostAway'] = False
+                else:
+                    ludo_host_left(room, now_dt)
+            elif here and uid in (room.get('playerUids') or []):
+                ludo_mark_active(room, uid, now_dt)
+            ludo_housekeeping(transaction, db_client, room_ref, room, ledger, now, now_dt)
+            ledger.write()
+            ludo_write_state(transaction, room_ref, before, room)
+            return room
+
+        room = apply(transaction)
+        return jsonify({
+            "ok": True,
+            "phase": room.get('phase'),
+            "billedUntil": ludo_secs(room.get('billedUntil')),
+            "hostBenched": bool(room.get('hostBenched')),
+        }), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Tick error: {e}")
+        return jsonify({"error": "Could not update the table"}), 500
+
+
+def ludo_live_colours(room):
+    host = room.get('hostUid')
+    return [
+        (p or {}).get('color') for p in room.get('players') or []
+        if not ludo_color_done(room.get('tokens'), (p or {}).get('color'))
+        and not (room.get('hostBenched') and (p or {}).get('uid') == host)
+    ]
+
+
+def ludo_take_free_seat(transaction, db_client, room_ref, room, uid, color, nickname, avatar_data):
+    """Seat somebody at a per-minute table. Returns the buy-ticket result tuple.
+
+    Free to sit; the first minute is what it costs, so the player must be able
+    to cover it. Before the game anyone may sit. Once it is under way a seat
+    can only be taken while the table is paused for want of players -- the
+    host's friends arriving -- so nobody's rate changes in the middle of play.
+    """
+    phase = room.get('phase', 'waiting')
+    paused = phase == 'playing' and bool(room.get('emptySince')) and not room.get('settled')
+    if phase != 'waiting' and not paused:
+        raise ValueError("This game has already started.")
+    players = list(room.get('players') or [])
+    if uid == room.get('hostUid') or any((p or {}).get('uid') == uid for p in players):
+        raise ValueError("Already seated")
+    if len(players) >= len(LUDO_SEAT_COLORS):
+        raise ValueError("The table is full.")
+    if any((p or {}).get('color') == color for p in players):
+        raise ValueError("Color already taken")
+
+    now = time.time()
+    now_dt = datetime.fromtimestamp(now, timezone.utc)
+    user_ref = db_client.collection('users').document(uid)
+    user_snap = user_ref.get(transaction=transaction)
+    if not user_snap.exists:
+        raise ValueError("User does not exist")
+    ledger = LudoLedger(transaction, db_client)
+    lock_writes = ludo_check_lock(
+        transaction, db_client, uid, user_snap.to_dict(), room_ref.id, now, ledger,
+    )
+    terms = room.get('terms') or {}
+    rate = ludo_rate(terms, len(ludo_paying(room)) + 1)
+    if ledger.balance(uid) < rate:
+        raise ValueError("You need at least %g coins to play a minute." % rate)
+
+    seated = copy.deepcopy(room)
+    seated['players'] = players + [{
+        "uid": uid,
+        "nickname": nickname,
+        "avatarData": avatar_data if isinstance(avatar_data, dict) else None,
+        "color": color,
+        "isHost": False,
+        "isOnline": True,
+        "score": 0,
+    }]
+    seated['playerUids'] = [p.get('uid') for p in seated['players'] if p.get('uid')]
+    seated['activeMemberCount'] = len(seated['players'])
+    if paused:
+        # A colour taken mid-game starts from its yard, whoever had it before.
+        seated['tokens'] = [
+            dict(t, position=LUDO_BASE_POSITION) if (t or {}).get('color') == color else t
+            for t in seated.get('tokens') or []
+        ]
+        ludo_mark_active(seated, uid, now_dt)
+        ludo_update_empty(seated, now_dt)
+        if seated.get('currentTurn') not in ludo_live_colours(seated):
+            ludo_new_turn(seated, ludo_next_color(
+                seated, seated.get('currentTurn'), seated['players'], seated.get('tokens'),
+            ), now_dt)
+        ludo_bill(transaction, db_client, room_ref, seated, ledger, now, now_dt)
+
+    ledger.write(extra={uid: {"activeLudoRoomId": room_ref.id}})
+    for ref, fields in lock_writes:
+        transaction.update(ref, fields)
+    ludo_write_state(transaction, room_ref, room, seated)
+    return ledger.balance(uid), None, 0, 0
+
+
+def ludo_leave_per_minute(transaction, db_client, room_ref, room, uid):
+    """Somebody leaving a per-minute table. Returns whether a seat changed.
+
+    The host walking away from a game in progress is not leaving: the game
+    goes on and the departure is counted against their three. Before the game
+    starts the host leaving closes the table and returns the deposit.
+    """
+    now = time.time()
+    now_dt = datetime.fromtimestamp(now, timezone.utc)
+    ledger = LudoLedger(transaction, db_client)
+    after = copy.deepcopy(room)
+    phase = room.get('phase', 'waiting')
+    changed = False
+    if uid == room.get('hostUid'):
+        if phase == 'waiting' and not room.get('settled') and room.get('status') == 'live':
+            deposit = float((room.get('terms') or {}).get('deposit') or 0)
+            ledger.add(uid, deposit)
+            after.update({
+                "status": "closed",
+                "phase": "finished",
+                "settled": True,
+                "settlement": {"refund": {uid: deposit}, "reason": "closed_before_start"},
+            })
+            changed = True
+        elif phase == 'playing':
+            ludo_host_left(after, now_dt)
+    elif uid in (room.get('playerUids') or []):
+        ludo_remove_player(after, uid, now_dt)
+        ludo_update_empty(after, now_dt)
+        ludo_maybe_finish(after, ledger, now_dt)
+        changed = True
+    ledger.write()
+    ludo_write_state(transaction, room_ref, room, after)
+    return changed
+
+
+def ludo_skip_per_minute(transaction, db_client, room_ref, room, dead_roll):
+    """Retire the current turn of a per-minute game. Returns the next colour.
+
+    A benched host's turn passes at once. A host's turn that simply ran out
+    counts against their three missed turns.
+    """
+    if room.get('emptySince'):
+        raise LookupError("The table is paused until a player sits down")
+    now = time.time()
+    now_dt = datetime.fromtimestamp(now, timezone.utc)
+    host = room.get('hostUid')
+    host_colour = next(
+        ((p or {}).get('color') for p in room.get('players') or [] if (p or {}).get('uid') == host),
+        None,
+    )
+    current = room.get('currentTurn')
+    benched_turn = bool(room.get('hostBenched')) and current == host_colour
+    timed_out = not dead_roll and not benched_turn
+    if timed_out:
+        started = ludo_secs(room.get('turnStartedAt'))
+        if started is None:
+            raise ValueError("Turn has no start time")
+        timeout_secs = int(room.get('turnTimeoutSecs') or 15)
+        if now < started + timeout_secs + LUDO_SKIP_GRACE_SECONDS:
+            raise LookupError("Turn is still live")
+
+    after = copy.deepcopy(room)
+    if timed_out and host_colour and current == host_colour:
+        after['hostMissed'] = int(room.get('hostMissed') or 0) + 1
+        limit = int((room.get('terms') or {}).get('hostMaxMissed') or 0)
+        if after['hostMissed'] > limit:
+            # Benching passes the turn on by itself.
+            ludo_bench_host(after, now_dt)
+    if after.get('currentTurn') == current:
+        nxt = ludo_next_color(after, current, after.get('players') or [], after.get('tokens'))
+        ludo_new_turn(after, nxt, now_dt)
+    ledger = LudoLedger(transaction, db_client)
+    ludo_housekeeping(transaction, db_client, room_ref, after, ledger, now, now_dt)
+    ledger.write()
+    ludo_write_state(transaction, room_ref, room, after)
+    return after.get('currentTurn')
+
+
+def ludo_apply_move(tokens, token_id, dice):
+    """Port of applyMove. Returns (tokens, captured_id, finished, from, to) or None."""
+    tokens = [dict(t or {}) for t in (tokens or [])]
+    index = next((i for i, t in enumerate(tokens) if t.get('id') == token_id), None)
+    if index is None:
+        return None
+    token = tokens[index]
+    from_pos = token.get('position')
+    new_pos = ludo_new_position(token, dice)
+    if new_pos is None:
+        return None
+    token['position'] = new_pos
+
+    captured = None
+    on_main_track = 0 <= new_pos < LUDO_HOME_COLUMN_START
+    if on_main_track and new_pos not in LUDO_SAFE_CELLS:
+        for other in tokens:
+            if (other.get('id') != token_id and other.get('color') != token.get('color')
+                    and other.get('position') == new_pos):
+                captured = other.get('id')
+                other['position'] = LUDO_BASE_POSITION
+                break
+    return tokens, captured, new_pos == LUDO_FINISHED_POSITION, from_pos, new_pos
+
+
+def ludo_opening_color(players):
+    """Red opens, as it always has -- or the first seat if red has left."""
+    colors = [(p or {}).get('color') for p in players]
+    return 'red' if 'red' in colors else (colors[0] if colors else 'red')
+
+
+@app.route('/api/v1/ludo/start', methods=['POST', 'OPTIONS'])
+def ludo_start_endpoint():
+    """Deal a fresh board and open play. Host only.
+
+    A direct write before, which let the host start a game with the pieces
+    anywhere it liked. On a per-minute table the first minute is charged here,
+    in the same write that opens play.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    room_id = str((request.json or {}).get('roomId') or '').strip()
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = room_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("Unknown room")
+            room = snap.to_dict() or {}
+            if room.get('hostUid') != uid:
+                raise PermissionError("Only the host can start the game")
+            if room.get('status') == 'closed':
+                raise ValueError("This table has closed.")
+            if room.get('phase', 'waiting') != 'waiting':
+                raise ValueError("This game has already started.")
+            players = list(room.get('players') or [])
+            if len(players) < 2:
+                raise ValueError("At least one more player needs to take a seat.")
+            now = time.time()
+            now_dt = datetime.fromtimestamp(now, timezone.utc)
+            after = copy.deepcopy(room)
+            after.update({
+                "phase": "playing",
+                "currentTurn": ludo_opening_color(players),
+                "diceValue": None,
+                "diceRolled": False,
+                "consecutiveSixes": 0,
+                "turnStartedAt": now_dt,
+                "tokens": build_initial_ludo_tokens(),
+                "players": [dict(p or {}, score=0) for p in players],
+                "finishRank": 1,
+                "winnersOrder": [],
+            })
+            ledger = LudoLedger(transaction, db_client)
+            if ludo_is_per_minute(room):
+                after['billedUntil'] = None
+                ludo_bill(transaction, db_client, room_ref, after, ledger, now, now_dt)
+            ledger.write()
+            ludo_write_state(transaction, room_ref, room, after)
+            return after.get('currentTurn'), after.get('phase')
+
+        first, phase = apply(transaction)
+        return jsonify({"ok": True, "currentTurn": first, "phase": phase}), 200
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Start error: {e}")
+        return jsonify({"error": "Could not start the game"}), 500
+
+
+@app.route('/api/v1/ludo/move', methods=['POST', 'OPTIONS'])
+def ludo_move_endpoint():
+    """Move one of the caller's pieces by the die the server rolled.
+
+    Moves used to be computed on the phone and written straight to the room.
+    Now the server checks it is the caller's turn, the die is rolled, the piece
+    is theirs and the move is legal, then applies it with captures, scoring,
+    finishing order and the next turn in one transaction -- and on a
+    per-minute table, settles the game the moment it ends.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+
+    data = request.json or {}
+    room_id = str(data.get('roomId') or '').strip()
+    token_id = str(data.get('tokenId') or '').strip()
+    if not room_id or not token_id:
+        return jsonify({"error": "Missing roomId or tokenId"}), 400
+
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = room_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("Unknown room")
+            room = snap.to_dict() or {}
+            if room.get('phase') != 'playing':
+                raise ValueError("Game is not in play")
+            per_minute = ludo_is_per_minute(room)
+            if per_minute and room.get('emptySince'):
+                raise ValueError("The table is paused until a player sits down.")
+
+            players = list(room.get('players') or [])
+            me = next((p for p in players if (p or {}).get('uid') == uid), None)
+            if not me:
+                raise PermissionError("Not a seated player")
+            color = me.get('color')
+            if color != room.get('currentTurn'):
+                raise ValueError("Not your turn")
+            dice = room.get('diceValue')
+            if not room.get('diceRolled') or not isinstance(dice, int):
+                raise ValueError("Roll the dice first")
+
+            tokens = list(room.get('tokens') or [])
+            token = next((t for t in tokens if (t or {}).get('id') == token_id), None)
+            if not token or token.get('color') != color:
+                raise ValueError("That is not your piece")
+            moved = ludo_apply_move(tokens, token_id, dice)
+            if moved is None:
+                raise ValueError("That piece cannot move that far")
+            new_tokens, captured, finished, from_pos, to_pos = moved
+
+            home = sum(
+                1 for t in new_tokens
+                if t.get('color') == color and t.get('position') == LUDO_FINISHED_POSITION
+            )
+            new_players = [
+                dict(p, score=home) if (p or {}).get('color') == color else p
+                for p in players
+            ]
+            color_done = home == len([t for t in new_tokens if t.get('color') == color])
+
+            winners = list(room.get('winnersOrder') or [])
+            finish_rank = int(room.get('finishRank') or 1)
+            phase = 'playing'
+            if color_done and uid not in winners:
+                winners.append(uid)
+                finish_rank += 1
+                if not per_minute and len(winners) >= len(players) - 1:
+                    phase = 'finished'
+
+            now = time.time()
+            now_dt = datetime.fromtimestamp(now, timezone.utc)
+            after = copy.deepcopy(room)
+            after.update({
+                "tokens": new_tokens,
+                "players": new_players,
+                "phase": phase,
+                "finishRank": finish_rank,
+                "winnersOrder": winners,
+            })
+            # A six, a capture or a piece reaching home earns another roll.
+            reroll = dice == 6 or captured is not None or finished
+            if reroll and not color_done:
+                next_color = color
+            elif per_minute:
+                next_color = ludo_next_color(after, color, new_players, new_tokens)
+            else:
+                next_color = ludo_next_turn(color, new_players, new_tokens)
+            ludo_new_turn(after, next_color, now_dt if per_minute else firestore.SERVER_TIMESTAMP)
+            after['consecutiveSixes'] = int(room.get('consecutiveSixes') or 0) if reroll else 0
+
+            ledger = LudoLedger(transaction, db_client)
+            if per_minute:
+                ludo_mark_active(after, uid, now_dt)
+                ludo_maybe_finish(after, ledger, now_dt)
+                ludo_housekeeping(transaction, db_client, room_ref, after, ledger, now, now_dt)
+            ledger.write()
+            ludo_write_state(transaction, room_ref, room, after)
+            return {
+                "fromPos": from_pos,
+                "toPos": to_pos,
+                "diceValue": dice,
+                "captured": captured,
+                "finished": finished,
+                "colorDone": color_done,
+                "currentTurn": after.get('currentTurn'),
+                "phase": after.get('phase'),
+                "settlement": after.get('settlement'),
+            }
+
+        result = apply(transaction)
+        return jsonify(dict(result, ok=True)), 200
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Move error: {e}")
+        return jsonify({"error": "That move did not go through"}), 500
+
+
 @app.route('/api/v1/ludo/skip', methods=['POST', 'OPTIONS'])
 def ludo_skip_endpoint():
     """Advance a turn whose clock has run out.
@@ -2057,6 +3022,11 @@ def ludo_skip_endpoint():
                 bool(room.get('diceRolled')) and isinstance(dice, int)
                 and not ludo_legal_moves(room.get('tokens') or [], room.get('currentTurn'), dice)
             )
+
+            if ludo_is_per_minute(room):
+                return ludo_skip_per_minute(
+                    transaction, db_client, room_ref, room, dead_roll,
+                )
 
             started_at = room.get('turnStartedAt')
             if not dead_roll:
@@ -2128,6 +3098,11 @@ def ludo_roll_endpoint():
                 raise ValueError("Not a seated player")
             if me.get('color') != room.get('currentTurn'):
                 raise ValueError("Not your turn")
+            per_minute = ludo_is_per_minute(room)
+            if per_minute and room.get('emptySince'):
+                raise ValueError("The table is paused until a player sits down.")
+            if per_minute and room.get('hostBenched') and uid == room.get('hostUid'):
+                raise ValueError("Your turns are being skipped for the rest of this game.")
 
             host_uid = room.get('hostUid')
             game_mode = room.get('gameMode')
@@ -2160,10 +3135,17 @@ def ludo_roll_endpoint():
                 "diceRolled": True,
                 "consecutiveSixes": new_consec,
             }
+            if per_minute:
+                active = dict(room.get('lastActive') or {})
+                active[uid] = datetime.now(timezone.utc)
+                updates["lastActive"] = active
             forfeited = False
             if new_consec >= 3:
                 updates.update({
-                    "currentTurn": next_ludo_color(room.get('currentTurn'), players),
+                    "currentTurn": (
+                        ludo_next_color(room, room.get('currentTurn'), players, room.get('tokens'))
+                        if per_minute else next_ludo_color(room.get('currentTurn'), players)
+                    ),
                     "diceValue": None,
                     "diceRolled": False,
                     "consecutiveSixes": 0,
@@ -2830,6 +3812,9 @@ SETTINGS_BOUNDS = {
     "minWithdrawalHearts": (1, 100000),
 }
 
+DEFAULT_SETTINGS.update(LUDO_SETTING_DEFAULTS)
+SETTINGS_BOUNDS.update(LUDO_SETTING_BOUNDS)
+
 @app.route('/api/v1/admin/is-admin', methods=['GET'])
 def is_admin_check():
     uid, error_response = require_bearer_uid()
@@ -2856,7 +3841,7 @@ def admin_settings():
         if not snap.exists:
             settings_ref.set(DEFAULT_SETTINGS)
             return jsonify({"ok": True, "settings": DEFAULT_SETTINGS}), 200
-        return jsonify({"ok": True, "settings": serialize_doc(snap.to_dict())}), 200
+        return jsonify({"ok": True, "settings": serialize_doc(dict(DEFAULT_SETTINGS, **(snap.to_dict() or {})))}), 200
 
     data = request.json or {}
     updates = {}
