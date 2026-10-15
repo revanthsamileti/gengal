@@ -19,7 +19,7 @@ import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
 import RosterStrip from '../components/rooms/RosterStrip';
 import {
-  LUDO_TABLE_COST, LudoMode, LudoModeSheet, LudoTableCard, Pawn, SEAT_ORDER, sheetStyles,
+  explainLudoBusy, LudoOpenSheet, LudoTableCard, Pawn, SEAT_ORDER, sheetStyles, useLudoTerms,
 } from '../components/ludo/LudoLobby';
 import { skeuo } from '../theme/skeuomorphic';
 import { numeric } from '../theme/ludoTheme';
@@ -331,6 +331,7 @@ export default function ChillScreen({ navigate }: Props) {
   const myAvatarData = profile?.avatarData;
 
   const [activeGame, setActiveGame] = useState<ActiveGame>('ludo');
+  const ludoTerms = useLudoTerms();
   const [langFilter, setLangFilter] = useState<string | null>(null);
   /** Bumped by "Try again" to tear down and reopen both lobby listeners. */
   const [retry, setRetry] = useState(0);
@@ -347,7 +348,8 @@ export default function ChillScreen({ navigate }: Props) {
   // Same filter as the charades list and LudoScreen. Without it this lobby
   // listed a table whose host had left nine hours earlier as "1 live", and
   // everyone who joined waited for a game nobody could start.
-  const ludoRooms = useLiveRooms(allLudoRooms);
+  // A finished game has nothing left to join.
+  const ludoRooms = useLiveRooms(allLudoRooms).filter((r) => r.phase !== 'finished');
 
   // "No rooms yet", "we haven't heard back yet" and "the request failed" all
   // look like an empty list, so each lobby tracks which one it is.
@@ -410,11 +412,11 @@ export default function ChillScreen({ navigate }: Props) {
 
   // ── Ludo actions
   const openLudoSheet = useCallback(() => {
-    // Say so before the sheet, not after the player has picked a mode.
-    if ((profile?.coins ?? 0) < LUDO_TABLE_COST) {
+    // Say so before the sheet, not after the player has read the rules.
+    if ((profile?.coins ?? 0) < ludoTerms.deposit) {
       Alert.alert(
         'Not enough coins',
-        `Opening a table costs ${LUDO_TABLE_COST} coins. Top up in the store, or join a table that is already open.`,
+        `Opening a table takes a ${ludoTerms.deposit}-coin deposit. Top up in the store, or join a table that is already open.`,
         [
           { text: 'Not now', style: 'cancel' },
           { text: 'Get coins', onPress: () => navigate('Coins') },
@@ -423,15 +425,16 @@ export default function ChillScreen({ navigate }: Props) {
       return;
     }
     setLudoSheet(true);
-  }, [profile, navigate]);
+  }, [profile, navigate, ludoTerms.deposit]);
 
-  const handleCreateLudo = useCallback(async (mode: LudoMode) => {
+  const handleCreateLudo = useCallback(async () => {
     setLudoSheet(false);
     setCreatingLudo(true);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, 'per_minute');
       navigate('LudoBoard', { roomId });
     } catch (e: any) {
+      if (explainLudoBusy(e, navigate)) return;
       Alert.alert('Could not open a table', e?.message || 'Check your connection and try again.');
     } finally {
       setCreatingLudo(false);
@@ -466,12 +469,12 @@ export default function ChillScreen({ navigate }: Props) {
 
   const ludoCta = (
     <PrimaryButton
-      label={`Open a table · ${LUDO_TABLE_COST}`}
+      label={`Open a table · ${ludoTerms.deposit}`}
       icon="add"
       color={GAME.ludo.ink}
       busy={creatingLudo}
       onPress={openLudoSheet}
-      accessibilityLabel={`Open a Ludo table, costs ${LUDO_TABLE_COST} coins`}
+      accessibilityLabel={`Open a Ludo table, ${ludoTerms.deposit} coin deposit`}
     />
   );
   const charadesCta = (
@@ -524,7 +527,7 @@ export default function ChillScreen({ navigate }: Props) {
               <Text style={styles.sectionSub}>
                 {isCharades
                   ? 'Act out a movie, guess the rest. Win coins.'
-                  : 'Up to 4 players, with voice on.'}
+                  : `Free seats. Players pay ${ludoTerms.rates['3']}-${ludoTerms.rates['1']} coins a minute.`}
               </Text>
             </View>
             {isCharades ? charadesCta : ludoCta}
@@ -626,7 +629,12 @@ export default function ChillScreen({ navigate }: Props) {
           )}
         </ScrollView>
 
-        <LudoModeSheet visible={ludoSheet} onClose={() => setLudoSheet(false)} onPick={handleCreateLudo} />
+        <LudoOpenSheet
+          visible={ludoSheet}
+          terms={ludoTerms}
+          onClose={() => setLudoSheet(false)}
+          onConfirm={handleCreateLudo}
+        />
         <CharadesSheet
           visible={charadesSheet}
           initialLanguage={langFilter}

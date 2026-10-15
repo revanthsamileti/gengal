@@ -18,7 +18,7 @@ import TopBar from '../components/TopBar';
 import { useUser } from '../context/UserContext';
 import { auth } from '../config/firebase';
 import {
-  LUDO_TABLE_COST, LudoModeSheet, LudoTableCard, Pawn, SEAT_ORDER,
+  explainLudoBusy, LudoOpenSheet, LudoTableCard, Pawn, SEAT_ORDER, useLudoTerms,
 } from '../components/ludo/LudoLobby';
 import {
   createLudoRoom, joinLudoRoom, LudoRoom, subscribeToLudoRooms,
@@ -32,8 +32,6 @@ interface Props {
   goBack?: () => void;
 }
 
-const TABLE_COST = LUDO_TABLE_COST;
-
 export default function LudoScreen({ navigate }: Props) {
   const { profile } = useUser();
   const myUid = auth.currentUser?.uid ?? '';
@@ -42,29 +40,38 @@ export default function LudoScreen({ navigate }: Props) {
 
   const [allRooms, setAllRooms] = useState<LudoRoom[]>([]);
   // Tables whose host stopped heartbeating are abandoned, whatever `status` says.
-  const rooms = useLiveRooms(allRooms);
+  // A finished game has nothing left to join.
+  const rooms = useLiveRooms(allRooms).filter((r) => r.phase !== 'finished');
   const [openingId, setOpeningId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [modeSheet, setModeSheet] = useState(false);
+  const terms = useLudoTerms();
+  const TABLE_COST = terms.deposit;
 
   useEffect(() => subscribeToLudoRooms(setAllRooms), []);
 
-  const handleCreate = useCallback(async (mode: 'per_game' | 'per_token') => {
-    if ((profile?.coins ?? 0) < TABLE_COST) {
-      Alert.alert('Not enough coins', `Opening a table costs ${TABLE_COST} coins. Top up in the store.`);
-      return;
-    }
+  const handleCreate = useCallback(async () => {
     setModeSheet(false);
     setCreating(true);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, 'per_minute');
       navigate('LudoBoard', { roomId });
     } catch (e: any) {
+      if (explainLudoBusy(e, navigate)) return;
       Alert.alert('Could not open a table', e?.message || 'Try again in a moment.');
     } finally {
       setCreating(false);
     }
-  }, [profile, myUid, myName, myAvatarData, navigate]);
+  }, [myUid, myName, myAvatarData, navigate]);
+
+  const openSheet = useCallback(() => {
+    // Say so before the rules, not after the player has read them.
+    if ((profile?.coins ?? 0) < TABLE_COST) {
+      Alert.alert('Not enough coins', `Opening a table takes a ${TABLE_COST}-coin deposit. Top up in the store.`);
+      return;
+    }
+    setModeSheet(true);
+  }, [profile, TABLE_COST]);
 
   const handleOpen = useCallback(async (room: LudoRoom) => {
     if (!room.id || openingId) return;
@@ -108,10 +115,10 @@ export default function LudoScreen({ navigate }: Props) {
               Open a table, call your friends in, and play with voice on.
             </Text>
             <Pressable
-              onPress={() => setModeSheet(true)}
+              onPress={openSheet}
               disabled={creating}
               accessibilityRole="button"
-              accessibilityLabel={`Open a table, costs ${TABLE_COST} coins`}
+              accessibilityLabel={`Open a table, ${TABLE_COST} coin deposit`}
               style={({ pressed }) => [styles.heroBtn, pressed && styles.pressed, creating && styles.pressed]}
             >
               {creating ? (
@@ -155,7 +162,12 @@ export default function LudoScreen({ navigate }: Props) {
           <View style={{ height: 110 }} />
         </ScrollView>
 
-        <LudoModeSheet visible={modeSheet} onClose={() => setModeSheet(false)} onPick={handleCreate} />
+        <LudoOpenSheet
+          visible={modeSheet}
+          terms={terms}
+          onClose={() => setModeSheet(false)}
+          onConfirm={handleCreate}
+        />
 
         {/* Ludo is reached through the Chill games hub, so that tab stays lit. */}
         <BottomNav active="Chill" navigate={navigate} />

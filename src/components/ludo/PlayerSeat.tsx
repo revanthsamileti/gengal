@@ -30,8 +30,11 @@ type Props = {
   secondsLeft: number | null;
   tokensHome: number;
   rank: number | null;
-  /** Shown on an empty seat when a seat can be bought. */
-  seatPrice: number | null;
+  /**
+   * Shown on an empty seat that can be taken: what it costs, written out
+   * ("50 coins", "Free · 12/min") and as it should be read aloud.
+   */
+  seatOffer: { text: string; spoken: string } | null;
   onTakeSeat?: () => void;
   /** This seat is being bought right now. */
   taking?: boolean;
@@ -42,7 +45,7 @@ type Props = {
 
 export function PlayerSeat({
   color, player, isActive, isYou, turnProgress, secondsLeft, tokensHome,
-  rank, seatPrice, onTakeSeat, taking, onBet, betLabel, align,
+  rank, seatOffer, onTakeSeat, taking, onBet, betLabel, align,
 }: Props) {
   const gem = GEMS[color];
 
@@ -53,7 +56,7 @@ export function PlayerSeat({
         disabled={!onTakeSeat}
         accessibilityRole="button"
         accessibilityLabel={
-          seatPrice ? `Take the ${gem.name} seat for ${seatPrice} coins` : `${gem.name} seat is empty`
+          seatOffer ? `Take the ${gem.name} seat, ${seatOffer.spoken}` : `${gem.name} seat is empty`
         }
         style={({ pressed }) => [
           styles.seat,
@@ -69,14 +72,14 @@ export function PlayerSeat({
               already have one -- invited a tap that did nothing. */}
           {taking
             ? <ActivityIndicator size="small" color={gem.ink} />
-            : seatPrice
+            : seatOffer
               ? <MaterialIcons name="add" size={16} color={gem.ink} />
               : null}
         </View>
         <View style={styles.meta}>
           <Text style={styles.emptyName} numberOfLines={1}>{gem.name}</Text>
           <Text style={[styles.emptySub, numeric]} numberOfLines={1}>
-            {taking ? 'Taking seat…' : seatPrice ? `${seatPrice} coins` : 'Empty seat'}
+            {taking ? 'Taking seat…' : seatOffer ? seatOffer.text : 'Empty seat'}
           </Text>
         </View>
       </Pressable>

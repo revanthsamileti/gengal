@@ -127,6 +127,8 @@ export const authedPost = async <T>(path: string, body: Record<string, unknown> 
       }),
     (error, data) => {
       (error as any).code = data.code;
+      // Some refusals point somewhere, e.g. the table you are already playing at.
+      if (data.roomId) (error as any).roomId = data.roomId;
     },
   );
 };

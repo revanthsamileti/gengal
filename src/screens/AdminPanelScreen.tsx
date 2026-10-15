@@ -24,6 +24,8 @@ type FieldDef = {
   icon: string;
   suffix?: string;
   prefix?: string;
+  /** Starts a new group with this heading. */
+  section?: string;
 };
 
 const FIELDS: FieldDef[] = [
@@ -35,6 +37,18 @@ const FIELDS: FieldDef[] = [
   { key: 'inrToCoinRechargeRate', label: 'INR → Coins Rate', hint: 'Coins per ₹1 recharged', icon: 'swap-horiz', suffix: 'coins/₹' },
   { key: 'creatorSharePercentage', label: 'Creator Share %', hint: 'Percentage of call cost sent to creator', icon: 'pie-chart', suffix: '%' },
   { key: 'minWithdrawalHearts', label: 'Min Withdrawal', hint: 'Hearts required before a payout can be requested', icon: 'savings', suffix: 'hearts' },
+  { key: 'ludoHostDeposit', section: 'Ludo tables (new tables only)', label: 'Host deposit', hint: 'Paid to open a table. Kept by the app if the host stays to the end', icon: 'account-balance', suffix: 'coins' },
+  { key: 'ludoRateThreePlayers', label: 'Rate, 3 players', hint: 'Each player pays per minute when 3 are playing', icon: 'timer', suffix: 'coins/min' },
+  { key: 'ludoRateTwoPlayers', label: 'Rate, 2 players', hint: 'Each player pays per minute when 2 are playing', icon: 'timer', suffix: 'coins/min' },
+  { key: 'ludoRateOnePlayer', label: 'Rate, 1 player', hint: 'The player pays per minute when playing alone with the host', icon: 'timer', suffix: 'coins/min' },
+  { key: 'ludoHostSharePercent', label: 'Host share', hint: 'Part of every per-minute payment that goes to the host', icon: 'pie-chart', suffix: '%' },
+  { key: 'ludoForfeitThreePlayers', label: 'Deposit split, 3 left', hint: 'Each player gets this if the host broke a limit; the rest goes to the app', icon: 'call-split', suffix: 'coins each' },
+  { key: 'ludoForfeitTwoPlayers', label: 'Deposit split, 2 left', hint: 'Each player gets this if the host broke a limit', icon: 'call-split', suffix: 'coins each' },
+  { key: 'ludoForfeitOnePlayer', label: 'Deposit split, 1 left', hint: 'The player gets this if the host broke a limit', icon: 'call-split', suffix: 'coins' },
+  { key: 'ludoWinnerPrize', label: 'Winner bonus', hint: 'Paid by the app to whoever finishes first', icon: 'emoji-events', suffix: 'coins' },
+  { key: 'ludoHostMaxLeaves', label: 'Host comebacks', hint: 'Times the host may leave and return before their turns are skipped', icon: 'logout', suffix: 'times' },
+  { key: 'ludoHostMaxMissedTurns', label: 'Host missed turns', hint: 'Turns the host may let run out before their turns are skipped', icon: 'timer-off', suffix: 'turns' },
+  { key: 'ludoEmptyCloseMinutes', label: 'Empty table closes after', hint: 'An empty, paused table ends after this long', icon: 'hourglass-empty', suffix: 'min' },
 ];
 
 export default function AdminPanelScreen({ navigate, goBack }: Props) {
@@ -168,7 +182,9 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
             </View>
 
             {FIELDS.map((field) => (
-              <View key={field.key} style={styles.fieldCard}>
+              <React.Fragment key={field.key}>
+              {field.section ? <Text style={styles.sectionHeading}>{field.section}</Text> : null}
+              <View style={styles.fieldCard}>
                 <View style={styles.fieldHeader}>
                   <View style={styles.fieldIconBox}>
                     <MaterialIcons name={field.icon as any} size={18} color="#4B0054" />
@@ -191,6 +207,7 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
                   {field.suffix && <Text style={styles.inputAddon}>{field.suffix}</Text>}
                 </View>
               </View>
+              </React.Fragment>
             ))}
 
             <TouchableOpacity
@@ -241,6 +258,9 @@ const styles = StyleSheet.create({
   },
   warningText: { flex: 1, fontSize: 12, color: '#92400E', fontWeight: '600', lineHeight: 17 },
 
+  sectionHeading: {
+    color: '#4B0054', fontSize: 15, fontWeight: '900', marginTop: 18, marginBottom: 2, marginHorizontal: 2,
+  },
   fieldCard: {
     backgroundColor: '#FFFDF8', borderRadius: 16, padding: 14, marginBottom: 12,
     borderWidth: 1, borderColor: '#EEE4D8',

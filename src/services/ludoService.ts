@@ -75,6 +75,32 @@ export interface LudoPlayer {
   finishedAt?: number; // rank position (1st, 2nd…)
 }
 
+export type LudoMode = 'per_minute' | 'per_game' | 'per_token';
+
+/**
+ * What a per-minute table charges and pays, fixed when it was opened. Mirrors
+ * ludo_terms() in backend/app.py; keys are the player count as a string.
+ */
+export interface LudoTerms {
+  deposit: number;
+  rates: Record<'1' | '2' | '3', number>;
+  hostSharePercent: number;
+  forfeitEach: Record<'1' | '2' | '3', number>;
+  winnerPrize: number;
+  hostMaxLeaves: number;
+  hostMaxMissed: number;
+  emptyCloseSecs: number;
+}
+
+export interface LudoSettlement {
+  reason: 'game_over' | 'empty_table' | 'closed_before_start';
+  deposit?: number;
+  depositToPlayers?: Record<string, number>;
+  depositToApp?: number;
+  prize?: { uid: string; amount: number } | null;
+  refund?: Record<string, number>;
+}
+
 export type LudoPhase =
   | 'waiting'    // lobby
   | 'playing'    // game active
@@ -85,8 +111,8 @@ export interface LudoRoom {
   hostUid: string;
   phase: LudoPhase;
   status: 'live' | 'closed';
-  gameMode: 'per_game' | 'per_token';
-  ticketPrice: number;       // e.g. 50 coins to join
+  gameMode: LudoMode;
+  ticketPrice: number;       // 50 on ticket tables; 0 on per-minute tables
   audienceBets: Record<string, { color: TokenColor, amount: number }>; // map of uid to bet
   // Players (up to 4)
   players: LudoPlayer[];
@@ -114,9 +140,39 @@ export interface LudoRoom {
   // Spectator
   /** @deprecated Drifting counter, replaced by `presentCount` minus seated players. */
   spectatorCount?: number;
+  // Per-minute tables only (see backend/app.py, LUDO_PER_MINUTE)
+  terms?: LudoTerms;
+  /** The minute paid for so far ends here. */
+  billedUntil?: Timestamp | null;
+  /** Set while no player is seated: the board is paused. */
+  emptySince?: Timestamp | null;
+  hostAway?: boolean;
+  hostLeaves?: number;
+  hostMissed?: number;
+  /** Host broke a limit: their turns are passed over, the deposit goes to the players. */
+  hostBenched?: boolean;
+  /** Left or removed mid-game; still committed to it until it ends. */
+  departedUids?: string[];
+  paidBy?: Record<string, number>;
+  hostEarned?: number;
+  settled?: boolean;
+  settlement?: LudoSettlement | null;
   // Meta
   createdAt?: Timestamp;
 }
+
+export const isPerMinute = (room?: Pick<LudoRoom, 'gameMode'> | null): boolean =>
+  room?.gameMode === 'per_minute';
+
+/** What each player pays per minute with `players` of them seated (host excluded). */
+export const ludoRate = (terms: LudoTerms | undefined, players: number): number => {
+  if (!terms || players <= 0) return 0;
+  return terms.rates[String(Math.min(players, 3)) as '1' | '2' | '3'] ?? 0;
+};
+
+/** Seated players who pay: everyone but the host. */
+export const payingPlayers = (room: Pick<LudoRoom, 'players' | 'hostUid'>): LudoPlayer[] =>
+  room.players.filter((p) => p.uid !== room.hostUid);
 
 export interface LudoEvent {
   id?: string;
@@ -281,10 +337,11 @@ export const createLudoRoom = async (
   hostUid: string,
   hostNickname: string,
   hostAvatarData: any,
-  gameMode: 'per_game' | 'per_token'
+  gameMode: LudoMode = 'per_minute',
 ): Promise<string> => {
-  // Table fee is charged server-side in the same write that creates the room,
+  // The deposit is charged server-side in the same write that creates the room,
   // so a patched client cannot skip payment and a failed create cannot eat coins.
+  // Refused with code 'ludo_busy' (and the table's roomId) while a game holds you.
   const data = await authedPost<{ roomId: string }>('/api/v1/ludo/create-table', {
     gameMode,
     nickname: hostNickname,
@@ -400,7 +457,7 @@ export const buyLudoTicket = async (
     senderUid: uid,
     senderName: nickname,
     senderAvatarData: avatarData,
-    text: `bought a ticket and joined the table!`,
+    text: 'took a seat',
   });
 };
 
@@ -439,19 +496,22 @@ export const leaveLudoRoom = async (roomId: string, uid: string, nickname: strin
 
 // ── Game control (host-authoritative) ────────────────────────────────────────
 
+/**
+ * Deal the board and open play, on the server. A per-minute table charges its
+ * first minute in the same write.
+ */
 export const startGame = async (roomId: string) => {
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    phase: 'playing',
-    currentTurn: 'red',
-    diceValue: null,
-    diceRolled: false,
-    consecutiveSixes: 0,
-    turnStartedAt: serverTimestamp(),
-    tokens: buildInitialTokens(),
-    finishRank: 1,
-    winnersOrder: [],
-  });
-  await logEvent(roomId, { type: 'system', senderUid: '', senderName: 'Game', text: 'Game started!' });
+  await authedPost('/api/v1/ludo/start', { roomId });
+  logEvent(roomId, { type: 'system', senderUid: '', senderName: 'Game', text: 'Game started!' }).catch(() => {});
+};
+
+/**
+ * Keeps a per-minute table's clock honest: the minute's charge, a host gone
+ * quiet, an empty table closing. Every phone at the table calls it; whichever
+ * lands first does the work. `here: false` is the host stepping away.
+ */
+export const tickLudo = async (roomId: string, here = true) => {
+  await authedPost('/api/v1/ludo/tick', { roomId, here });
 };
 
 // Host (or current player) rolls dice — returns rolled value.
@@ -491,7 +551,11 @@ export const rollDice = async (
   return value;
 };
 
-// Move a specific token; check capture, win, next turn
+/**
+ * Move one of your pawns by the die the server rolled. The server checks the
+ * move, applies captures and finishing, passes the turn, and -- on the move
+ * that ends a per-minute game -- pays out, all in one write.
+ */
 export const moveToken = async (
   roomId: string,
   moverUid: string,
@@ -501,71 +565,22 @@ export const moveToken = async (
   room: LudoRoom,
 ) => {
   if (!room.diceRolled || room.diceValue === null) return;
+  const result = await authedPost<{
+    fromPos: number; toPos: number; diceValue: number;
+    captured: string | null; colorDone: boolean;
+  }>('/api/v1/ludo/move', { roomId, tokenId });
 
-  const { tokens: newTokens, captured, finished } = applyMove(
-    room.tokens, tokenId, room.diceValue, room.players,
-  );
-
-  const movedToken = newTokens.find(t => t.id === tokenId)!;
-
-  // Check if this color has won (all 4 tokens finished)
-  const colorTokens = newTokens.filter(t => t.color === movedToken.color);
-  const colorDone = colorTokens.every(t => t.position === FINISHED_POSITION);
-
-  // Compute player updates
-  const updatedPlayers = room.players.map(p => {
-    if (p.color !== movedToken.color) return p;
-    const finCount = newTokens.filter(t => t.color === p.color && t.position === FINISHED_POSITION).length;
-    return { ...p, score: finCount };
-  });
-
-  let newPhase: LudoPhase = room.phase;
-  let newFinishRank = room.finishRank;
-  const newWinnersOrder = [...room.winnersOrder];
-
-  if (colorDone && !newWinnersOrder.includes(moverUid)) {
-    newWinnersOrder.push(moverUid);
-    newFinishRank += 1;
-    if (newWinnersOrder.length >= room.players.length - 1) {
-      newPhase = 'finished';
-    }
+  // The feed is not waited for, so the board never lags behind it.
+  const by = { senderUid: moverUid, senderName: moverName, senderAvatarData: moverAvatarData };
+  logEvent(roomId, {
+    type: 'move', ...by, tokenId,
+    fromPos: result.fromPos, toPos: result.toPos, diceValue: result.diceValue,
+  }).catch(() => {});
+  if (result.captured) {
+    logEvent(roomId, { type: 'capture', ...by, capturedToken: result.captured }).catch(() => {});
   }
-
-  // Earn a re-roll if: rolled a 6 OR caused a capture OR token finished
-  const earnedReroll = room.diceValue === 6 || captured !== null || finished;
-  const nextColor = earnedReroll && !colorDone
-    ? room.currentTurn
-    : nextTurn(room.currentTurn, updatedPlayers, newTokens);
-
-  await updateDoc(doc(db, 'ludo_rooms', roomId), {
-    tokens: newTokens,
-    players: updatedPlayers,
-    currentTurn: nextColor,
-    diceValue: null,
-    diceRolled: false,
-    consecutiveSixes: earnedReroll ? room.consecutiveSixes : 0,
-    turnStartedAt: serverTimestamp(),
-    phase: newPhase,
-    finishRank: newFinishRank,
-    winnersOrder: newWinnersOrder,
-  });
-
-  await logEvent(roomId, {
-    type: 'move',
-    senderUid: moverUid, senderName: moverName, senderAvatarData: moverAvatarData,
-    tokenId, fromPos: movedToken.position, toPos: movedToken.position, diceValue: room.diceValue,
-  });
-
-  if (captured) {
-    await logEvent(roomId, {
-      type: 'capture',
-      senderUid: moverUid, senderName: moverName, senderAvatarData: moverAvatarData,
-      capturedToken: captured,
-    });
-  }
-
-  if (colorDone) {
-    await logEvent(roomId, { type: 'win', senderUid: moverUid, senderName: moverName });
+  if (result.colorDone) {
+    logEvent(roomId, { type: 'win', senderUid: moverUid, senderName: moverName }).catch(() => {});
   }
 };
 

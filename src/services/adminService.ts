@@ -13,6 +13,20 @@ export interface GlobalSettings {
   minRechargeAmount: number; // e.g., 49 Rs
   inrToCoinRechargeRate: number; // e.g., 1.1 Coins per Rs
   minWithdrawalHearts: number; // hearts a creator must hold to request a payout
+  // Ludo per-minute tables. Copied onto each table when it opens, so a change
+  // applies to tables opened afterwards, never to a game in progress.
+  ludoHostDeposit: number;
+  ludoRateOnePlayer: number;
+  ludoRateTwoPlayers: number;
+  ludoRateThreePlayers: number;
+  ludoHostSharePercent: number;
+  ludoForfeitOnePlayer: number;
+  ludoForfeitTwoPlayers: number;
+  ludoForfeitThreePlayers: number;
+  ludoWinnerPrize: number;
+  ludoHostMaxLeaves: number;
+  ludoHostMaxMissedTurns: number;
+  ludoEmptyCloseMinutes: number;
 }
 
 const SETTINGS_DOC_ID = 'pricing';
@@ -28,6 +42,18 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   minRechargeAmount: 49,
   inrToCoinRechargeRate: 1.12,
   minWithdrawalHearts: 33,
+  ludoHostDeposit: 50,
+  ludoRateOnePlayer: 10,
+  ludoRateTwoPlayers: 12,
+  ludoRateThreePlayers: 15,
+  ludoHostSharePercent: 30,
+  ludoForfeitOnePlayer: 25,
+  ludoForfeitTwoPlayers: 15,
+  ludoForfeitThreePlayers: 10,
+  ludoWinnerPrize: 20,
+  ludoHostMaxLeaves: 3,
+  ludoHostMaxMissedTurns: 3,
+  ludoEmptyCloseMinutes: 5,
 };
 
 /**

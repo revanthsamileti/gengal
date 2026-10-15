@@ -418,6 +418,15 @@ class TestSettlement:
         assert ledger.paid == {u: each for u in players}
         assert r["settlement"]["depositToApp"] == app_share
 
+    def test_the_host_leaving_a_finished_game_clears_the_table(self, act, store):
+        room_id = started_table(act, store, P1)
+        finish_blue(store, room_id)
+        act(P1, "move", roomId=room_id, tokenId="blue-0")
+
+        act(HOST, "leave-seat", roomId=room_id)
+
+        assert room(store, room_id)["status"] == "closed"
+
     def test_a_game_is_paid_out_once(self, act, store):
         room_id = started_table(act, store, P1)
         finish_blue(store, room_id)

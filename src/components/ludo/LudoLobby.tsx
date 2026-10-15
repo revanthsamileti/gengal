@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -14,8 +14,11 @@ import { MaterialIcons } from '@expo/vector-icons';
 import Svg, { Circle, Defs, Ellipse, LinearGradient as SvgGradient, Path, Stop } from 'react-native-svg';
 
 import GengalAvatar from '../GengalAvatar';
+import { Alert } from '../CustomAlert';
 import { auth } from '../../config/firebase';
-import type { LudoRoom, TokenColor } from '../../services/ludoService';
+import { DEFAULT_SETTINGS, getGlobalSettings, GlobalSettings } from '../../services/adminService';
+import { isPerMinute, ludoRate, payingPlayers } from '../../services/ludoService';
+import type { LudoRoom, LudoTerms, TokenColor } from '../../services/ludoService';
 import { GEMS, ludo, numeric } from '../../theme/ludoTheme';
 import { skeuo } from '../../theme/skeuomorphic';
 
@@ -24,29 +27,66 @@ import { skeuo } from '../../theme/skeuomorphic';
  * the same table looks and behaves the same from both doors.
  */
 
-export const LUDO_TABLE_COST = 10;
-
 /** Board order, clockwise from the top-left seat — same as the table itself. */
 export const SEAT_ORDER: TokenColor[] = ['red', 'blue', 'green', 'yellow'];
 
-export type LudoMode = 'per_game' | 'per_token';
+/** The terms a table opened now would get, from the admin settings. */
+export function termsFromSettings(settings: GlobalSettings): LudoTerms {
+  return {
+    deposit: settings.ludoHostDeposit,
+    rates: {
+      '1': settings.ludoRateOnePlayer,
+      '2': settings.ludoRateTwoPlayers,
+      '3': settings.ludoRateThreePlayers,
+    },
+    hostSharePercent: settings.ludoHostSharePercent,
+    forfeitEach: {
+      '1': settings.ludoForfeitOnePlayer,
+      '2': settings.ludoForfeitTwoPlayers,
+      '3': settings.ludoForfeitThreePlayers,
+    },
+    winnerPrize: settings.ludoWinnerPrize,
+    hostMaxLeaves: settings.ludoHostMaxLeaves,
+    hostMaxMissed: settings.ludoHostMaxMissedTurns,
+    emptyCloseSecs: settings.ludoEmptyCloseMinutes * 60,
+  };
+}
 
-const MODES: { id: LudoMode; name: string; cost: string; detail: string; icon: string }[] = [
-  {
-    id: 'per_game',
-    name: 'Ticket table',
-    cost: '50 coins a seat',
-    detail: 'Players pay once to sit down. You keep 10% of every ticket.',
-    icon: 'confirmation-number',
-  },
-  {
-    id: 'per_token',
-    name: 'Roll & back',
-    cost: '15 coins a roll',
-    detail: 'Free to sit. Players pay per roll and watchers back a colour.',
-    icon: 'casino',
-  },
-];
+/**
+ * Current table terms for the lobby's prices. Starts on the built-in defaults
+ * so the price is never blank, then follows whatever the admin has set.
+ */
+export function useLudoTerms(): LudoTerms {
+  const [terms, setTerms] = useState(() => termsFromSettings(DEFAULT_SETTINGS));
+  useEffect(() => {
+    let alive = true;
+    getGlobalSettings().then((s) => { if (alive) setTerms(termsFromSettings(s)); }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  return terms;
+}
+
+/**
+ * The server refused because a game already holds you. Says so plainly and
+ * offers the way back to that table rather than a dead end.
+ */
+export function explainLudoBusy(
+  e: any,
+  navigate: (screen: string, params?: any) => void,
+): boolean {
+  if (e?.code !== 'ludo_busy') return false;
+  Alert.alert(
+    "You're already in a game",
+    'Finish your Ludo game before you open or join another table.',
+    e.roomId
+      ? [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Go to my table', onPress: () => navigate('LudoBoard', { roomId: e.roomId }) },
+        ]
+      : undefined,
+  );
+  return true;
+}
 
 /** The same pawn silhouette as the board, so every screen shares a vocabulary. */
 export function Pawn({ color, size = 22 }: { color: TokenColor; size?: number }) {
@@ -88,7 +128,13 @@ export function LudoTableCard({
   const amSeated = room.players.some((p) => p.uid === auth.currentUser?.uid);
   const cta = amSeated ? 'Rejoin' : open ? 'Take a seat' : 'Watch';
   const watching = Math.max(0, (room.presentCount ?? seated) - seated);
-  const modeName = room.gameMode === 'per_token' ? 'Roll & back' : 'Ticket table';
+  const perMinute = isPerMinute(room);
+  const paying = payingPlayers(room).length;
+  // A newcomer sees what *they* would pay; everyone else what is being paid now.
+  const rate = ludoRate(room.terms, amSeated || !open ? paying : paying + 1);
+  const modeName = perMinute
+    ? `${rate} coins/min`
+    : room.gameMode === 'per_token' ? 'Roll & back' : 'Ticket table';
   const playing = room.phase === 'playing';
 
   return (
@@ -101,7 +147,7 @@ export function LudoTableCard({
         accessibilityRole="button"
         accessibilityState={{ busy }}
         accessibilityLabel={
-          `${host?.nickname ?? 'Host'}'s ${modeName.toLowerCase()}, ` +
+          `${host?.nickname ?? 'Host'}'s table, ${perMinute ? `${rate} coins a minute` : modeName.toLowerCase()}, ` +
           `${playing ? 'game in progress' : 'waiting to start'}, ${seated} of 4 seated. ${cta}.`
         }
         style={({ pressed }) => [cardStyles.card, pressed && cardStyles.pressed]}
@@ -166,10 +212,24 @@ export function LudoTableCard({
   );
 }
 
-/** Bottom sheet asking how a new table should charge. */
-export function LudoModeSheet({
-  visible, onClose, onPick,
-}: { visible: boolean; onClose: () => void; onPick: (mode: LudoMode) => void }) {
+/** One rule line in the open-table sheet. */
+function Rule({ icon, children }: { icon: string; children: React.ReactNode }) {
+  return (
+    <View style={sheetStyles.rule}>
+      <MaterialIcons name={icon as any} size={18} color={ludo.inkSoft} style={sheetStyles.ruleIcon} />
+      <Text style={[sheetStyles.ruleText, numeric]}>{children}</Text>
+    </View>
+  );
+}
+
+/**
+ * Confirms opening a table, with every rule that costs or pays coins spelled
+ * out first -- including the ones that can cost the host the deposit.
+ */
+export function LudoOpenSheet({
+  visible, terms, onClose, onConfirm,
+}: { visible: boolean; terms: LudoTerms; onClose: () => void; onConfirm: () => void }) {
+  const r = terms.rates;
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
       <View style={sheetStyles.root}>
@@ -183,29 +243,32 @@ export function LudoModeSheet({
           <View style={sheetStyles.grip} />
           <Text style={sheetStyles.title} accessibilityRole="header">Open a Ludo table</Text>
           <Text style={[sheetStyles.body, numeric]}>
-            Opening costs {LUDO_TABLE_COST} coins. You earn 10% of what the table spends.
+            Opening takes a {terms.deposit}-coin deposit. You play free.
           </Text>
 
-          {MODES.map((m) => (
-            <Pressable
-              key={m.id}
-              onPress={() => onPick(m.id)}
-              accessibilityRole="button"
-              accessibilityLabel={`${m.name}. ${m.cost}. ${m.detail}`}
-              style={({ pressed }) => [sheetStyles.mode, pressed && sheetStyles.pressed]}
-            >
-              <View style={sheetStyles.modeIcon}>
-                <MaterialIcons name={m.icon as any} size={22} color={ludo.ink} />
-              </View>
-              <View style={sheetStyles.modeMeta}>
-                <Text style={sheetStyles.modeName}>{m.name}</Text>
-                <Text style={[sheetStyles.modeCost, numeric]}>{m.cost}</Text>
-                <Text style={sheetStyles.modeDetail}>{m.detail}</Text>
-              </View>
-              <MaterialIcons name="chevron-right" size={22} color="#B9A78F" />
-            </Pressable>
-          ))}
+          <View style={sheetStyles.rules}>
+            <Rule icon="timer">
+              Players pay per minute: {r['3']} each with 3, {r['2']} each with 2, {r['1']} alone. You keep {terms.hostSharePercent}%.
+            </Rule>
+            <Rule icon="emoji-events">The winner gets a {terms.winnerPrize}-coin bonus.</Rule>
+            <Rule icon="logout">
+              Stay to the end. You can leave and come back {terms.hostMaxLeaves} times and miss {terms.hostMaxMissed} turns.
+              One more and your turns are skipped, and your deposit goes to the players.
+            </Rule>
+            <Rule icon="group-add">
+              If everyone leaves, the board pauses so you can invite friends. It closes after {Math.round(terms.emptyCloseSecs / 60)} minutes empty.
+            </Rule>
+          </View>
 
+          <Pressable
+            onPress={onConfirm}
+            accessibilityRole="button"
+            accessibilityLabel={`Open the table for a ${terms.deposit} coin deposit`}
+            style={({ pressed }) => [sheetStyles.confirm, pressed && sheetStyles.pressed]}
+          >
+            <MaterialIcons name="add" size={18} color="#FFFDF8" />
+            <Text style={[sheetStyles.confirmText, numeric]}>Open table · {terms.deposit} coins</Text>
+          </Pressable>
           <Pressable
             onPress={onClose}
             accessibilityRole="button"
@@ -240,26 +303,18 @@ export const sheetStyles = StyleSheet.create({
   title: { color: skeuo.plum, fontSize: 20, fontWeight: '900', fontFamily: 'serif' },
   body: { color: '#7E7368', fontSize: 13, fontWeight: '600', lineHeight: 19, marginBottom: 4 },
   pressed: { opacity: 0.75 },
-  mode: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    padding: 14,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: skeuo.border,
-    backgroundColor: skeuo.surface,
+  rules: {
+    gap: 10, padding: 14, borderRadius: 16,
+    backgroundColor: skeuo.surface, borderWidth: 1, borderColor: skeuo.border,
   },
-  modeIcon: {
-    width: 44, height: 44, borderRadius: 14,
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: ludo.cardSunk,
-    borderWidth: 1, borderColor: ludo.hairline,
+  rule: { flexDirection: 'row', gap: 10, alignItems: 'flex-start' },
+  ruleIcon: { marginTop: 1 },
+  ruleText: { flex: 1, color: '#4F463E', fontSize: 13, fontWeight: '600', lineHeight: 19 },
+  confirm: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    height: 52, borderRadius: 26, marginTop: 6, backgroundColor: '#1A6B33',
   },
-  modeMeta: { flex: 1, gap: 2 },
-  modeName: { color: skeuo.plum, fontSize: 16, fontWeight: '900' },
-  modeCost: { color: '#7A5F00', fontSize: 12, fontWeight: '800' },
-  modeDetail: { color: '#7E7368', fontSize: 12, fontWeight: '600', lineHeight: 17 },
+  confirmText: { color: '#FFFDF8', fontSize: 15, fontWeight: '900' },
   cancel: { height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24 },
   cancelText: { color: '#7E7368', fontSize: 14, fontWeight: '800' },
 });

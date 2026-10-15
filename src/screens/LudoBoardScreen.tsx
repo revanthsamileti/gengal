@@ -25,6 +25,7 @@ import { LudoPawn } from '../components/ludo/LudoPawn';
 import { LudoBoardSurface } from '../components/ludo/LudoBoardSurface';
 import { LudoDie } from '../components/ludo/LudoDie';
 import { PlayerSeat } from '../components/ludo/PlayerSeat';
+import { explainLudoBusy } from '../components/ludo/LudoLobby';
 import { BASE_ORIGIN, cellForPosition, PlayerColor } from './LudoConstants';
 import { GEMS, ludo, ludoRadius, ludoType, numeric } from '../theme/ludoTheme';
 
@@ -40,6 +41,7 @@ import {
   subscribeToLudoRoom, subscribeToLudoEvents,
   joinLudoRoom, leaveLudoRoom,
   startGame, rollDice, moveToken, skipTurn, SKIP_GRACE_MS, closeLudoRoom,
+  isPerMinute, ludoRate, payingPlayers, tickLudo,
   getLegalMoves,
   sendLudoChat, sendLudoGift,
   buyLudoTicket, placeLudoBet,
@@ -121,7 +123,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   // Players talk, spectators listen. Gate on presence so members/{uid} exists
   // before the Agora mint (channel id is the room doc id).
   // Board sizing budget: header, seat rows, action dock, utility rail.
-  const CHROME = 52 + 64 * 2 + 118 + 56 + 26;
+  const stripHeight = isPerMinute(room) && room?.phase === 'playing' ? 40 : 0;
+  const CHROME = 52 + 64 * 2 + 118 + 56 + 26 + stripHeight;
   const boardSize = Math.max(
     204,
     Math.min(width - 28, height - insets.top - insets.bottom - CHROME, 396)
@@ -191,9 +194,10 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   );
 
   // Closed tables must not keep players on a dead board with an open mic.
+  // A per-minute table that ended on its own stays on screen to say why.
   useEffect(() => {
-    if (room?.status === 'closed') goBack?.();
-  }, [room?.status, goBack]);
+    if (room?.status === 'closed' && !isPerMinute(room)) goBack?.();
+  }, [room?.status, room?.gameMode, goBack]);
 
   // A host who walks away without closing leaves the table 'live' for ever.
   // The lobby already hides those by the host's heartbeat; without the same
@@ -215,6 +219,30 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const watcherCount = Math.max(0, liveCount - (room?.players.length ?? 0));
   const isMyTurn = !!myPlayer && myPlayer.color === room?.currentTurn;
 
+  const perMinute = isPerMinute(room);
+  const hostColour = room?.players.find((p) => p.uid === room.hostUid)?.color ?? null;
+  /** No players left: the board waits for somebody to sit down. */
+  const paused = perMinute && room?.phase === 'playing' && !!room?.emptySince;
+
+  // Per-minute tables move on these calls: the minute's charge, a host who has
+  // gone quiet, an empty table closing. The host's first one after coming
+  // back also marks them as back at the table.
+  useEffect(() => {
+    if (!perMinute || room?.phase !== 'playing' || !(isSeated || isHost)) return;
+    const beat = () => { tickLudo(roomId, true).catch(() => {}); };
+    beat();
+    const id = setInterval(beat, 15_000);
+    return () => clearInterval(id);
+  }, [perMinute, room?.phase, isSeated, isHost, roomId]);
+
+  // Drives the "closes in m:ss" countdown on a paused table.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!paused) return;
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [paused]);
+
   const legalMoveIds = useMemo(() => {
     if (!room || !isMyTurn || !room.diceRolled || room.diceValue === null) return [];
     return getLegalMoves(room.tokens, room.currentTurn, room.diceValue);
@@ -227,11 +255,13 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   // stalled the table permanently.
   useEffect(() => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (!room?.turnStartedAt || room.phase !== 'playing') {
+    if (!room?.turnStartedAt || room.phase !== 'playing' || paused) {
       setSecondsLeft(null);
       return;
     }
     const endsAt = room.turnStartedAt.toMillis() + room.turnTimeoutSecs * 1000;
+    // Nobody should sit through the clock of a host whose turns are skipped.
+    const benchedTurn = perMinute && !!room.hostBenched && room.currentTurn === hostColour;
     // Any seated player may ask; the server decides whether the turn has
     // really expired. Restricting it to the current player or the host
     // meant a host who walked away mid-turn froze the table for everyone.
@@ -241,7 +271,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     // at "0s left" until some unrelated write happened to nudge it. Ask once
     // the grace has passed, and keep asking until the turn really changes --
     // which re-runs this effect and starts a fresh clock.
-    let askAt = endsAt + SKIP_GRACE_MS;
+    let askAt = benchedTurn ? 0 : endsAt + SKIP_GRACE_MS;
     let retryMs = 600;
     let tries = 0;
     let asking = false;
@@ -264,7 +294,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     tick();
     timerRef.current = setInterval(tick, 250);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, [room?.currentTurn, room?.turnStartedAt, room?.phase, isSeated, roomId]);
+  }, [room?.currentTurn, room?.turnStartedAt, room?.phase, room?.hostBenched, paused, perMinute, hostColour, isSeated, roomId]);
 
   // A roll with nothing to move passes immediately instead of burning the clock.
   useEffect(() => {
@@ -359,22 +389,62 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     return () => clearTimeout(t);
   }, [room, isMyTurn, rolling, busyToken, asSpectator, legalMoveIds, handleTokenPress]);
 
-  const handleTakeSeat = useCallback((color: TokenColor) => runCoin(async () => {
+  const doTakeSeat = useCallback((color: TokenColor) => runCoin(async () => {
     if (!room) return;
     const price = room.ticketPrice ?? DEFAULT_SEAT_PRICE;
-    if ((profile?.coins ?? 0) < price) {
-      Alert.alert('Not enough coins', `A seat costs ${price} coins. Top up in the store.`);
-      return;
-    }
     setTakingSeat(color);
     try {
       await buyLudoTicket(roomId, myUid, myName, myAvatarData, price, room.hostUid, color);
     } catch (e: any) {
+      if (explainLudoBusy(e, navigate)) return;
       Alert.alert('Could not take that seat', e?.message || 'Someone may have taken it first.');
     } finally {
       setTakingSeat(null);
     }
-  }), [room, profile, roomId, myUid, myName, myAvatarData, runCoin]);
+  }), [room, roomId, myUid, myName, myAvatarData, runCoin, navigate]);
+
+  /**
+   * A per-minute seat is free but the minutes are not, and sitting down
+   * commits you to the game -- so both are said before the seat is taken.
+   */
+  const handleTakeSeat = useCallback((color: TokenColor) => {
+    if (!room) return;
+    if (!isPerMinute(room)) {
+      const price = room.ticketPrice ?? DEFAULT_SEAT_PRICE;
+      if ((profile?.coins ?? 0) < price) {
+        Alert.alert('Not enough coins', `A seat costs ${price} coins. Top up in the store.`);
+        return;
+      }
+      doTakeSeat(color);
+      return;
+    }
+    const seated = payingPlayers(room).length + 1;
+    const rate = ludoRate(room.terms, seated);
+    const full = ludoRate(room.terms, 3);
+    if ((profile?.coins ?? 0) < rate) {
+      Alert.alert(
+        'Not enough coins',
+        `Playing costs ${rate} coins a minute. Top up in the store, then take a seat.`,
+        [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Get coins', onPress: () => navigate('Coins') },
+        ],
+      );
+      return;
+    }
+    Alert.alert(
+      `Take the ${GEMS[color as PlayerColor].name} seat?`,
+      `The seat is free. While you play you pay ${rate} coins a minute` +
+        (seated < 3 && full > rate ? ` (${full} if the table fills)` : '') +
+        `, at the start of each minute. Run out and you lose the seat.` +
+        (room.terms?.winnerPrize ? ` The winner gets ${room.terms.winnerPrize} coins.` : '') +
+        `\n\nYou can't join another table until this game ends.`,
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Take seat', onPress: () => doTakeSeat(color) },
+      ],
+    );
+  }, [room, profile, doTakeSeat, navigate]);
 
   const handleBet = useCallback((color: TokenColor) => runCoin(async () => {
     if (!room) return;
@@ -395,7 +465,11 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       Alert.alert('Waiting for players', 'At least one more player needs to take a seat.');
       return;
     }
-    await startGame(roomId);
+    try {
+      await startGame(roomId);
+    } catch (e: any) {
+      Alert.alert('Could not start', e?.message || 'Try again in a moment.');
+    }
   }), [room, isHost, roomId, runCoin]);
 
   const handleSendChat = useCallback(async () => {
@@ -419,22 +493,81 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     }
   }), [giftTarget, roomId, myUid, myName, myAvatarData, runCoin]);
 
-  const handleLeave = useCallback(async () => {
+  const leaveNow = useCallback(async () => {
     await leaveLudoRoom(roomId, myUid, myName, spectatorRef.current);
-    if (isHost) await closeLudoRoom(roomId).catch(() => {});
+    // A per-minute table is the server's to close: a host leaving mid-game
+    // only steps away, and the game goes on without them.
+    if (isHost && !isPerMinute(room)) await closeLudoRoom(roomId).catch(() => {});
     goBack?.();
-  }, [roomId, myUid, myName, isHost, goBack]);
+  }, [roomId, myUid, myName, isHost, room, goBack]);
+
+  const handleLeave = useCallback(() => {
+    const live = room && isPerMinute(room) && room.status === 'live' && room.phase !== 'finished';
+    if (!room || !live || asSpectator) { void leaveNow(); return; }
+    const terms = room.terms;
+    const deposit = terms?.deposit ?? 0;
+    let title: string;
+    let body: string;
+    let cta = 'Leave';
+    if (isHost && room.phase === 'waiting') {
+      title = 'Close this table?';
+      body = `Your ${deposit}-coin deposit comes back to you.`;
+      cta = 'Close table';
+    } else if (isHost && paused) {
+      title = 'Go and invite friends?';
+      body = `The board stays paused and leaving now does not count against you. ` +
+        `The table ends if nobody sits down within ${Math.round((terms?.emptyCloseSecs ?? 300) / 60)} minutes of it emptying.`;
+      cta = 'Leave for now';
+    } else if (isHost) {
+      const left = (terms?.hostMaxLeaves ?? 0) - (room.hostLeaves ?? 0);
+      title = 'Leave the game?';
+      if (room.hostBenched) {
+        body = 'Your turns are already being skipped. The game carries on without you.';
+      } else if (left > 0) {
+        body = `The game carries on and your turns keep running. You can come back ${left} more time${left === 1 ? '' : 's'}.`;
+      } else {
+        title = 'That would be one too many';
+        body = `You have used all ${terms?.hostMaxLeaves ?? 0} comebacks. Leave now and your turns are skipped ` +
+          `for the rest of the game, and your ${deposit}-coin deposit goes to the players.`;
+        cta = 'Leave anyway';
+      }
+    } else if (room.phase === 'waiting') {
+      void leaveNow();
+      return;
+    } else {
+      title = 'Leave the game?';
+      body = "You lose your seat. You can't join another table until this game ends.";
+      cta = 'Leave game';
+    }
+    Alert.alert(title, body, [
+      { text: 'Stay', style: 'cancel' },
+      { text: cta, style: 'destructive', onPress: () => { void leaveNow(); } },
+    ]);
+  }, [room, asSpectator, isHost, paused, leaveNow]);
+
+  // A game that was played to the end keeps showing its results instead.
+  const ended = !!room && isPerMinute(room) && room.status === 'closed'
+    && room.settlement?.reason !== 'game_over';
 
   // ── Loading ────────────────────────────────────────────────────────────────
-  if (room === null || abandoned) {
+  if (room === null || abandoned || ended) {
+    const reason = room?.settlement?.reason;
+    const emptyMins = Math.round((room?.terms?.emptyCloseSecs ?? 300) / 60);
     return (
       <View style={styles.root}>
         <SafeAreaView style={styles.center}>
-          <Text style={styles.goneTitle}>{abandoned ? 'This table has closed' : 'This table is gone'}</Text>
+          <Text style={styles.goneTitle}>
+            {ended && reason === 'empty_table' ? 'This table has ended'
+              : abandoned || ended ? 'This table has closed' : 'This table is gone'}
+          </Text>
           <Text style={styles.loadingText}>
-            {abandoned
-              ? 'The host left before the game started. Pick another table or open your own.'
-              : 'The game ended, or it could not be reached.'}
+            {ended && reason === 'empty_table'
+              ? `Nobody sat down for ${emptyMins} minutes after everyone left, so the game ended.`
+              : ended
+                ? 'The host closed it before the game started.'
+                : abandoned
+                  ? 'The host left before the game started. Pick another table or open your own.'
+                  : 'The game ended, or it could not be reached.'}
           </Text>
           <Pressable onPress={() => goBack?.()} style={styles.goneBtn} accessibilityRole="button">
             <Text style={styles.goneBtnText}>Back to games</Text>
@@ -473,6 +606,73 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
    */
   const hostName = room.players.find((p) => p.uid === room.hostUid)?.nickname ?? 'The host';
   const isOver = room.phase === 'finished';
+
+  const terms = room.terms;
+  const paying = payingPlayers(room).length;
+  const rateNow = ludoRate(terms, paying);
+  const nextRate = ludoRate(terms, paying + 1);
+  const myCoins = Math.floor(profile?.coins ?? 0);
+  const canTakeSeat = !myPlayer && !isHost && (isWaiting || paused);
+  const seatOffer = !canTakeSeat
+    ? null
+    : perMinute
+      ? { text: `Free · ${nextRate}/min`, spoken: `free, then ${nextRate} coins a minute` }
+      : { text: `${room.ticketPrice ?? DEFAULT_SEAT_PRICE} coins`, spoken: `${room.ticketPrice ?? DEFAULT_SEAT_PRICE} coins` };
+
+  /** The one thing worth saying about a per-minute game right now, if any. */
+  let notice: { icon: string; text: string; tone: 'info' | 'warn' } | null = null;
+  if (perMinute && room.phase === 'playing') {
+    const closeAt = (room.emptySince?.toMillis?.() ?? nowMs) + (terms?.emptyCloseSecs ?? 300) * 1000;
+    const left = Math.max(0, Math.ceil((closeAt - nowMs) / 1000));
+    const clock = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+    const deposit = terms?.deposit ?? 0;
+    if (paused) {
+      notice = {
+        icon: 'pause-circle-outline',
+        tone: 'warn',
+        text: isHost
+          ? `Paused. Invite friends; leaving now is free. Ends in ${clock}.`
+          : `Paused until somebody sits down. Ends in ${clock}.`,
+      };
+    } else if (room.hostBenched) {
+      notice = {
+        icon: 'block',
+        tone: 'warn',
+        text: isHost
+          ? 'Your turns are skipped. Your deposit goes to the players.'
+          : `${hostName}'s turns are skipped. Their ${deposit}-coin deposit is shared at the end.`,
+      };
+    } else if (room.hostAway && !isHost) {
+      notice = {
+        icon: 'directions-walk',
+        tone: 'info',
+        text: `${hostName} stepped away (${room.hostLeaves ?? 0} of ${terms?.hostMaxLeaves ?? 0}). The game goes on.`,
+      };
+    } else if (isHost) {
+      const comebacks = Math.max(0, (terms?.hostMaxLeaves ?? 0) - (room.hostLeaves ?? 0));
+      const misses = Math.max(0, (terms?.hostMaxMissed ?? 0) - (room.hostMissed ?? 0));
+      notice = {
+        icon: 'shield',
+        tone: comebacks === 0 || misses === 0 ? 'warn' : 'info',
+        text: `${comebacks} comeback${comebacks === 1 ? '' : 's'} · ${misses} missed turn${misses === 1 ? '' : 's'} left · earned ${Math.floor(room.hostEarned ?? 0)}`,
+      };
+    } else if (myPlayer) {
+      const minutes = rateNow > 0 ? Math.floor(myCoins / rateNow) : 0;
+      notice = minutes < 2
+        ? {
+            icon: 'warning-amber',
+            tone: 'warn',
+            text: minutes === 0
+              ? `Not enough coins for the next minute (${rateNow}). You'll lose your seat.`
+              : `Low coins: enough for 1 more minute at ${rateNow} a minute.`,
+          }
+        : {
+            icon: 'timer',
+            tone: 'info',
+            text: `${rateNow} coins a minute · paid ${Math.floor(room.paidBy?.[myUid] ?? 0)} so far`,
+          };
+    }
+  }
   const canRoll = isMyTurn && !room.diceRolled && room.phase === 'playing' && !asSpectator && !rolling;
 
   const turnPlayer = byColor[room.currentTurn];
@@ -493,6 +693,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     instruction = !enoughToStart
       ? 'Waiting for players'
       : isHost ? 'Start when everyone is in' : `Waiting for ${hostName}`;
+  } else if (paused) {
+    eyebrow = 'Paused';
+    instruction = canTakeSeat ? 'Take a free seat to play' : 'Waiting for a player';
   } else if (asSpectator) {
     eyebrow = 'Watching';
     instruction = `${turnName} is playing`;
@@ -551,8 +754,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
         secondsLeft={room.currentTurn === color ? secondsLeft : null}
         tokensHome={tokensHome}
         rank={rankIdx >= 0 ? rankIdx + 1 : null}
-        seatPrice={isWaiting && !myPlayer ? (room.ticketPrice ?? DEFAULT_SEAT_PRICE) : null}
-        onTakeSeat={isWaiting && !myPlayer && !coinBusy ? () => handleTakeSeat(color) : undefined}
+        seatOffer={seatOffer}
+        onTakeSeat={canTakeSeat && !coinBusy ? () => handleTakeSeat(color) : undefined}
         taking={takingSeat === color}
         betLabel={room.gameMode === 'per_token' && player && player.uid !== myUid ? `Back ${BET_AMOUNT}` : null}
         onBet={room.gameMode === 'per_token' && player && player.uid !== myUid && !coinBusy ? () => handleBet(color) : undefined}
@@ -576,7 +779,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
           <View style={styles.headerMid}>
             <Text style={ludoType.eyebrow}>Ludo table</Text>
             <Text style={styles.headerTitle} numberOfLines={1}>
-              {room.gameMode === 'per_token' ? 'Roll & Back' : 'Ticket Table'}
+              {perMinute
+                ? (room.phase === 'playing' && paying > 0 ? `${rateNow} coins a minute` : 'Per-minute table')
+                : room.gameMode === 'per_token' ? 'Roll & Back' : 'Ticket Table'}
             </Text>
           </View>
           <View style={styles.watchers}>
@@ -586,6 +791,29 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
         </View>
 
         <ConnectionBanner state={connection} tone="light" />
+
+        {stripHeight > 0 && (
+          <View
+            style={[styles.strip, notice?.tone === 'warn' && styles.stripWarn]}
+            accessibilityLiveRegion="polite"
+          >
+            {notice ? (
+              <>
+                <MaterialIcons
+                  name={notice.icon as any}
+                  size={16}
+                  color={notice.tone === 'warn' ? '#8A4B00' : ludo.inkSoft}
+                />
+                <Text
+                  style={[styles.stripText, numeric, notice.tone === 'warn' && styles.stripTextWarn]}
+                  numberOfLines={2}
+                >
+                  {notice.text}
+                </Text>
+              </>
+            ) : null}
+          </View>
+        )}
 
         {/* Table */}
         <View style={styles.stage}>
@@ -712,6 +940,13 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                   ? 'Start when everyone is in. Empty seats sit out the game.'
                   : `${hostName} starts the game.`}
             </Text>
+            {perMinute ? (
+              <Text style={[styles.lobbyNote, numeric]}>
+                {isHost
+                  ? `Players pay ${ludoRate(terms, Math.max(1, paying))} coins a minute once you start. You keep ${terms?.hostSharePercent ?? 0}%.`
+                  : `Seats are free. Players pay ${ludoRate(terms, Math.max(1, myPlayer ? paying : paying + 1))} coins a minute once the game starts.`}
+              </Text>
+            ) : null}
             {isHost ? (
               <Pressable
                 onPress={handleStart}
@@ -761,6 +996,35 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                 );
               })}
             </View>
+            {perMinute && room.settlement ? (
+              <View style={styles.payouts}>
+                {room.settlement.prize ? (
+                  <Text style={[styles.payoutLine, numeric]}>
+                    {room.settlement.prize.uid === myUid
+                      ? `You won the ${room.settlement.prize.amount}-coin bonus.`
+                      : `${room.players.find((p) => p.uid === room.settlement?.prize?.uid)?.nickname ?? 'The winner'} won the ${room.settlement.prize.amount}-coin bonus.`}
+                  </Text>
+                ) : null}
+                {Object.keys(room.settlement.depositToPlayers ?? {}).length > 0 ? (
+                  <Text style={[styles.payoutLine, numeric]}>
+                    {hostName} broke a limit, so the {room.settlement.deposit}-coin deposit was shared
+                    {room.settlement.depositToPlayers?.[myUid]
+                      ? `: you got ${room.settlement.depositToPlayers[myUid]}.`
+                      : ` among the players.`}
+                  </Text>
+                ) : null}
+                {myPlayer && !isHost ? (
+                  <Text style={[styles.payoutLine, numeric]}>
+                    You paid {Math.floor(room.paidBy?.[myUid] ?? 0)} coins for this game.
+                  </Text>
+                ) : null}
+                {isHost ? (
+                  <Text style={[styles.payoutLine, numeric]}>
+                    You earned {Math.floor(room.hostEarned ?? 0)} coins from this table.
+                  </Text>
+                ) : null}
+              </View>
+            ) : null}
             <Pressable
               onPress={handleLeave}
               accessibilityRole="button"
@@ -1042,6 +1306,30 @@ const styles = StyleSheet.create({
   },
   lobbyTitle: { ...ludoType.display, fontSize: 24, textAlign: 'center' },
   lobbyBody: { ...ludoType.body, textAlign: 'center', lineHeight: 19 },
+  lobbyNote: { color: ludo.inkSoft, fontSize: 12, fontWeight: '700', textAlign: 'center', lineHeight: 17 },
+  payouts: {
+    alignSelf: 'stretch', gap: 6, padding: 12, borderRadius: 14,
+    backgroundColor: ludo.cardSunk, borderWidth: 1, borderColor: ludo.hairline,
+  },
+  payoutLine: { color: ludo.ink, fontSize: 13, fontWeight: '700', lineHeight: 18 },
+
+  // One line of per-minute news under the header: paused, host away, coins.
+  strip: {
+    height: 36,
+    marginHorizontal: 14,
+    marginBottom: 4,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: ludo.cardSunk,
+    borderWidth: 1,
+    borderColor: ludo.hairline,
+  },
+  stripWarn: { backgroundColor: '#FFF4DC', borderColor: '#F1D08A' },
+  stripText: { flex: 1, color: ludo.inkSoft, fontSize: 12, fontWeight: '700', lineHeight: 15 },
+  stripTextWarn: { color: '#6E3B00' },
   primaryBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     marginTop: 8, height: 48, alignSelf: 'stretch',

@@ -2685,6 +2685,11 @@ def ludo_leave_per_minute(transaction, db_client, room_ref, room, uid):
             changed = True
         elif phase == 'playing':
             ludo_host_left(after, now_dt)
+        elif phase == 'finished' and room.get('status') == 'live':
+            # The game is over and paid out; the host leaving clears the
+            # table from the lobby.
+            after['status'] = 'closed'
+            changed = True
     elif uid in (room.get('playerUids') or []):
         ludo_remove_player(after, uid, now_dt)
         ludo_update_empty(after, now_dt)
