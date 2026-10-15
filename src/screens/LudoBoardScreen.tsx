@@ -32,6 +32,7 @@ import { useRoomVoice } from '../hooks/useRoomVoice';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import { useRoomPresence } from '../hooks/useRoomPresence';
+import { isRoomLive } from '../services/presenceService';
 import ConnectionBanner from '../components/rooms/ConnectionBanner';
 import {
   LudoEvent, LudoPlayer, LudoRoom, TokenColor, LUDO_GIFTS,
@@ -193,6 +194,23 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   useEffect(() => {
     if (room?.status === 'closed') goBack?.();
   }, [room?.status, goBack]);
+
+  // A host who walks away without closing leaves the table 'live' for ever.
+  // The lobby already hides those by the host's heartbeat; without the same
+  // check here, anyone still on the screen sat at "0 of 4 seated" waiting for
+  // a game nobody could start. Only before the game: once it is under way a
+  // host's dropped connection must not end it for everybody else.
+  const [abandoned, setAbandoned] = useState(false);
+  useEffect(() => {
+    if (!room || isHost || room.phase !== 'waiting') {
+      setAbandoned(false);
+      return;
+    }
+    const check = () => setAbandoned(!isRoomLive(room));
+    check();
+    const id = setInterval(check, 15_000);
+    return () => clearInterval(id);
+  }, [room, isHost]);
 
   const watcherCount = Math.max(0, liveCount - (room?.players.length ?? 0));
   const isMyTurn = !!myPlayer && myPlayer.color === room?.currentTurn;
@@ -408,12 +426,16 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   }, [roomId, myUid, myName, isHost, goBack]);
 
   // ── Loading ────────────────────────────────────────────────────────────────
-  if (room === null) {
+  if (room === null || abandoned) {
     return (
       <View style={styles.root}>
         <SafeAreaView style={styles.center}>
-          <Text style={styles.goneTitle}>This table is gone</Text>
-          <Text style={styles.loadingText}>The game ended, or it could not be reached.</Text>
+          <Text style={styles.goneTitle}>{abandoned ? 'This table has closed' : 'This table is gone'}</Text>
+          <Text style={styles.loadingText}>
+            {abandoned
+              ? 'The host left before the game started. Pick another table or open your own.'
+              : 'The game ended, or it could not be reached.'}
+          </Text>
           <Pressable onPress={() => goBack?.()} style={styles.goneBtn} accessibilityRole="button">
             <Text style={styles.goneBtnText}>Back to games</Text>
           </Pressable>

@@ -1,23 +1,28 @@
 import { Alert } from '../components/CustomAlert';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
+  ActivityIndicator,
+  Animated,
+  Easing,
+  Modal,
   Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TouchableOpacity,
   View,
-  Modal,
-  ActivityIndicator,
-  Animated } from 'react-native';
-import type { TextStyle } from 'react-native';
-import { LinearGradient } from 'expo-linear-gradient';
+} from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
 import ScreenShell from '../components/ScreenShell';
 import TopBar from '../components/TopBar';
 import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
+import RosterStrip from '../components/rooms/RosterStrip';
+import {
+  LUDO_TABLE_COST, LudoMode, LudoModeSheet, LudoTableCard, Pawn, SEAT_ORDER, sheetStyles,
+} from '../components/ludo/LudoLobby';
 import { skeuo } from '../theme/skeuomorphic';
+import { numeric } from '../theme/ludoTheme';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import {
@@ -26,7 +31,6 @@ import {
   createChillRoom,
 } from '../services/chillService';
 import { useLiveRooms } from '../hooks/useRoomPresence';
-import RosterStrip from '../components/rooms/RosterStrip';
 import {
   LudoRoom,
   subscribeToLudoRooms,
@@ -41,224 +45,219 @@ interface Props {
 
 type ActiveGame = 'charades' | 'ludo';
 
-// ── Dumb Charades room card ───────────────────────────────────────────────────
+/**
+ * Each game keeps one colour throughout the lobby — its tab, its primary
+ * button, its empty state — so which game you are looking at is never in doubt.
+ * Both inks clear 4.5:1 against white text and against the cream page.
+ */
+const GAME = {
+  ludo: { ink: '#1A6B33', wash: '#E3F3DA', border: '#BFDDB0', icon: 'casino' },
+  charades: { ink: '#5B0068', wash: '#F4E1F7', border: '#DCC0E4', icon: 'theaters' },
+} as const;
 
-const chillTabular: TextStyle = { fontVariant: ['tabular-nums'] };
+/** Rooms in these phases are still worth walking into. */
+const CHARADES_PHASE: Record<string, { label: string; live: boolean }> = {
+  waiting: { label: 'OPEN', live: false },
+  prompt: { label: 'STARTING', live: true },
+  acting: { label: 'PLAYING', live: true },
+  result: { label: 'ROUND END', live: true },
+};
 
-function CharadesRoomCard({ room, onJoin }: { room: ChillRoom; onJoin: () => void }) {
+// ── Shared bits ───────────────────────────────────────────────────────────────
+
+function useFadeIn() {
   const fade = useRef(new Animated.Value(0)).current;
   useEffect(() => {
-    Animated.timing(fade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
-  }, []);
+    Animated.timing(fade, {
+      toValue: 1, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: true,
+    }).start();
+  }, [fade]);
+  return fade;
+}
 
-  const phaseColor: Record<string, string> = {
-    waiting: '#A78BF0', acting: '#5EBB62', result: '#C9504B', finished: '#555',
-  };
-  const phaseLabel: Record<string, string> = {
-    waiting: 'Lobby', prompt: 'Starting', acting: 'Live', result: 'Round End', finished: 'Done',
-  };
-  const color = phaseColor[room.phase] ?? '#A78BF0';
+function PrimaryButton({
+  label, icon, color, onPress, busy, accessibilityLabel, wide,
+}: {
+  label: string;
+  icon: keyof typeof MaterialIcons.glyphMap;
+  color: string;
+  onPress: () => void;
+  busy?: boolean;
+  accessibilityLabel?: string;
+  wide?: boolean;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      disabled={busy}
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel ?? label}
+      accessibilityState={{ busy: !!busy, disabled: !!busy }}
+      style={({ pressed }) => [
+        styles.primary,
+        wide && styles.primaryWide,
+        { backgroundColor: color },
+        (pressed || busy) && styles.primaryPressed,
+      ]}
+    >
+      {busy ? (
+        <ActivityIndicator size="small" color="#FFFDF8" />
+      ) : (
+        <>
+          <MaterialIcons name={icon} size={18} color="#FFFDF8" />
+          <Text style={[styles.primaryText, numeric]} numberOfLines={1}>{label}</Text>
+        </>
+      )}
+    </Pressable>
+  );
+}
+
+/** Loading, failed and empty all get a card, so the list never just vanishes. */
+function ListState({
+  kind, game, title, body, action,
+}: {
+  kind: 'loading' | 'error' | 'empty';
+  game: ActiveGame;
+  title?: string;
+  body?: string;
+  action?: React.ReactNode;
+}) {
+  const g = GAME[game];
+  if (kind === 'loading') {
+    return (
+      <View style={styles.state} accessibilityLiveRegion="polite">
+        <ActivityIndicator color={g.ink} />
+        <Text style={styles.stateBody}>Finding rooms…</Text>
+      </View>
+    );
+  }
+  return (
+    <View style={styles.state} accessibilityLiveRegion="polite">
+      {kind === 'error' ? (
+        <View style={[styles.stateIcon, { backgroundColor: '#FBE4E2' }]}>
+          <MaterialIcons name="wifi-off" size={26} color="#A3322B" />
+        </View>
+      ) : game === 'ludo' ? (
+        <View style={styles.statePawns}>
+          {SEAT_ORDER.map((c) => <Pawn key={c} color={c} size={22} />)}
+        </View>
+      ) : (
+        <View style={[styles.stateIcon, { backgroundColor: g.wash }]}>
+          <MaterialIcons name="theaters" size={26} color={g.ink} />
+        </View>
+      )}
+      {title ? <Text style={styles.stateTitle} accessibilityRole="header">{title}</Text> : null}
+      {body ? <Text style={styles.stateBody}>{body}</Text> : null}
+      {action}
+    </View>
+  );
+}
+
+// ── Game switcher ─────────────────────────────────────────────────────────────
+
+function GameTab({
+  game, title, live, loaded, selected, onPress,
+}: {
+  game: ActiveGame;
+  title: string;
+  live: number;
+  loaded: boolean;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  const g = GAME[game];
+  const liveText = !loaded ? '…' : live === 0 ? 'No rooms' : `${live} live`;
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="tab"
+      accessibilityState={{ selected }}
+      accessibilityLabel={`${title}, ${loaded ? (live === 1 ? '1 room live' : `${live} rooms live`) : 'loading'}`}
+      style={({ pressed }) => [
+        styles.tab,
+        selected && { backgroundColor: '#FFFFFF', borderColor: g.border },
+        selected && styles.tabSelected,
+        pressed && !selected && styles.tabPressed,
+      ]}
+    >
+      <View style={[styles.tabIcon, { backgroundColor: selected ? g.wash : '#EFE6D8' }]}>
+        <MaterialIcons name={g.icon} size={22} color={selected ? g.ink : '#8B7A6A'} />
+      </View>
+      <View style={styles.tabMeta}>
+        <Text style={[styles.tabTitle, selected && { color: g.ink }]} numberOfLines={1}>{title}</Text>
+        <View style={styles.tabLiveRow}>
+          {loaded && live > 0 && <View style={[styles.tabDot, { backgroundColor: selected ? g.ink : '#5EBB62' }]} />}
+          <Text style={[styles.tabLive, numeric]} numberOfLines={1}>{liveText}</Text>
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+// ── Dumb Charades room card ───────────────────────────────────────────────────
+
+function CharadesRoomCard({ room, onJoin }: { room: ChillRoom; onJoin: () => void }) {
+  const fade = useFadeIn();
+  const phase = CHARADES_PHASE[room.phase] ?? CHARADES_PHASE.waiting;
+  const people = room.activeMemberCount === 1 ? '1 player' : `${room.activeMemberCount} players`;
 
   return (
     <Animated.View style={{ opacity: fade }}>
-      <TouchableOpacity
-        style={crStyles.card}
-        activeOpacity={0.82}
+      <Pressable
         onPress={onJoin}
         accessibilityRole="button"
         accessibilityLabel={
-          `${room.hostNickname}'s charades room. ${room.language}, ` +
-          `${room.activeMemberCount} ${room.activeMemberCount === 1 ? 'player' : 'players'}. ` +
-          `${phaseLabel[room.phase] ?? room.phase}. Free to join.`
+          `${room.hostNickname}'s charades room in ${room.language}, ${people}, ` +
+          `${phase.live ? 'game in progress' : 'waiting to start'}. Free to join.`
         }
+        style={({ pressed }) => [styles.card, pressed && styles.cardPressed]}
       >
-        <LinearGradient colors={['#1A0714', '#2E0138']} style={StyleSheet.absoluteFill} />
-        <View style={crStyles.row}>
-          <View style={crStyles.avatar}>
-            <GengalAvatar data={room.hostAvatarData} size={38} />
+        <View style={styles.cardHead}>
+          <View style={styles.cardAvatar}>
+            <GengalAvatar data={room.hostAvatarData} size={40} />
           </View>
-          <View style={crStyles.info}>
-            <Text style={crStyles.host} numberOfLines={1}>{room.hostNickname}</Text>
-            <Text style={[crStyles.sub, chillTabular]}>
-              {room.language} · {room.activeMemberCount} {room.activeMemberCount === 1 ? 'player' : 'players'}
-            </Text>
-            {/* Who is actually in there right now, from the host's roster preview. */}
-            <RosterStrip roster={room.roster} count={room.activeMemberCount} size={20} tone="dark" />
+          <View style={styles.cardMeta}>
+            <Text style={styles.cardHost} numberOfLines={1}>{room.hostNickname}</Text>
+            <Text style={[styles.cardSub, numeric]} numberOfLines={1}>{room.language} · {people}</Text>
           </View>
-          <View style={[crStyles.pill, { borderColor: color + '55', backgroundColor: color + '18' }]}>
-            {room.phase === 'acting' && <View style={[crStyles.dot, { backgroundColor: color }]} />}
-            <Text style={[crStyles.pillText, { color }]}>{phaseLabel[room.phase] ?? room.phase}</Text>
+          <View style={[styles.status, phase.live && styles.statusLive]}>
+            {phase.live && <View style={styles.statusDot} />}
+            <Text style={[styles.statusText, phase.live && styles.statusTextLive]}>{phase.label}</Text>
           </View>
         </View>
-        <View style={crStyles.joinBtn} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
-          <MaterialIcons name="login" size={13} color="#FFFDF8" />
-          <Text style={crStyles.joinText}>Join room</Text>
+
+        {/* Who is actually in there right now, from the host's roster preview. */}
+        <RosterStrip roster={room.roster} count={room.activeMemberCount} size={24} tone="light" />
+
+        <View style={styles.cardFoot}>
+          <Text style={styles.cardFootText}>Free to join</Text>
+          <View style={[styles.cardCta, { backgroundColor: GAME.charades.ink }]}>
+            <MaterialIcons name="login" size={15} color="#FFFDF8" />
+            <Text style={styles.cardCtaText}>Join room</Text>
+          </View>
         </View>
-      </TouchableOpacity>
+      </Pressable>
     </Animated.View>
   );
 }
 
-const crStyles = StyleSheet.create({
-  card: {
-    borderRadius: 18, overflow: 'hidden',
-    borderWidth: 1, borderColor: 'rgba(167,139,240,0.2)',
-    padding: 12, gap: 10,
-  },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  avatar: {
-    width: 44, height: 44, borderRadius: 22, overflow: 'hidden',
-    borderWidth: 2, borderColor: 'rgba(167,139,240,0.3)',
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.05)',
-  },
-  info: { flex: 1 },
-  host: { color: '#FFFDF8', fontSize: 13, fontWeight: '900' },
-  sub: { color: 'rgba(255,253,248,0.45)', fontSize: 10, fontWeight: '700', marginTop: 2 },
-  pill: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10, borderWidth: 1,
-  },
-  dot: { width: 5, height: 5, borderRadius: 3 },
-  pillText: { fontSize: 9, fontWeight: '900', letterSpacing: 0.4 },
-  joinBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 9, borderRadius: 12,
-    backgroundColor: '#5B0068', borderWidth: 1, borderColor: 'rgba(255,255,255,0.12)',
-  },
-  joinText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
-});
+// ── Host Dumb Charades sheet ──────────────────────────────────────────────────
 
-// ── Ludo room card ────────────────────────────────────────────────────────────
-
-const LUDO_COLOR_HEX: Record<string, string> = {
-  red: '#C9504B', blue: '#0891B2', green: '#5EBB62', yellow: '#D4B142',
-};
-
-function LudoRoomCard({
-  room, onJoin, loading,
-}: {
-  room: LudoRoom; onJoin: () => void; loading: boolean;
-}) {
-  const fade = useRef(new Animated.Value(0)).current;
-  // Somebody who already holds a seat is going back to their game, not watching.
-  const amSeated = room.players.some((p) => p.uid === auth.currentUser?.uid);
-  const canSit = room.players.length < 4 && room.phase === 'waiting';
-  useEffect(() => {
-    Animated.timing(fade, { toValue: 1, duration: 300, useNativeDriver: true }).start();
-  }, []);
-
-  return (
-    <Animated.View style={{ opacity: fade }}>
-      <TouchableOpacity style={lrStyles.card} activeOpacity={0.82} onPress={onJoin}>
-        <LinearGradient colors={['#071208', '#0D2B14']} style={StyleSheet.absoluteFill} />
-        <View style={lrStyles.row}>
-          <View style={lrStyles.avatar}>
-            <GengalAvatar data={room.players[0]?.avatarData} size={38} />
-          </View>
-          <View style={lrStyles.info}>
-            <Text style={lrStyles.host} numberOfLines={1}>{room.players[0]?.nickname ?? 'Host'}</Text>
-            <Text style={lrStyles.sub}>{room.players.length}/4 players</Text>
-          </View>
-          <View style={[lrStyles.pill, room.phase === 'playing' && lrStyles.pillLive]}>
-            {room.phase === 'playing' && <View style={lrStyles.liveDot} />}
-            <Text style={[lrStyles.pillText, room.phase === 'playing' && lrStyles.pillTextLive]}>
-              {room.phase === 'waiting' ? 'Lobby' : 'In Game'}
-            </Text>
-          </View>
-        </View>
-        {/* Color slot dots */}
-        <View style={lrStyles.colorRow}>
-          {['red', 'blue', 'green', 'yellow'].map(color => {
-            const player = room.players.find(p => p.color === color);
-            return (
-              <View key={color} style={[lrStyles.colorSlot, { borderColor: LUDO_COLOR_HEX[color] + '40' }]}>
-                <View style={[lrStyles.colorDot, { backgroundColor: LUDO_COLOR_HEX[color] }]} />
-                <Text style={lrStyles.colorName} numberOfLines={1}>
-                  {player ? player.nickname : 'Open'}
-                </Text>
-              </View>
-            );
-          })}
-        </View>
-        <TouchableOpacity
-          style={[lrStyles.joinBtn, loading && lrStyles.joinBtnDisabled]}
-          onPress={onJoin}
-          disabled={loading}
-          activeOpacity={0.82}
-        >
-          {loading
-            ? <ActivityIndicator size="small" color="#FFF" />
-            : <>
-                <MaterialIcons
-                  name={amSeated || canSit ? 'login' : 'visibility'}
-                  size={13}
-                  color="#FFFDF8"
-                />
-                <Text style={lrStyles.joinText}>
-                  {amSeated ? 'Rejoin' : canSit ? 'Join' : 'Watch'}
-                </Text>
-              </>}
-        </TouchableOpacity>
-      </TouchableOpacity>
-    </Animated.View>
-  );
-}
-
-const lrStyles = StyleSheet.create({
-  card: {
-    borderRadius: 18, overflow: 'hidden',
-    borderWidth: 1, borderColor: 'rgba(94,187,98,0.2)',
-    padding: 12, gap: 10,
-  },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  avatar: {
-    width: 44, height: 44, borderRadius: 22, overflow: 'hidden',
-    borderWidth: 2, borderColor: 'rgba(94,187,98,0.3)',
-    alignItems: 'center', justifyContent: 'center',
-    backgroundColor: 'rgba(255,253,248,0.05)',
-  },
-  info: { flex: 1 },
-  host: { color: '#FFFDF8', fontSize: 13, fontWeight: '900' },
-  sub: { color: 'rgba(255,253,248,0.45)', fontSize: 10, fontWeight: '700', marginTop: 2 },
-  pill: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.1)',
-    backgroundColor: 'rgba(255,255,255,0.06)',
-  },
-  pillLive: { borderColor: 'rgba(94,187,98,0.4)', backgroundColor: 'rgba(94,187,98,0.1)' },
-  liveDot: { width: 5, height: 5, borderRadius: 3, backgroundColor: '#5EBB62' },
-  pillText: { color: 'rgba(255,253,248,0.5)', fontSize: 9, fontWeight: '900', letterSpacing: 0.4 },
-  pillTextLive: { color: '#5EBB62' },
-  colorRow: { flexDirection: 'row', gap: 5 },
-  colorSlot: {
-    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 5, paddingVertical: 4, borderRadius: 8,
-    borderWidth: 1, backgroundColor: 'rgba(255,253,248,0.04)',
-  },
-  colorDot: { width: 6, height: 6, borderRadius: 3 },
-  colorName: { color: 'rgba(255,253,248,0.5)', fontSize: 8, fontWeight: '700', flex: 1 },
-  joinBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
-    paddingVertical: 9, borderRadius: 12,
-    backgroundColor: '#1A6B33', borderWidth: 1, borderColor: 'rgba(94,187,98,0.25)',
-  },
-  joinBtnDisabled: { opacity: 0.5 },
-  joinText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
-});
-
-// ── Create Charades modal ─────────────────────────────────────────────────────
-
-function CreateCharadesModal({
-  visible, onClose, onCreate,
+function CharadesSheet({
+  visible, initialLanguage, onClose, onCreate,
 }: {
   visible: boolean;
+  initialLanguage: string | null;
   onClose: () => void;
   onCreate: (language: string) => Promise<void>;
 }) {
-  const [selected, setSelected] = useState('Hindi');
+  const [selected, setSelected] = useState(initialLanguage ?? 'Hindi');
   const [loading, setLoading] = useState(false);
+
+  // Opening the sheet while a language filter is on starts from that language.
+  useEffect(() => {
+    if (visible) setSelected(initialLanguage ?? 'Hindi');
+  }, [visible, initialLanguage]);
 
   const handleCreate = useCallback(async () => {
     setLoading(true);
@@ -266,130 +265,142 @@ function CreateCharadesModal({
   }, [selected, onCreate]);
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={mStyles.overlay}>
-        <View style={mStyles.card}>
-          <Text style={mStyles.title}>Host Dumb Charades</Text>
-          <Text style={mStyles.subtitle}>Pick the language for the movie pool</Text>
-          <ScrollView style={mStyles.langScroll} showsVerticalScrollIndicator={false}>
-            {CHILL_LANGUAGES.map(lang => (
-              <TouchableOpacity
-                key={lang}
-                style={[mStyles.langRow, selected === lang && mStyles.langRowActive]}
-                onPress={() => setSelected(lang)}
-              >
-                <Text style={[mStyles.langText, selected === lang && mStyles.langTextActive]}>{lang}</Text>
-                {selected === lang && <MaterialIcons name="check-circle" size={16} color="#A78BF0" />}
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          <TouchableOpacity
-            style={[mStyles.createBtn, mStyles.charadeBtn, loading && mStyles.createBtnLoading]}
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
+      <View style={sheetStyles.root}>
+        <Pressable
+          style={sheetStyles.scrim}
+          onPress={loading ? undefined : onClose}
+          accessibilityRole="button"
+          accessibilityLabel="Close"
+        />
+        <View style={sheetStyles.sheet}>
+          <View style={sheetStyles.grip} />
+          <Text style={sheetStyles.title} accessibilityRole="header">Host Dumb Charades</Text>
+          <Text style={sheetStyles.body}>
+            Pick a language. Every movie to act out comes from that language. Hosting is free.
+          </Text>
+
+          {/* All ten fit on one screen as a grid; the old scrolling list cut
+              the last few off with nothing to say there were more. */}
+          <View style={styles.langGrid} accessibilityRole="radiogroup">
+            {CHILL_LANGUAGES.map((lang) => {
+              const on = selected === lang;
+              return (
+                <Pressable
+                  key={lang}
+                  onPress={() => setSelected(lang)}
+                  accessibilityRole="radio"
+                  accessibilityState={{ checked: on }}
+                  style={({ pressed }) => [styles.langChip, on && styles.langChipOn, pressed && styles.langChipPressed]}
+                >
+                  {on && <MaterialIcons name="check" size={16} color="#FFFDF8" />}
+                  <Text style={[styles.langText, on && styles.langTextOn]}>{lang}</Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <PrimaryButton
+            wide
+            label={`Create ${selected} room`}
+            icon="play-arrow"
+            color={GAME.charades.ink}
+            busy={loading}
             onPress={handleCreate}
+          />
+          <Pressable
+            onPress={onClose}
             disabled={loading}
+            accessibilityRole="button"
+            style={({ pressed }) => [sheetStyles.cancel, pressed && sheetStyles.pressed]}
           >
-            {loading
-              ? <ActivityIndicator color="#FFF" size="small" />
-              : <>
-                  <MaterialIcons name="play-circle-filled" size={18} color="#FFFDF8" />
-                  <Text style={mStyles.createBtnText}>Create Room</Text>
-                </>}
-          </TouchableOpacity>
-          <TouchableOpacity style={mStyles.cancelBtn} onPress={onClose}>
-            <Text style={mStyles.cancelText}>Cancel</Text>
-          </TouchableOpacity>
+            <Text style={sheetStyles.cancelText}>Cancel</Text>
+          </Pressable>
         </View>
       </View>
     </Modal>
   );
 }
 
-const mStyles = StyleSheet.create({
-  overlay: {
-    flex: 1, backgroundColor: 'rgba(10,5,15,0.88)',
-    justifyContent: 'flex-end',
-  },
-  card: {
-    backgroundColor: '#120018',
-    borderTopLeftRadius: 28, borderTopRightRadius: 28,
-    padding: 24, paddingBottom: Platform.OS === 'ios' ? 40 : 28,
-    borderWidth: 1, borderColor: 'rgba(167,139,240,0.2)',
-    gap: 14,
-  },
-  title: { color: '#FFFDF8', fontSize: 20, fontWeight: '900', fontFamily: 'serif', textAlign: 'center' },
-  subtitle: { color: 'rgba(255,253,248,0.45)', fontSize: 12, fontWeight: '600', textAlign: 'center', marginTop: -6 },
-  langScroll: { maxHeight: 260 },
-  langRow: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 12, paddingHorizontal: 14, borderRadius: 12, marginBottom: 6,
-    backgroundColor: 'rgba(255,253,248,0.05)',
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.07)',
-  },
-  langRowActive: { backgroundColor: 'rgba(167,139,240,0.1)', borderColor: 'rgba(167,139,240,0.35)' },
-  langText: { color: 'rgba(255,253,248,0.6)', fontSize: 14, fontWeight: '700' },
-  langTextActive: { color: '#A78BF0' },
-  createBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    height: 52, borderRadius: 26,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.2)',
-  },
-  charadeBtn: { backgroundColor: '#5B0068' },
-  createBtnLoading: { opacity: 0.6 },
-  createBtnText: { color: '#FFFDF8', fontSize: 15, fontWeight: '900' },
-  cancelBtn: { alignItems: 'center', paddingVertical: 6 },
-  cancelText: { color: 'rgba(255,253,248,0.4)', fontSize: 13, fontWeight: '700' },
-});
-
 // ── Main screen ───────────────────────────────────────────────────────────────
 
-export default function ChillScreen({ navigate, goBack }: Props) {
+export default function ChillScreen({ navigate }: Props) {
   const { profile } = useUser();
   const myUid = auth.currentUser?.uid ?? '';
   const myName = profile?.nickname || profile?.username || 'Guest';
   const myAvatarData = profile?.avatarData;
 
   const [activeGame, setActiveGame] = useState<ActiveGame>('ludo');
+  const [langFilter, setLangFilter] = useState<string | null>(null);
+  /** Bumped by "Try again" to tear down and reopen both lobby listeners. */
+  const [retry, setRetry] = useState(0);
+
   const [allCharadeRooms, setAllCharadeRooms] = useState<ChillRoom[]>([]);
   // Rooms whose host stopped heartbeating are abandoned, whatever `status` says.
-  const charadeRooms = useLiveRooms(allCharadeRooms);
+  const liveCharadeRooms = useLiveRooms(allCharadeRooms).filter((r) => r.phase !== 'finished');
+  // The language filter is applied here rather than in the query, so the tab
+  // can keep counting every room and switching language needs no reload.
+  const charadeRooms = langFilter
+    ? liveCharadeRooms.filter((r) => r.language === langFilter)
+    : liveCharadeRooms;
   const [allLudoRooms, setLudoRooms] = useState<LudoRoom[]>([]);
   // Same filter as the charades list and LudoScreen. Without it this lobby
   // listed a table whose host had left nine hours earlier as "1 live", and
   // everyone who joined waited for a game nobody could start.
   const ludoRooms = useLiveRooms(allLudoRooms);
-  const [showCreateCharades, setShowCreateCharades] = useState(false);
-  const [ludoCreateModalVisible, setLudoCreateModalVisible] = useState(false);
-  const [creatingLudo, setCreatingLudo] = useState(false);
-  const [joiningLudoId, setJoiningLudoId] = useState<string | null>(null);
-  const [langFilter, setLangFilter] = useState<string | null>(null);
 
-  // "No rooms yet" and "we haven't heard back yet" look identical otherwise,
-  // so the empty state used to flash on every cold open.
+  // "No rooms yet", "we haven't heard back yet" and "the request failed" all
+  // look like an empty list, so each lobby tracks which one it is.
   const [charadesLoaded, setCharadesLoaded] = useState(false);
   const [ludoLoaded, setLudoLoaded] = useState(false);
+  const [charadesError, setCharadesError] = useState(false);
+  const [ludoError, setLudoError] = useState(false);
+
+  const [charadesSheet, setCharadesSheet] = useState(false);
+  const [ludoSheet, setLudoSheet] = useState(false);
+  const [creatingLudo, setCreatingLudo] = useState(false);
+  const [joiningLudoId, setJoiningLudoId] = useState<string | null>(null);
 
   useEffect(() => {
-    setCharadesLoaded(false);
-    const unsub = subscribeToChillRooms((rooms) => {
-      setAllCharadeRooms(rooms);
-      setCharadesLoaded(true);
-    }, langFilter ?? undefined);
-    return unsub;
-  }, [langFilter]);
+    setCharadesError(false);
+    return subscribeToChillRooms(
+      (rooms) => {
+        setAllCharadeRooms(rooms);
+        setCharadesLoaded(true);
+        setCharadesError(false);
+      },
+      undefined,
+      () => {
+        setCharadesError(true);
+        setCharadesLoaded(true);
+      },
+    );
+  }, [retry]);
 
   useEffect(() => {
-    const unsub = subscribeToLudoRooms((rooms) => {
-      setLudoRooms(rooms);
-      setLudoLoaded(true);
-    });
-    return unsub;
-  }, []);
+    setLudoError(false);
+    return subscribeToLudoRooms(
+      (rooms) => {
+        setLudoRooms(rooms);
+        setLudoLoaded(true);
+        setLudoError(false);
+      },
+      () => {
+        setLudoError(true);
+        setLudoLoaded(true);
+      },
+    );
+  }, [retry]);
 
-  // Dumb Charades actions
+  // ── Dumb Charades actions
   const handleCreateCharades = useCallback(async (language: string) => {
-    const roomId = await createChillRoom(myUid, myName, myAvatarData, language);
-    setShowCreateCharades(false);
-    navigate('DumCharadesRoom', { roomId });
+    try {
+      const roomId = await createChillRoom(myUid, myName, myAvatarData, language);
+      setCharadesSheet(false);
+      navigate('DumCharadesRoom', { roomId });
+    } catch (e: any) {
+      Alert.alert('Could not create the room', e?.message || 'Check your connection and try again.');
+    }
   }, [myUid, myName, myAvatarData, navigate]);
 
   const handleJoinCharades = useCallback((room: ChillRoom) => {
@@ -397,24 +408,35 @@ export default function ChillScreen({ navigate, goBack }: Props) {
     navigate('DumCharadesRoom', { roomId: room.id });
   }, [navigate]);
 
-  // Ludo actions
-  const handleCreateLudo = useCallback(async (mode: 'per_game' | 'per_token') => {
-    if (!profile || profile.coins === undefined || profile.coins < 10) {
-      Alert.alert('Insufficient Coins', 'You need at least 10 coins to create a room.');
+  // ── Ludo actions
+  const openLudoSheet = useCallback(() => {
+    // Say so before the sheet, not after the player has picked a mode.
+    if ((profile?.coins ?? 0) < LUDO_TABLE_COST) {
+      Alert.alert(
+        'Not enough coins',
+        `Opening a table costs ${LUDO_TABLE_COST} coins. Top up in the store, or join a table that is already open.`,
+        [
+          { text: 'Not now', style: 'cancel' },
+          { text: 'Get coins', onPress: () => navigate('Coins') },
+        ],
+      );
       return;
     }
+    setLudoSheet(true);
+  }, [profile, navigate]);
+
+  const handleCreateLudo = useCallback(async (mode: LudoMode) => {
+    setLudoSheet(false);
     setCreatingLudo(true);
-    setLudoCreateModalVisible(false);
     try {
       const roomId = await createLudoRoom(myUid, myName, myAvatarData, mode);
       navigate('LudoBoard', { roomId });
-    } catch (e) {
-      console.error(e);
-      Alert.alert('Error', 'Failed to create room.');
+    } catch (e: any) {
+      Alert.alert('Could not open a table', e?.message || 'Check your connection and try again.');
     } finally {
       setCreatingLudo(false);
     }
-  }, [myUid, myName, myAvatarData, navigate, profile]);
+  }, [myUid, myName, myAvatarData, navigate]);
 
   const handleJoinLudo = useCallback(async (room: LudoRoom) => {
     if (!room.id || joiningLudoId) return;
@@ -425,271 +447,190 @@ export default function ChillScreen({ navigate, goBack }: Props) {
       // card that outlived its room. Doing nothing here left the button
       // spinning and then simply stopping, with no screen and no reason.
       if (!joined) {
-        Alert.alert('That table is gone', 'It closed before you could join. Try another one.');
+        Alert.alert('That table has closed', 'It closed before you could join. Pick another one or open your own.');
         return;
       }
       navigate('LudoBoard', { roomId: room.id });
+    } catch (e: any) {
+      Alert.alert('Could not open that table', e?.message || 'Check your connection and try again.');
     } finally {
       setJoiningLudoId(null);
     }
   }, [myUid, myName, myAvatarData, navigate, joiningLudoId]);
 
   const isCharades = activeGame === 'charades';
+  const g = GAME[activeGame];
+  const tryAgain = (
+    <PrimaryButton label="Try again" icon="refresh" color={g.ink} onPress={() => setRetry((n) => n + 1)} />
+  );
+
+  const ludoCta = (
+    <PrimaryButton
+      label={`Open a table · ${LUDO_TABLE_COST}`}
+      icon="add"
+      color={GAME.ludo.ink}
+      busy={creatingLudo}
+      onPress={openLudoSheet}
+      accessibilityLabel={`Open a Ludo table, costs ${LUDO_TABLE_COST} coins`}
+    />
+  );
+  const charadesCta = (
+    <PrimaryButton
+      label="Host a room"
+      icon="add"
+      color={GAME.charades.ink}
+      onPress={() => setCharadesSheet(true)}
+      accessibilityLabel="Host a Dumb Charades room, free"
+    />
+  );
 
   return (
     <ScreenShell tone="light">
       <View style={styles.phone}>
         <TopBar navigate={navigate} subtitle="CHILL LOUNGE" />
 
-        <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
-          <View style={styles.heroPanel}>
-            <View style={styles.heroIconCup}>
-              <MaterialIcons name="sports-esports" size={30} color="#8B6F09" />
-            </View>
-            <View style={styles.heroCopy}>
-              <Text style={styles.heroTitle}>Chill Lounge</Text>
-              <Text style={styles.heroSub}>Play, talk, and unwind in relaxed premium rooms.</Text>
+        <ScrollView
+          contentContainerStyle={styles.scroll}
+          showsVerticalScrollIndicator={false}
+          stickyHeaderIndices={[0]}
+        >
+          {/* The switcher stays pinned so changing game never needs a scroll back up. */}
+          <View style={styles.tabsWrap}>
+            <View style={styles.tabs} accessibilityRole="tablist">
+              <GameTab
+                game="ludo"
+                title="Ludo"
+                live={ludoRooms.length}
+                loaded={ludoLoaded && !ludoError}
+                selected={!isCharades}
+                onPress={() => setActiveGame('ludo')}
+              />
+              <GameTab
+                game="charades"
+                title="Dumb Charades"
+                live={liveCharadeRooms.length}
+                loaded={charadesLoaded && !charadesError}
+                selected={isCharades}
+                onPress={() => setActiveGame('charades')}
+              />
             </View>
           </View>
 
-          <View style={styles.gamePickerRow}>
-            <TouchableOpacity
-              style={[styles.gameCard, isCharades && styles.gameCardActive,
-                { borderColor: isCharades ? '#D8BCE2' : '#E9D9BE' }]}
-              activeOpacity={0.82}
-              onPress={() => setActiveGame('charades')}
-            >
-              <LinearGradient
-                colors={isCharades ? ['#FFFFFF', '#FFF0FC', '#F5E1FA'] : ['#FFFFFF', '#FFF8EA']}
-                style={StyleSheet.absoluteFill}
-              />
-              {isCharades && <MaterialIcons name="check-circle" size={20} color="#8B3A93" style={styles.activeCheck} />}
-              <View style={[styles.gameIcon, { backgroundColor: '#F4E1F7' }]}>
-                <MaterialIcons name="theaters" size={30} color="#6D1673" />
-              </View>
-              <Text style={styles.gameTitle}>Dumb Charades</Text>
-              <Text style={styles.gameSubtitle}>Movie guessing rooms</Text>
-              <View style={[styles.gameCountPill, { borderColor: '#D8BCE2' }]}>
-                <Text style={[styles.gameCountText, { color: '#6D1673' }]}>
-                  {charadeRooms.length} live
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.gameCard, !isCharades && styles.gameCardActive,
-                { borderColor: !isCharades ? '#C4DDB7' : '#E9D9BE' }]}
-              activeOpacity={0.82}
-              onPress={() => setActiveGame('ludo')}
-            >
-              <LinearGradient
-                colors={!isCharades ? ['#FFFFFF', '#F0FAEA', '#E0F4D8'] : ['#FFFFFF', '#FFF8EA']}
-                style={StyleSheet.absoluteFill}
-              />
-              {!isCharades && <MaterialIcons name="check-circle" size={20} color="#609B43" style={styles.activeCheck} />}
-              <View style={[styles.gameIcon, { backgroundColor: '#E0F4D8' }]}>
-                <MaterialIcons name="casino" size={30} color="#3F7D2B" />
-              </View>
-              <Text style={styles.gameTitle}>Ludo Live</Text>
-              <Text style={styles.gameSubtitle}>4-player game rooms</Text>
-              <View style={[styles.gameCountPill, { borderColor: '#C4DDB7' }]}>
-                <Text style={[styles.gameCountText, { color: '#3F7D2B' }]}>
-                  {ludoRooms.length} live
-                </Text>
-              </View>
-            </TouchableOpacity>
+          <View style={styles.section}>
+            <View style={styles.sectionCopy}>
+              <Text style={styles.sectionTitle} accessibilityRole="header">
+                {isCharades ? 'Dumb Charades' : 'Ludo tables'}
+              </Text>
+              <Text style={styles.sectionSub}>
+                {isCharades
+                  ? 'Act out a movie, guess the rest. Win coins.'
+                  : 'Up to 4 players, with voice on.'}
+              </Text>
+            </View>
+            {isCharades ? charadesCta : ludoCta}
           </View>
 
-          {/* ── Section: Dumb Charades ── */}
-          {isCharades && (
+          {isCharades ? (
             <>
-              {/* Hero action bar */}
-              <View style={styles.actionBar}>
-                <View style={styles.actionBarInfo}>
-                  <Text style={styles.actionBarTitle}>Dumb Charades</Text>
-                  <Text style={styles.actionBarSub}>Act, guess, laugh, and earn coins</Text>
-                </View>
-                {charadeRooms.length > 0 && <TouchableOpacity
-                  style={[styles.createBtn, { backgroundColor: '#5B0068', borderColor: 'rgba(167,139,240,0.3)' }]}
-                  onPress={() => setShowCreateCharades(true)}
-                  activeOpacity={0.82}
-                >
-                  <MaterialIcons name="add" size={16} color="#FFFDF8" />
-                  <Text style={styles.createBtnText}>Host</Text>
-                </TouchableOpacity>}
-              </View>
-
-              {/* Language filter */}
               <ScrollView
                 horizontal
                 showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.filterScroll}
+                contentContainerStyle={styles.filters}
+                accessibilityRole="radiogroup"
+                accessibilityLabel="Filter by language"
               >
-                <TouchableOpacity
-                  style={[styles.filterPill, !langFilter && styles.filterPillActiveCharades]}
-                  onPress={() => setLangFilter(null)}
-                >
-                  <Text style={[styles.filterText, !langFilter && { color: '#A78BF0' }]}>All</Text>
-                </TouchableOpacity>
-                {CHILL_LANGUAGES.map(lang => (
-                  <TouchableOpacity
-                    key={lang}
-                    style={[styles.filterPill, langFilter === lang && styles.filterPillActiveCharades]}
-                    onPress={() => setLangFilter(lang === langFilter ? null : lang)}
-                  >
-                    <Text style={[styles.filterText, langFilter === lang && { color: '#A78BF0' }]}>{lang}</Text>
-                  </TouchableOpacity>
-                ))}
+                {[null, ...CHILL_LANGUAGES].map((lang) => {
+                  const on = langFilter === lang;
+                  return (
+                    <Pressable
+                      key={lang ?? 'all'}
+                      onPress={() => setLangFilter(lang)}
+                      accessibilityRole="radio"
+                      accessibilityState={{ checked: on }}
+                      accessibilityLabel={lang ?? 'All languages'}
+                      hitSlop={{ top: 4, bottom: 4 }}
+                      style={({ pressed }) => [styles.filter, on && styles.filterOn, pressed && styles.langChipPressed]}
+                    >
+                      <Text style={[styles.filterText, on && styles.filterTextOn]}>{lang ?? 'All'}</Text>
+                    </Pressable>
+                  );
+                })}
               </ScrollView>
 
-              {/* Room list */}
               <View style={styles.list}>
                 {!charadesLoaded ? (
-                  <View style={styles.empty}>
-                    <ActivityIndicator color="#5B0068" />
-                  </View>
+                  <ListState kind="loading" game="charades" />
+                ) : charadesError ? (
+                  <ListState
+                    kind="error"
+                    game="charades"
+                    title="Couldn't load rooms"
+                    body="Check your connection, then try again."
+                    action={tryAgain}
+                  />
                 ) : charadeRooms.length === 0 ? (
-                  <View style={styles.empty}>
-                    <MaterialIcons name="theaters" size={42} color="#8B3A93" />
-                    <Text style={styles.emptyTitle}>No rooms yet</Text>
-                    <Text style={styles.emptyText}>Be the first to host a game!</Text>
-                    <TouchableOpacity
-                      style={[styles.emptyBtn, { backgroundColor: '#5B0068' }]}
-                      onPress={() => setShowCreateCharades(true)}
-                    >
-                      <Text style={styles.emptyBtnText}>Host a Room</Text>
-                    </TouchableOpacity>
-                  </View>
+                  <ListState
+                    kind="empty"
+                    game="charades"
+                    title={langFilter ? `No ${langFilter} rooms right now` : 'No rooms right now'}
+                    body={langFilter
+                      ? 'Host one in this language with the button above, or pick All to see every room.'
+                      : 'Host the first one with the button above. Friends join for free.'}
+                    action={langFilter ? (
+                      <Pressable
+                        onPress={() => setLangFilter(null)}
+                        accessibilityRole="button"
+                        style={({ pressed }) => [styles.secondary, pressed && styles.langChipPressed]}
+                      >
+                        <Text style={styles.secondaryText}>Show all languages</Text>
+                      </Pressable>
+                    ) : undefined}
+                  />
                 ) : (
-                  charadeRooms.map(room => (
-                    <CharadesRoomCard
-                      key={room.id}
-                      room={room}
-                      onJoin={() => handleJoinCharades(room)}
-                    />
+                  charadeRooms.map((room) => (
+                    <CharadesRoomCard key={room.id} room={room} onJoin={() => handleJoinCharades(room)} />
                   ))
                 )}
               </View>
             </>
+          ) : (
+            <View style={styles.list}>
+              {!ludoLoaded ? (
+                <ListState kind="loading" game="ludo" />
+              ) : ludoError ? (
+                <ListState
+                  kind="error"
+                  game="ludo"
+                  title="Couldn't load tables"
+                  body="Check your connection, then try again."
+                  action={tryAgain}
+                />
+              ) : ludoRooms.length === 0 ? (
+                <ListState
+                  kind="empty"
+                  game="ludo"
+                  title="No tables open right now"
+                  body="Open one with the button above and invite your friends to take a seat."
+                />
+              ) : (
+                ludoRooms.map((room) => (
+                  <LudoTableCard
+                    key={room.id}
+                    room={room}
+                    onOpen={() => handleJoinLudo(room)}
+                    busy={joiningLudoId === room.id}
+                  />
+                ))
+              )}
+            </View>
           )}
-
-          {/* ── Section: Ludo ── */}
-          {!isCharades && (
-            <>
-              {/* Hero action bar */}
-              <View style={styles.actionBar}>
-                <View style={styles.actionBarInfo}>
-                  <Text style={styles.actionBarTitle}>Ludo Live</Text>
-                  <Text style={styles.actionBarSub}>Up to 4 players with voice-friendly play</Text>
-                </View>
-                {ludoRooms.length > 0 && <TouchableOpacity
-                  style={[styles.createBtn, { backgroundColor: '#1A6B33', borderColor: 'rgba(94,187,98,0.3)' },
-                    creatingLudo && styles.createBtnLoading]}
-                  onPress={() => setLudoCreateModalVisible(true)}
-                  disabled={creatingLudo}
-                  activeOpacity={0.82}
-                >
-                  {creatingLudo
-                    ? <ActivityIndicator size="small" color="#FFF" />
-                    : <>
-                        <MaterialIcons name="add" size={16} color="#FFFDF8" />
-                        <Text style={styles.createBtnText}>Create</Text>
-                      </>}
-                </TouchableOpacity>}
-              </View>
-
-              {/* How to play: a caption, not a bordered card, which read as buttons. */}
-              <View style={styles.howRow}>
-                {['Roll dice', 'Move token', 'Reach home'].map((label, i) => (
-                  <React.Fragment key={label}>
-                    {i > 0 && <MaterialIcons name="chevron-right" size={14} color="#9DB88F" />}
-                    <Text style={styles.howLabel}>{label}</Text>
-                  </React.Fragment>
-                ))}
-              </View>
-
-              {/* Room list */}
-              <View style={styles.list}>
-                {!ludoLoaded ? (
-                  <View style={styles.empty}>
-                    <ActivityIndicator color="#5B0068" />
-                  </View>
-                ) : ludoRooms.length === 0 ? (
-                  <View style={styles.empty}>
-                    <MaterialIcons name="casino" size={42} color="#3F7D2B" />
-                    <Text style={styles.emptyTitle}>No rooms open</Text>
-                    <Text style={styles.emptyText}>Create a room and invite friends!</Text>
-                    <TouchableOpacity
-                      style={[styles.emptyBtn, { backgroundColor: '#1A6B33' },
-                        creatingLudo && styles.createBtnLoading]}
-                      onPress={() => setLudoCreateModalVisible(true)}
-                      disabled={creatingLudo}
-                    >
-                      {creatingLudo
-                        ? <ActivityIndicator size="small" color="#FFF" />
-                        : <Text style={styles.emptyBtnText}>Create Room</Text>}
-                    </TouchableOpacity>
-                  </View>
-                ) : (
-                  ludoRooms.map(room => (
-                    <LudoRoomCard
-                      key={room.id}
-                      room={room}
-                      onJoin={() => handleJoinLudo(room)}
-                      loading={joiningLudoId === room.id}
-                    />
-                  ))
-                )}
-              </View>
-            </>
-          )}
-
         </ScrollView>
 
-        <Modal visible={ludoCreateModalVisible} transparent animationType="slide" onRequestClose={() => setLudoCreateModalVisible(false)}>
-          <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' }}>
-            <View style={{ backgroundColor: '#FFFDF8', width: '85%', borderRadius: 20, padding: 24, alignItems: 'center' }}>
-              <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#4A3600', marginBottom: 8 }}>Choose Game Mode</Text>
-              <Text style={{ fontSize: 13, color: '#7E7368', textAlign: 'center', marginBottom: 20 }}>
-                Creating a room costs 10 coins. You will earn a 10% commission from player tickets and bets!
-              </Text>
-              
-              <TouchableOpacity
-                style={[styles.createBtn, { width: '100%', marginBottom: 12, backgroundColor: '#4A3600', justifyContent: 'center' }, creatingLudo && styles.createBtnLoading]}
-                disabled={creatingLudo}
-                accessibilityRole="button"
-                accessibilityLabel="Create per game mode room for 10 coins"
-                onPress={() => handleCreateLudo('per_game')}
-              >
-                <Text style={{color: '#FFF', fontWeight: '800'}}>Per Game Mode</Text>
-              </TouchableOpacity>
-              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
-                Players buy a fixed ticket (50 coins) to join your table.
-              </Text>
-
-              <TouchableOpacity
-                style={[styles.createBtn, { width: '100%', backgroundColor: '#1A6B33', marginBottom: 12, justifyContent: 'center' }, creatingLudo && styles.createBtnLoading]}
-                disabled={creatingLudo}
-                accessibilityRole="button"
-                accessibilityLabel="Create per token mode room for 10 coins"
-                onPress={() => handleCreateLudo('per_token')}
-              >
-                <Text style={{color: '#FFF', fontWeight: '800'}}>Per Token Mode</Text>
-              </TouchableOpacity>
-              <Text style={{ fontSize: 11, color: '#8B7A6A', textAlign: 'center', marginBottom: 20 }}>
-                Audience bets on colors, and every dice roll costs 15 coins.
-              </Text>
-
-              <TouchableOpacity onPress={() => setLudoCreateModalVisible(false)} style={{ padding: 10 }}>
-                <Text style={{ color: '#8B7A6A', fontWeight: 'bold' }}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </Modal>
-
-        <CreateCharadesModal
-          visible={showCreateCharades}
-          onClose={() => setShowCreateCharades(false)}
+        <LudoModeSheet visible={ludoSheet} onClose={() => setLudoSheet(false)} onPick={handleCreateLudo} />
+        <CharadesSheet
+          visible={charadesSheet}
+          initialLanguage={langFilter}
+          onClose={() => setCharadesSheet(false)}
           onCreate={handleCreateCharades}
         />
 
@@ -701,145 +642,164 @@ export default function ChillScreen({ navigate, goBack }: Props) {
 
 const styles = StyleSheet.create({
   phone: { flex: 1, alignSelf: 'center', width: '100%', maxWidth: 430 },
-  scroll: { paddingBottom: 110 },
-  heroPanel: {
-    marginHorizontal: 16,
-    marginTop: 14,
-    padding: 16,
-    borderRadius: 22,
+  scroll: { paddingBottom: 120 },
+
+  // Game switcher
+  tabsWrap: { paddingHorizontal: 16, paddingTop: 12, paddingBottom: 6, backgroundColor: skeuo.surface },
+  tabs: {
+    flexDirection: 'row',
+    gap: 6,
+    padding: 5,
+    borderRadius: 20,
+    backgroundColor: skeuo.surfaceInset,
     borderWidth: 1,
     borderColor: skeuo.border,
-    backgroundColor: '#FFFDF8',
+  },
+  tab: {
+    flex: 1,
+    minHeight: 60,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 15,
+    borderWidth: 1.5,
+    borderColor: 'transparent',
+  },
+  tabSelected: {
+    elevation: 3,
+    boxShadow: Platform.OS === 'web' ? '0 6px 14px rgba(83,58,29,0.14)' : undefined,
+  },
+  tabPressed: { backgroundColor: 'rgba(255,255,255,0.5)' },
+  tabIcon: { width: 38, height: 38, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  tabMeta: { flex: 1, gap: 2 },
+  tabTitle: { color: '#5E5249', fontSize: 15, fontWeight: '900' },
+  tabLiveRow: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  tabDot: { width: 7, height: 7, borderRadius: 4 },
+  tabLive: { color: '#7E7368', fontSize: 12, fontWeight: '700' },
+
+  // Section header with the game's one primary action
+  section: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
+    marginHorizontal: 16,
+    marginTop: 14,
+    marginBottom: 10,
   },
-  heroIconCup: {
-    width: 58,
-    height: 58,
-    borderRadius: 18,
+  sectionCopy: { flex: 1, gap: 2 },
+  sectionTitle: { color: skeuo.plum, fontSize: 21, fontWeight: '900', fontFamily: 'serif' },
+  sectionSub: { color: '#7E7368', fontSize: 13, fontWeight: '600', lineHeight: 18 },
+
+  primary: {
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FFF1BB',
-    borderWidth: 1,
-    borderColor: '#E8D79B',
-    boxShadow: Platform.OS === 'web' ? 'inset 0 1px 0 rgba(255,255,255,0.9), 0 8px 16px rgba(154,122,5,0.16)' : undefined,
+    gap: 6,
+    height: 46,
+    paddingHorizontal: 16,
+    borderRadius: 23,
+    elevation: 2,
   },
-  heroCopy: { flex: 1 },
-  heroTitle: {
-    color: skeuo.plum,
-    fontFamily: 'serif',
-    fontSize: 24,
-    fontWeight: '900',
+  primaryWide: { alignSelf: 'stretch', height: 52, borderRadius: 26, marginTop: 6 },
+  primaryPressed: { opacity: 0.8 },
+  primaryText: { color: '#FFFDF8', fontSize: 14, fontWeight: '900' },
+  secondary: {
+    height: 44, paddingHorizontal: 18, borderRadius: 22, justifyContent: 'center',
+    borderWidth: 1.5, borderColor: GAME.charades.ink,
   },
-  heroSub: {
-    marginTop: 3,
-    color: '#8E8072',
-    fontSize: 12,
-    fontWeight: '700',
-    lineHeight: 17,
-  },
-
-  // Game picker
-  gamePickerRow: {
-    flexDirection: 'row', gap: 10,
-    marginHorizontal: 16, marginTop: 14,
-  },
-  gameCard: {
-    flex: 1, borderRadius: 20, overflow: 'hidden',
-    borderWidth: 1.5, padding: 16, gap: 6, alignItems: 'center',
-    minHeight: 156,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  gameCardActive: {
-    boxShadow: Platform.OS === 'web' ? '0 14px 28px rgba(83, 58, 29, 0.18), inset 0 1px 0 rgba(255,255,255,0.95)' : undefined,
-  },
-  activeCheck: { position: 'absolute', top: 10, right: 10 },
-  gameIcon: {
-    width: 54,
-    height: 54,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 8,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.75)',
-  },
-  gameTitle: {
-    color: skeuo.plum, fontSize: 16, fontWeight: '900',
-    fontFamily: 'serif', textAlign: 'center', lineHeight: 20,
-  },
-  gameSubtitle: {
-    color: '#8E8072',
-    fontSize: 10,
-    fontWeight: '800',
-    textAlign: 'center',
-  },
-  gameCountPill: {
-    marginTop: 'auto',
-    paddingHorizontal: 9, paddingVertical: 4, borderRadius: 12,
-    borderWidth: 1, backgroundColor: '#FFFDF8',
-  },
-  gameCountText: { fontSize: 9, fontWeight: '900' },
-
-  // Action bar
-  actionBar: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    marginHorizontal: 16, marginTop: 18, marginBottom: 4,
-  },
-  actionBarInfo: { flex: 1, gap: 2 },
-  actionBarTitle: { color: skeuo.plum, fontSize: 18, fontWeight: '900', fontFamily: 'serif' },
-  actionBarSub: { color: '#8E8072', fontSize: 11, fontWeight: '700' },
-  createBtn: {
-    flexDirection: 'row', alignItems: 'center', gap: 5,
-    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 14, borderWidth: 1,
-  },
-  createBtnLoading: { opacity: 0.6 },
-  createBtnText: { color: '#FFFDF8', fontSize: 12, fontWeight: '900' },
+  secondaryText: { color: GAME.charades.ink, fontSize: 14, fontWeight: '900' },
 
   // Language filter
-  filterScroll: { paddingHorizontal: 16, paddingVertical: 10, gap: 7 },
-  filterPill: {
-    paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14,
-    backgroundColor: '#FFFDF8',
-    borderWidth: 1, borderColor: skeuo.border,
-    boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
-  },
-  filterPillActiveCharades: {
-    backgroundColor: '#F4E1F7',
-    borderColor: '#D8BCE2',
-  },
-  filterText: { color: '#8E8072', fontSize: 11, fontWeight: '800' },
-
-  // How to play (Ludo)
-  howRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    marginHorizontal: 16, marginTop: 2, marginBottom: 8,
-  },
-  howLabel: { color: '#6F8E60', fontSize: 11, fontWeight: '700' },
-
-  // Room list
-  list: { paddingHorizontal: 16, gap: 10, marginTop: 4 },
-
-  // Empty state
-  empty: {
-    alignItems: 'center',
-    paddingVertical: 34,
-    paddingHorizontal: 18,
-    gap: 8,
-    borderRadius: 22,
-    backgroundColor: '#FFFDF8',
+  filters: { paddingHorizontal: 16, paddingBottom: 12, gap: 8 },
+  filter: {
+    height: 36,
+    justifyContent: 'center',
+    paddingHorizontal: 15,
+    borderRadius: 18,
+    backgroundColor: skeuo.surfaceRaised,
     borderWidth: 1,
     borderColor: skeuo.border,
+  },
+  filterOn: { backgroundColor: GAME.charades.ink, borderColor: GAME.charades.ink },
+  filterText: { color: '#5E5249', fontSize: 13, fontWeight: '800' },
+  filterTextOn: { color: '#FFFDF8' },
+
+  list: { paddingHorizontal: 16, gap: 12 },
+
+  // Loading / error / empty
+  state: {
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 30,
+    paddingHorizontal: 22,
+    borderRadius: 22,
+    backgroundColor: skeuo.surfaceRaised,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+  },
+  stateIcon: { width: 54, height: 54, borderRadius: 27, alignItems: 'center', justifyContent: 'center', marginBottom: 2 },
+  statePawns: { flexDirection: 'row', gap: 8, marginBottom: 2 },
+  stateTitle: { color: skeuo.plum, fontSize: 18, fontWeight: '900', fontFamily: 'serif', textAlign: 'center' },
+  stateBody: {
+    color: '#7E7368', fontSize: 13, fontWeight: '600', textAlign: 'center', lineHeight: 19, marginBottom: 6,
+  },
+
+  // Charades room card (matches the Ludo table card)
+  card: {
+    borderRadius: 20,
+    padding: 14,
+    gap: 12,
+    backgroundColor: skeuo.surfaceRaised,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+    elevation: 2,
     boxShadow: Platform.OS === 'web' ? skeuo.raisedShadow : undefined,
   },
-  emptyTitle: { color: skeuo.plum, fontSize: 18, fontWeight: '900', fontFamily: 'serif' },
-  emptyText: { color: '#8E8072', fontSize: 12, fontWeight: '700', textAlign: 'center' },
-  emptyBtn: {
-    marginTop: 6, paddingHorizontal: 22, paddingVertical: 11, borderRadius: 20,
-    borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)',
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+  cardPressed: { opacity: 0.85, transform: [{ scale: 0.99 }] },
+  cardHead: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  cardAvatar: {
+    width: 46, height: 46, borderRadius: 23, overflow: 'hidden',
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: skeuo.surfaceInset,
+    borderWidth: 1.5, borderColor: GAME.charades.border,
   },
-  emptyBtnText: { color: '#FFFDF8', fontSize: 13, fontWeight: '900' },
+  cardMeta: { flex: 1, gap: 2 },
+  cardHost: { color: skeuo.plum, fontSize: 16, fontWeight: '900' },
+  cardSub: { color: '#7E7368', fontSize: 12, fontWeight: '700' },
+  status: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
+    borderWidth: 1, borderColor: skeuo.border, backgroundColor: skeuo.surface,
+  },
+  statusLive: { borderColor: GAME.charades.border, backgroundColor: GAME.charades.wash },
+  statusDot: { width: 7, height: 7, borderRadius: 4, backgroundColor: GAME.charades.ink },
+  statusText: { color: '#7E7368', fontSize: 10, fontWeight: '900', letterSpacing: 0.6 },
+  statusTextLive: { color: GAME.charades.ink },
+  cardFoot: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  cardFootText: { color: '#7E7368', fontSize: 12, fontWeight: '700' },
+  cardCta: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
+    height: 44, minWidth: 128, paddingHorizontal: 18, borderRadius: 22,
+  },
+  cardCtaText: { color: '#FFFDF8', fontSize: 14, fontWeight: '900' },
+
+  // Language picker in the host sheet
+  langGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  langChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    height: 44,
+    paddingHorizontal: 16,
+    borderRadius: 22,
+    backgroundColor: skeuo.surface,
+    borderWidth: 1,
+    borderColor: skeuo.border,
+  },
+  langChipOn: { backgroundColor: GAME.charades.ink, borderColor: GAME.charades.ink },
+  langChipPressed: { opacity: 0.75 },
+  langText: { color: '#5E5249', fontSize: 14, fontWeight: '800' },
+  langTextOn: { color: '#FFFDF8' },
 });

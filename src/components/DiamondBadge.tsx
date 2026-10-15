@@ -46,7 +46,7 @@ export default function DiamondBadge({ amount, compact }: DiamondBadgeProps) {
         <Text
           style={[styles.text, compact && styles.textCompact]}
           numberOfLines={1}
-          accessibilityLabel={`${raw.toLocaleString()} coins`}
+          accessibilityLabel={`${Math.max(0, Math.floor(Number(raw) || 0)).toLocaleString()} coins`}
         >
           {displayAmount}
         </Text>
