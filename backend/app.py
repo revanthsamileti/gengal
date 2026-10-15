@@ -79,7 +79,8 @@ def room_uid_is_speaker(room_collection, room, user_uid):
         uids = room.get('playerUids') or [
             (p or {}).get('uid') for p in (room.get('players') or [])
         ]
-        return user_uid in uids
+        # Watchers the host has handed a mic (/api/v1/ludo/speak).
+        return user_uid in uids or user_uid in (room.get('micGuests') or {})
     if room_collection == 'chill_rooms':
         return user_uid in (
             room.get('hostUid'), room.get('actorUid'), room.get('guesserUid')
@@ -1151,23 +1152,35 @@ def transfer_coins_endpoint():
         return jsonify({"error": "Cannot transfer coins from another user"}), 403
     if not receiver_id or sender_id == receiver_id:
         return jsonify({"error": "Invalid receiver"}), 400
+    # A gift sent at a Ludo table: what each watcher has given there orders
+    # the host's list of mic requests.
+    ludo_room_id = str(data.get("ludoRoomId") or "").strip()
     try:
         amount = parse_capped_amount(data.get("amount"), "amount", MAX_COIN_TRANSFER)
         db_client = firestore.client()
         sender_ref = db_client.collection('users').document(sender_id)
         receiver_ref = db_client.collection('users').document(receiver_id)
+        ludo_ref = db_client.collection('ludo_rooms').document(ludo_room_id) if ludo_room_id else None
         transaction = db_client.transaction()
 
         @firestore.transactional
         def apply(transaction):
             sender_balance = get_coin_balance(sender_ref.get(transaction=transaction))
             receiver_balance = get_coin_balance(receiver_ref.get(transaction=transaction))
+            ludo = ludo_ref.get(transaction=transaction) if ludo_ref else None
             if sender_balance < amount:
                 raise ValueError("Insufficient Gengal balance")
             sender_new = sender_balance - amount
             receiver_new = receiver_balance + amount
             transaction.update(sender_ref, {"coins": sender_new})
             transaction.update(receiver_ref, {"coins": receiver_new})
+            if ludo is not None and ludo.exists:
+                table = ludo.to_dict() or {}
+                at_table = receiver_id == table.get('hostUid') or receiver_id in (table.get('playerUids') or [])
+                if at_table and table.get('status') == 'live':
+                    totals = dict(table.get('giftTotals') or {})
+                    totals[sender_id] = round(float(totals.get(sender_id) or 0) + amount, 2)
+                    transaction.update(ludo_ref, {"giftTotals": totals})
             return sender_new, receiver_new
 
         sender_new, receiver_new = apply(transaction)
@@ -2140,6 +2153,7 @@ LUDO_STATE_FIELDS = (
     'status', 'finishRank', 'winnersOrder', 'billedUntil', 'emptySince',
     'hostAway', 'hostLeaves', 'hostMissed', 'hostBenched', 'departedUids',
     'paidBy', 'hostEarned', 'lastActive', 'settled', 'settlement',
+    'speakRequests', 'micGuests',
 )
 
 
@@ -2721,6 +2735,8 @@ def ludo_watch_endpoint():
             if here and not watcher.exists and ludo_watch_billable(room) and ledger.balance(uid) < minute:
                 raise LudoWatchBroke()
             charged = ludo_watch_settle(room, state, ledger, uid, now)
+            if not here:
+                ludo_drop_speaker(room, uid)
             ledger.write()
             ludo_write_state(transaction, room_ref, before, room)
             if here:
@@ -2742,6 +2758,101 @@ def ludo_watch_endpoint():
     except Exception as e:
         print(f"[LUDO] Watch error: {e}")
         return jsonify({"error": "Could not update the table"}), 500
+
+
+LUDO_SPEAK_ACTIONS = ('request', 'cancel', 'accept', 'decline', 'remove')
+
+
+def ludo_drop_speaker(room, uid):
+    """Forget a watcher's mic request and mic. Mutates `room`."""
+    for field in ('speakRequests', 'micGuests'):
+        entries = dict(room.get(field) or {})
+        if uid in entries:
+            entries.pop(uid)
+            room[field] = entries
+
+
+@app.route('/api/v1/ludo/speak', methods=['POST', 'OPTIONS'])
+def ludo_speak_endpoint():
+    """Watchers have no mic. They ask the host for one; the host decides.
+
+    `request` / `cancel` are the watcher's (cancel also hands a mic back);
+    `accept` / `decline` / `remove` are the host's, naming `targetUid`. The host's
+    list is ordered by what each watcher has given at this table (see
+    giftTotals, kept by /coins/transfer), so a bigger gifter is asked first.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    room_id = str(data.get('roomId') or '').strip()
+    action = str(data.get('action') or '').strip()
+    target = str(data.get('targetUid') or '').strip()
+    if not room_id or action not in LUDO_SPEAK_ACTIONS:
+        return jsonify({"error": "Missing roomId or action"}), 400
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = room_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("Unknown room")
+            before = snap.to_dict() or {}
+            if not ludo_is_per_minute(before) or before.get('status') != 'live' or before.get('settled'):
+                raise ValueError("This table is not taking requests")
+            host = before.get('hostUid')
+            seated = set(before.get('playerUids') or [])
+            requests = dict(before.get('speakRequests') or {})
+            guests = dict(before.get('micGuests') or {})
+            if action in ('request', 'cancel'):
+                if uid == host or uid in seated:
+                    raise ValueError("Players already have a mic")
+                if action == 'request':
+                    if uid not in guests:
+                        requests[uid] = {
+                            "nickname": str(data.get('nickname') or 'Guest')[:40],
+                            "avatarData": data.get('avatarData'),
+                            "at": datetime.now(timezone.utc),
+                        }
+                else:
+                    requests.pop(uid, None)
+                    guests.pop(uid, None)
+            else:
+                if uid != host:
+                    raise PermissionError("Only the host decides who gets a mic")
+                if not target:
+                    raise ValueError("Missing targetUid")
+                if action == 'accept':
+                    asked = requests.pop(target, None)
+                    if asked is None:
+                        raise ValueError("That request has gone")
+                    guests[target] = {"nickname": asked.get('nickname'), "avatarData": asked.get('avatarData')}
+                elif action == 'decline':
+                    requests.pop(target, None)
+                else:
+                    guests.pop(target, None)
+            changed = {}
+            if requests != (before.get('speakRequests') or {}):
+                changed['speakRequests'] = requests
+            if guests != (before.get('micGuests') or {}):
+                changed['micGuests'] = guests
+            if changed:
+                transaction.update(room_ref, changed)
+            return {"requested": uid in requests, "onMic": uid in guests}
+
+        return jsonify({"ok": True, **apply(transaction)}), 200
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 403
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Speak error: {e}")
+        return jsonify({"error": "Could not update the request"}), 500
 
 
 def ludo_live_colours(room):

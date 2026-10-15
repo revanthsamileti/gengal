@@ -42,6 +42,7 @@ import {
   joinLudoRoom, leaveLudoRoom,
   startGame, rollDice, moveToken, skipTurn, SKIP_GRACE_MS, closeLudoRoom,
   isPerMinute, ludoRate, payingPlayers, tickLudo, watchLudo, watchPerMinute,
+  micQueue, speakLudo,
   getLegalMoves,
   sendLudoChat, sendLudoGift,
   buyLudoTicket, placeLudoBet,
@@ -105,7 +106,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   // the same thing a beat later; the die should not wait for it.
   const [rolled, setRolled] = useState<number | null>(null);
   const [joinedAsSpectator, setJoinedAsSpectator] = useState(false);
-  const [sheet, setSheet] = useState<null | 'chat' | 'gift'>(null);
+  const [sheet, setSheet] = useState<null | 'chat' | 'gift' | 'mic'>(null);
   // One lock across every coin-moving control on this screen: taking a seat,
   // backing a colour and gifting all debit the same balance, so they must not
   // be able to overlap or double-fire.
@@ -172,6 +173,11 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   // The entry answer only stands in until the room document has loaded.
   const asSpectator = room ? !isSeated : joinedAsSpectator;
   spectatorRef.current = asSpectator;
+  // Watchers have no mic until the host hands them one (see /ludo/speak).
+  const iAmMicGuest = !!room?.micGuests?.[myUid];
+  const iAskedForMic = !!room?.speakRequests?.[myUid];
+  const canAskForMic = isPerMinute(room) && asSpectator && !isHost && !iAmMicGuest
+    && room?.status === 'live' && room?.phase !== 'finished';
 
   // Heartbeat for watcher count only — paid seats are not presence-driven.
   const { liveCount, connection } = useRoomPresence({
@@ -189,7 +195,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     !!roomId && !!myUid && !!room && room.status === 'live' && connection === 'live';
   const { toggleMic, micMuted, toggleSpeaker, speakerOn } = useRoomVoice(
     roomId,
-    asSpectator ? 'audience' : 'broadcaster',
+    asSpectator && !iAmMicGuest ? 'audience' : 'broadcaster',
     voiceEnabled,
   );
 
@@ -530,6 +536,37 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     goBack?.();
   }, [roomId, myUid, myName, isHost, room, goBack]);
 
+  // ── Mic requests ─────────────────────────────────────────────────────────
+  const [micBusy, setMicBusy] = useState<string | null>(null);
+  const askForMic = useCallback(async () => {
+    if (micBusy) return;
+    setMicBusy(myUid);
+    try {
+      if (iAskedForMic) {
+        await speakLudo(roomId, 'cancel');
+      } else {
+        await speakLudo(roomId, 'request', { nickname: myName, avatarData: myAvatarData ?? null });
+        Alert.alert('Asked to talk', 'The host will see your request. Gifts you give at this table move you up the list.');
+      }
+    } catch (e: any) {
+      Alert.alert('Could not send that', e?.message || 'Try again in a moment.');
+    } finally {
+      setMicBusy(null);
+    }
+  }, [micBusy, myUid, iAskedForMic, roomId, myName, myAvatarData]);
+
+  const decideMic = useCallback(async (targetUid: string, action: 'accept' | 'decline' | 'remove') => {
+    if (micBusy) return;
+    setMicBusy(targetUid);
+    try {
+      await speakLudo(roomId, action, { targetUid });
+    } catch (e: any) {
+      Alert.alert('Could not do that', e?.message || 'Try again in a moment.');
+    } finally {
+      setMicBusy(null);
+    }
+  }, [micBusy, roomId]);
+
   const handleLeave = useCallback(() => {
     const live = room && isPerMinute(room) && room.status === 'live' && room.phase !== 'finished';
     if (!room || !live || asSpectator) { void leaveNow(); return; }
@@ -819,7 +856,10 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             <Text style={ludoType.eyebrow}>Ludo table</Text>
             <Text style={styles.headerTitle} numberOfLines={1}>
               {perMinute
-                ? (room.phase === 'playing' && paying > 0 ? `${rateNow} coins a minute` : 'Per-minute table')
+                ? (room.phase === 'playing' && paying > 0
+                  // A watcher pays their own fee (the strip says it); this is the players'.
+                  ? (asSpectator && !isHost ? `Players pay ${rateNow}/min` : `${rateNow} coins a minute`)
+                  : 'Per-minute table')
                 : room.gameMode === 'per_token' ? 'Roll & Back' : 'Ticket Table'}
             </Text>
           </View>
@@ -933,6 +973,15 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
               setSheet('gift');
             }}
           />
+          {canAskForMic ? (
+          <RailButton
+            icon={iAskedForMic ? 'hand-left' : 'hand-left-outline'}
+            label={iAskedForMic ? 'Asked' : 'Ask to talk'}
+            active={iAskedForMic}
+            onPress={askForMic}
+            ionicon
+          />
+          ) : (
           <RailButton
             icon={micMuted ? 'mic-off' : 'mic'}
             // Names what it controls, not what tapping does. Beside it sat
@@ -945,6 +994,16 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             onPress={toggleMic}
             ionicon
           />
+          )}
+          {isHost && isPerMinute(room) && (
+            <RailButton
+              icon="hand-left-outline"
+              label="Requests"
+              badge={Object.keys(room.speakRequests ?? {}).length}
+              onPress={() => setSheet('mic')}
+              ionicon
+            />
+          )}
           <RailButton
             icon={speakerOn ? 'volume-high' : 'volume-mute'}
             label="Speaker"
@@ -1138,6 +1197,67 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       </Modal>
 
       {/* Gift sheet */}
+      <Modal visible={sheet === 'mic'} transparent animationType="slide" onRequestClose={() => setSheet(null)}>
+        <View style={styles.sheetRoot}>
+          <Pressable style={styles.sheetScrim} onPress={() => setSheet(null)} accessibilityLabel="Close requests" />
+          <View style={[styles.sheet, { paddingBottom: insets.bottom + 12 }]}>
+            <View style={styles.sheetGrip} />
+            <Text style={styles.sheetTitle}>Asking to talk</Text>
+            <Text style={styles.micHint}>Watchers have no mic until you say yes. Whoever has given the most here is first.</Text>
+            <ScrollView style={{ maxHeight: 360 }}>
+              {micQueue(room).length === 0 ? (
+                <Text style={styles.feedEmpty}>Nobody is asking yet.</Text>
+              ) : micQueue(room).map((r) => (
+                <View key={r.uid} style={styles.micRow}>
+                  <GengalAvatar data={r.avatarData} size={34} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.micName} numberOfLines={1}>{r.nickname}</Text>
+                    <Text style={[styles.micSub, numeric]}>{r.gave > 0 ? `Gave ${r.gave} coins here` : 'No gifts yet'}</Text>
+                  </View>
+                  <Pressable
+                    onPress={() => decideMic(r.uid, 'decline')}
+                    disabled={!!micBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Say no to ${r.nickname}`}
+                    style={({ pressed }) => [styles.micBtn, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.micBtnText}>No</Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => decideMic(r.uid, 'accept')}
+                    disabled={!!micBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Give ${r.nickname} a mic`}
+                    style={({ pressed }) => [styles.micBtn, styles.micBtnYes, pressed && styles.pressed]}
+                  >
+                    {micBusy === r.uid
+                      ? <ActivityIndicator size="small" color={ludo.surface} />
+                      : <Text style={[styles.micBtnText, styles.micBtnTextYes]}>Give mic</Text>}
+                  </Pressable>
+                </View>
+              ))}
+              {Object.keys(room.micGuests ?? {}).length > 0 && (
+                <Text style={[ludoType.eyebrow, { marginTop: 14 }]}>On the mic</Text>
+              )}
+              {Object.entries(room.micGuests ?? {}).map(([uid, g]) => (
+                <View key={uid} style={styles.micRow}>
+                  <GengalAvatar data={g.avatarData} size={34} />
+                  <Text style={[styles.micName, { flex: 1 }]} numberOfLines={1}>{g.nickname}</Text>
+                  <Pressable
+                    onPress={() => decideMic(uid, 'remove')}
+                    disabled={!!micBusy}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Take the mic from ${g.nickname}`}
+                    style={({ pressed }) => [styles.micBtn, pressed && styles.pressed]}
+                  >
+                    <Text style={styles.micBtnText}>Take mic</Text>
+                  </Pressable>
+                </View>
+              ))}
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
       <Modal visible={sheet === 'gift'} transparent animationType="slide" onRequestClose={() => setSheet(null)}>
         <View style={styles.sheetRoot}>
           <Pressable style={styles.sheetScrim} onPress={() => setSheet(null)} accessibilityLabel="Close gifts" />
@@ -1399,6 +1519,18 @@ const styles = StyleSheet.create({
     backgroundColor: ludo.gridSoft, alignSelf: 'center',
   },
   sheetTitle: { ...ludoType.display, fontSize: 18 },
+  micHint: { color: ludo.inkSoft, fontSize: 12, fontWeight: '600', marginTop: 4, marginBottom: 8 },
+  micRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 8 },
+  micName: { color: ludo.ink, fontSize: 14, fontWeight: '800' },
+  micSub: { color: ludo.inkSoft, fontSize: 11, fontWeight: '600', marginTop: 1 },
+  micBtn: {
+    minWidth: 52, height: 34, paddingHorizontal: 12, borderRadius: 10,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: 'rgba(28,28,28,0.15)',
+  },
+  micBtnYes: { backgroundColor: ludo.ink, borderColor: ludo.ink },
+  micBtnText: { color: ludo.ink, fontSize: 12, fontWeight: '800' },
+  micBtnTextYes: { color: ludo.surface },
   feed: { maxHeight: 260 },
   feedEmpty: { ...ludoType.body, paddingVertical: 22, textAlign: 'center' },
   feedRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginBottom: 7 },

@@ -94,12 +94,16 @@ export const purchaseCoins = async (result: RazorpayResult) => {
   );
 };
 
-export const transferCoins = async (senderId: string, receiverId: string, amount: number) => {
+/**
+ * `ludoRoomId` marks a gift given at a Ludo table: the server adds it to the
+ * sender's total there, which orders the host's list of mic requests.
+ */
+export const transferCoins = async (senderId: string, receiverId: string, amount: number, ludoRoomId?: string) => {
   return authedPost<{
     success: boolean;
     senderNewBalance: number;
     receiverNewBalance: number;
-  }>('/api/v1/coins/transfer', { senderId, receiverId, amount });
+  }>('/api/v1/coins/transfer', { senderId, receiverId, amount, ...(ludoRoomId ? { ludoRoomId } : {}) });
 };
 
 /**

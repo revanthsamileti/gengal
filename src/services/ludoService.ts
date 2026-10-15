@@ -174,9 +174,42 @@ export interface LudoRoom {
   hostEarned?: number;
   settled?: boolean;
   settlement?: LudoSettlement | null;
+  // Watchers have no mic; they ask the host (server-owned, see /ludo/speak).
+  speakRequests?: Record<string, LudoMicEntry & { at?: Timestamp }>;
+  /** Watchers the host has given a mic. */
+  micGuests?: Record<string, LudoMicEntry>;
+  /** Coins each person has given at this table. Orders the mic requests. */
+  giftTotals?: Record<string, number>;
   // Meta
   createdAt?: Timestamp;
 }
+
+export interface LudoMicEntry {
+  nickname: string;
+  avatarData?: any;
+}
+
+export interface LudoMicRequest extends LudoMicEntry {
+  uid: string;
+  /** Coins they have given at this table. */
+  gave: number;
+}
+
+/**
+ * Who is asking for a mic, in the order the host sees them: whoever has given
+ * the most at this table first, and among equals whoever asked first.
+ */
+export const micQueue = (room: Pick<LudoRoom, 'speakRequests' | 'giftTotals'>): LudoMicRequest[] =>
+  Object.entries(room.speakRequests ?? {})
+    .map(([uid, r]) => ({
+      uid,
+      nickname: r.nickname,
+      avatarData: r.avatarData,
+      gave: Math.floor(room.giftTotals?.[uid] ?? 0),
+      at: r.at?.toMillis?.() ?? 0,
+    }))
+    .sort((a, b) => b.gave - a.gave || a.at - b.at)
+    .map(({ at: _at, ...request }) => request);
 
 export const isPerMinute = (room?: Pick<LudoRoom, 'gameMode'> | null): boolean =>
   room?.gameMode === 'per_minute';
@@ -548,6 +581,21 @@ export interface WatchReport {
 export const watchLudo = (roomId: string, here = true) =>
   authedPost<WatchReport>('/api/v1/ludo/watch', { roomId, here });
 
+export type LudoSpeakAction = 'request' | 'cancel' | 'accept' | 'decline' | 'remove';
+
+/**
+ * Mic requests. A watcher sends `request` / `cancel` (cancel also hands a mic
+ * back); the host sends `accept` / `decline` / `remove` naming `targetUid`.
+ */
+export const speakLudo = (
+  roomId: string,
+  action: LudoSpeakAction,
+  extra: { targetUid?: string; nickname?: string; avatarData?: any } = {},
+) => authedPost<{ ok: boolean; requested: boolean; onMic: boolean }>(
+  '/api/v1/ludo/speak',
+  { roomId, action, ...extra },
+);
+
 // Host (or current player) rolls dice — returns rolled value.
 // Per-token mode is charged on the server in the same write that sets the die.
 export const rollDice = async (
@@ -663,7 +711,7 @@ export const sendLudoGift = async (
   giftName: string,
   giftCost: number,
 ) => {
-  await transferCoins(senderUid, targetUid, giftCost);
+  await transferCoins(senderUid, targetUid, giftCost, roomId);
   await logEvent(roomId, {
     type: 'gift',
     senderUid, senderName, senderAvatarData,

@@ -697,3 +697,109 @@ class TestWatcherFees:
 
         assert room(store, room_id)["terms"]["watch"]["appPerMinute"] == 12
         assert room(store, room_id)["terms"]["watch"]["hostPerMinute"] == 3
+
+
+# ── Asking the host for a mic ───────────────────────────────────────────────
+
+
+WATCHER2 = "pm_watcher2"
+
+
+@pytest.fixture
+def gift(client, monkeypatch, store):
+    def send(sender, receiver, amount, room_id):
+        store.setdefault("users/%s" % sender, {"coins": 500})
+        monkeypatch.setattr(app_module, "require_bearer_uid", lambda: (sender, None))
+        return client.post("/api/v1/coins/transfer", json={
+            "senderId": sender, "receiverId": receiver, "amount": amount, "ludoRoomId": room_id,
+        })
+    return send
+
+
+class TestMicRequests:
+    def test_a_watcher_asks_and_the_host_sees_it(self, act, store):
+        room_id = started_table(act, store, P1)
+
+        response = act(OUTSIDER, "speak", roomId=room_id, action="request", nickname="Ravi")
+
+        assert response.status_code == 200
+        assert room(store, room_id)["speakRequests"][OUTSIDER]["nickname"] == "Ravi"
+
+    def test_the_host_accepting_gives_the_watcher_a_mic(self, act, store):
+        room_id = started_table(act, store, P1)
+        act(OUTSIDER, "speak", roomId=room_id, action="request", nickname="Ravi")
+
+        act(HOST, "speak", roomId=room_id, action="accept", targetUid=OUTSIDER)
+
+        r = room(store, room_id)
+        assert OUTSIDER not in r["speakRequests"]
+        assert OUTSIDER in r["micGuests"]
+        assert app_module.room_uid_is_speaker('ludo_rooms', r, OUTSIDER)
+
+    def test_without_the_host_a_watcher_has_no_mic(self, act, store):
+        room_id = started_table(act, store, P1)
+        act(OUTSIDER, "speak", roomId=room_id, action="request")
+
+        assert not app_module.room_uid_is_speaker('ludo_rooms', room(store, room_id), OUTSIDER)
+
+    def test_only_the_host_decides(self, act, store):
+        room_id = started_table(act, store, P1)
+        act(OUTSIDER, "speak", roomId=room_id, action="request")
+
+        for uid in (P1, OUTSIDER):
+            assert act(uid, "speak", roomId=room_id, action="accept", targetUid=OUTSIDER).status_code == 403
+        assert OUTSIDER not in (room(store, room_id).get("micGuests") or {})
+
+    def test_declining_and_removing(self, act, store):
+        room_id = started_table(act, store, P1)
+        act(OUTSIDER, "speak", roomId=room_id, action="request")
+        act(WATCHER2, "speak", roomId=room_id, action="request")
+
+        act(HOST, "speak", roomId=room_id, action="decline", targetUid=WATCHER2)
+        act(HOST, "speak", roomId=room_id, action="accept", targetUid=OUTSIDER)
+        act(HOST, "speak", roomId=room_id, action="remove", targetUid=OUTSIDER)
+
+        r = room(store, room_id)
+        assert r["speakRequests"] == {}
+        assert r["micGuests"] == {}
+
+    def test_a_watcher_can_take_back_a_request_or_hand_back_the_mic(self, act, store):
+        room_id = started_table(act, store, P1)
+        act(OUTSIDER, "speak", roomId=room_id, action="request")
+        act(HOST, "speak", roomId=room_id, action="accept", targetUid=OUTSIDER)
+
+        act(OUTSIDER, "speak", roomId=room_id, action="cancel")
+
+        assert room(store, room_id)["micGuests"] == {}
+
+    def test_players_already_have_a_mic(self, act, store):
+        room_id = started_table(act, store, P1)
+
+        assert act(P1, "speak", roomId=room_id, action="request").status_code == 400
+        assert act(HOST, "speak", roomId=room_id, action="request").status_code == 400
+
+    def test_leaving_the_table_gives_up_the_request_and_mic(self, act, store):
+        room_id = started_table(act, store, P1)
+        watch_for(act, store, room_id, OUTSIDER)
+        act(OUTSIDER, "speak", roomId=room_id, action="request")
+        act(HOST, "speak", roomId=room_id, action="accept", targetUid=OUTSIDER)
+
+        act(OUTSIDER, "watch", roomId=room_id, here=False)
+
+        assert OUTSIDER not in room(store, room_id)["micGuests"]
+
+    def test_gifts_at_the_table_are_totalled_for_the_queue(self, act, store, gift):
+        room_id = started_table(act, store, P1)
+
+        gift(OUTSIDER, HOST, 30, room_id)
+        gift(OUTSIDER, P1, 20, room_id)
+        gift(WATCHER2, P1, 10, room_id)
+
+        assert room(store, room_id)["giftTotals"] == {OUTSIDER: 50, WATCHER2: 10}
+
+    def test_a_gift_to_somebody_not_at_the_table_does_not_count(self, act, store, gift):
+        room_id = started_table(act, store, P1)
+
+        gift(OUTSIDER, P2, 40, room_id)
+
+        assert "giftTotals" not in room(store, room_id)
