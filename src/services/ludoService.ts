@@ -90,7 +90,24 @@ export interface LudoTerms {
   hostMaxLeaves: number;
   hostMaxMissed: number;
   emptyCloseSecs: number;
+  /** Absent on tables opened before watchers paid. */
+  watch?: LudoWatchTerms;
 }
+
+/**
+ * What watchers pay: 1 coin per started step to each side, up to its cap for
+ * the minute (6 + 4 by default). Mirrors ludo_watch_due() in backend/app.py.
+ */
+export interface LudoWatchTerms {
+  appPerMinute: number;
+  hostPerMinute: number;
+  appStepSecs: number;
+  hostStepSecs: number;
+}
+
+/** A watcher's full minute, or 0 where watching is free. */
+export const watchPerMinute = (terms: LudoTerms | undefined): number =>
+  terms?.watch ? terms.watch.appPerMinute + terms.watch.hostPerMinute : 0;
 
 export interface LudoSettlement {
   reason: 'game_over' | 'empty_table' | 'closed_before_start';
@@ -513,6 +530,23 @@ export const startGame = async (roomId: string) => {
 export const tickLudo = async (roomId: string, here = true) => {
   await authedPost('/api/v1/ludo/tick', { roomId, here });
 };
+
+export interface WatchReport {
+  ok: boolean;
+  /** False for the host and seated players, who never pay to watch. */
+  watching: boolean;
+  charged?: number;
+  paid?: number;
+  perMinute?: number;
+}
+
+/**
+ * A watcher's phone reporting in, every 15 seconds while the board is open
+ * and once with `here: false` on leaving. The server bills the seconds since
+ * the last report; it refuses with code `watch_coins` when they run out.
+ */
+export const watchLudo = (roomId: string, here = true) =>
+  authedPost<WatchReport>('/api/v1/ludo/watch', { roomId, here });
 
 // Host (or current player) rolls dice — returns rolled value.
 // Per-token mode is charged on the server in the same write that sets the die.

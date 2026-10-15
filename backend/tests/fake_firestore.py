@@ -157,6 +157,9 @@ class FakeTransaction:
     def set(self, ref, data, merge=False):
         ref.set(data, merge=merge)
 
+    def delete(self, ref):
+        ref.delete()
+
 
 class FakeClient:
     def __init__(self, store, reads=None):

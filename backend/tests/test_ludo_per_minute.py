@@ -529,3 +529,171 @@ class TestAdminSettings:
 
         assert settings["ludoHostDeposit"] == 50
         assert settings["voiceCallRatePerMin"] == 20
+
+
+# ── Watchers ────────────────────────────────────────────────────────────────
+
+
+def watcher(store, room_id, uid):
+    return store.get("ludo_rooms/%s/watchers/%s" % (room_id, uid))
+
+
+def seconds_pass(store, room_id, uid, secs):
+    """The watcher's last report was `secs` earlier than it was."""
+    watcher(store, room_id, uid)["last"] -= secs
+
+
+def watch_for(act, store, room_id, uid, *gaps):
+    """Report in, then once after each gap -- as the phone does every 15 s."""
+    first = act(uid, "watch", roomId=room_id)
+    assert first.status_code == 200, first.get_json()
+    for gap in gaps:
+        seconds_pass(store, room_id, uid, gap)
+        response = act(uid, "watch", roomId=room_id)
+        assert response.status_code == 200, response.get_json()
+
+
+WATCH = {"appPerMinute": 6, "hostPerMinute": 4, "appStepSecs": 5, "hostStepSecs": 15}
+
+
+class TestWatcherFees:
+    @pytest.mark.parametrize("secs, app_part, host_part", [
+        (0, 0, 0),
+        (1, 1, 1),
+        (5, 1, 1),
+        (15, 3, 1),
+        (16, 4, 2),
+        (20, 4, 2),
+        (30, 6, 2),
+        (45, 6, 3),
+        (60, 6, 4),
+    ])
+    def test_steps_of_5_and_15_seconds_capped_at_6_and_4(self, secs, app_part, host_part):
+        assert app_module.ludo_watch_due(secs, WATCH) == (app_part, host_part)
+
+    def test_twenty_seconds_cost_4_to_the_app_and_2_to_the_host(self, act, store):
+        room_id = started_table(act, store, P1)
+        host_before = coins(store, HOST)
+
+        watch_for(act, store, room_id, OUTSIDER, 20)
+
+        assert coins(store, OUTSIDER) == 94
+        assert coins(store, HOST) == host_before + 2
+
+    def test_a_full_minute_costs_exactly_10(self, act, store):
+        room_id = started_table(act, store, P1)
+        host_before = coins(store, HOST)
+
+        watch_for(act, store, room_id, OUTSIDER, 15, 15, 15, 15)
+
+        assert coins(store, OUTSIDER) == 90
+        assert coins(store, HOST) == host_before + 4
+        assert room(store, room_id)["hostEarned"] == pytest.approx(3 + 4)
+
+    def test_the_next_minute_starts_its_steps_again(self, act, store):
+        room_id = started_table(act, store, P1)
+
+        watch_for(act, store, room_id, OUTSIDER, 15, 15, 15, 15, 15)
+
+        # 10 for the first minute, then 15 seconds: 3 + 1.
+        assert coins(store, OUTSIDER) == 86
+
+    def test_leaving_pays_for_the_seconds_watched_and_lets_go(self, act, store):
+        room_id = started_table(act, store, P1)
+        watch_for(act, store, room_id, OUTSIDER)
+        seconds_pass(store, room_id, OUTSIDER, 10)
+
+        response = act(OUTSIDER, "watch", roomId=room_id, here=False)
+
+        assert response.status_code == 200
+        assert coins(store, OUTSIDER) == 97
+        assert watcher(store, room_id, OUTSIDER) is None
+
+    def test_a_muted_watcher_pays_the_same(self, act, store):
+        # Watchers have no mic at all; nothing about sound changes the fee.
+        room_id = started_table(act, store, P1)
+
+        watch_for(act, store, room_id, OUTSIDER, 15, 15)
+
+        assert coins(store, OUTSIDER) == 100 - 6 - 2
+
+    def test_watching_an_empty_paused_table_is_free(self, act, store):
+        room_id = started_table(act, store, P1)
+        act(P1, "leave-seat", roomId=room_id)
+
+        watch_for(act, store, room_id, OUTSIDER, 15, 15)
+
+        assert coins(store, OUTSIDER) == 100
+
+    def test_watching_before_the_game_starts_is_free(self, act, store):
+        room_id = open_table(act, store)
+        seat(act, P1, room_id, "blue")
+
+        watch_for(act, store, room_id, OUTSIDER, 15, 15)
+
+        assert coins(store, OUTSIDER) == 100
+
+    def test_a_silent_phone_is_not_billed_for_the_silence(self, act, store):
+        room_id = started_table(act, store, P1)
+        watch_for(act, store, room_id, OUTSIDER)
+        seconds_pass(store, room_id, OUTSIDER, 300)
+
+        act(OUTSIDER, "watch", roomId=room_id)
+
+        assert coins(store, OUTSIDER) == 100
+
+    def test_coming_in_to_watch_needs_a_minutes_coins(self, act, store):
+        room_id = started_table(act, store, P1)
+        store["users/%s" % OUTSIDER]["coins"] = 9
+
+        response = act(OUTSIDER, "watch", roomId=room_id)
+
+        assert response.status_code == 402
+        assert response.get_json()["code"] == "watch_coins"
+        assert watcher(store, room_id, OUTSIDER) is None
+
+    def test_a_watcher_who_cannot_pay_is_told_and_charged_nothing(self, act, store):
+        room_id = started_table(act, store, P1)
+        watch_for(act, store, room_id, OUTSIDER)
+        store["users/%s" % OUTSIDER]["coins"] = 3
+        seconds_pass(store, room_id, OUTSIDER, 20)
+
+        response = act(OUTSIDER, "watch", roomId=room_id)
+
+        assert response.status_code == 402
+        assert coins(store, OUTSIDER) == 3
+
+    def test_players_and_the_host_are_never_charged_as_watchers(self, act, store):
+        room_id = started_table(act, store, P1)
+        p1_before, host_before = coins(store, P1), coins(store, HOST)
+
+        for uid in (P1, HOST):
+            response = act(uid, "watch", roomId=room_id)
+            assert response.get_json()["watching"] is False
+
+        assert (coins(store, P1), coins(store, HOST)) == (p1_before, host_before)
+
+    def test_a_benched_hosts_part_goes_to_the_app(self, act, store):
+        room_id = started_table(act, store, P1)
+        room(store, room_id)["hostBenched"] = True
+        host_before = coins(store, HOST)
+
+        watch_for(act, store, room_id, OUTSIDER, 20)
+
+        assert coins(store, OUTSIDER) == 94
+        assert coins(store, HOST) == host_before
+
+    def test_tables_opened_before_watcher_fees_stay_free(self, act, store):
+        room_id = started_table(act, store, P1)
+        del room(store, room_id)["terms"]["watch"]
+
+        watch_for(act, store, room_id, OUTSIDER, 15, 15)
+
+        assert coins(store, OUTSIDER) == 100
+
+    def test_the_fee_follows_the_admin_settings(self, act, store):
+        store["settings/pricing"] = {"ludoWatchAppPerMinute": 12, "ludoWatchHostPerMinute": 3}
+        room_id = started_table(act, store, P1)
+
+        assert room(store, room_id)["terms"]["watch"]["appPerMinute"] == 12
+        assert room(store, room_id)["terms"]["watch"]["hostPerMinute"] == 3

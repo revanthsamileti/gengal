@@ -49,6 +49,10 @@ const FIELDS: FieldDef[] = [
   { key: 'ludoHostMaxLeaves', label: 'Host comebacks', hint: 'Times the host may leave and return before their turns are skipped', icon: 'logout', suffix: 'times' },
   { key: 'ludoHostMaxMissedTurns', label: 'Host missed turns', hint: 'Turns the host may let run out before their turns are skipped', icon: 'timer-off', suffix: 'turns' },
   { key: 'ludoEmptyCloseMinutes', label: 'Empty table closes after', hint: 'An empty, paused table ends after this long', icon: 'hourglass-empty', suffix: 'min' },
+  { key: 'ludoWatchAppPerMinute', label: 'Watcher fee, app part', hint: 'Most a watcher pays the app in a minute of play', icon: 'visibility', suffix: 'coins/min' },
+  { key: 'ludoWatchAppStepSeconds', label: 'App part, 1 coin every', hint: 'Taken per started step until the app part for the minute is reached', icon: 'av-timer', suffix: 'sec' },
+  { key: 'ludoWatchHostPerMinute', label: 'Watcher fee, host part', hint: 'Most a watcher pays the host in a minute of play', icon: 'visibility', suffix: 'coins/min' },
+  { key: 'ludoWatchHostStepSeconds', label: 'Host part, 1 coin every', hint: 'Taken per started step until the host part for the minute is reached', icon: 'av-timer', suffix: 'sec' },
 ];
 
 export default function AdminPanelScreen({ navigate, goBack }: Props) {

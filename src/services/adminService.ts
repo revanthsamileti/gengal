@@ -27,6 +27,12 @@ export interface GlobalSettings {
   ludoHostMaxLeaves: number;
   ludoHostMaxMissedTurns: number;
   ludoEmptyCloseMinutes: number;
+  // Watchers: 1 coin per started step to the app and to the host, each capped
+  // per minute (5 s steps up to 6, 15 s steps up to 4: 10 a minute).
+  ludoWatchAppPerMinute: number;
+  ludoWatchHostPerMinute: number;
+  ludoWatchAppStepSeconds: number;
+  ludoWatchHostStepSeconds: number;
 }
 
 const SETTINGS_DOC_ID = 'pricing';
@@ -54,6 +60,10 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   ludoHostMaxLeaves: 3,
   ludoHostMaxMissedTurns: 3,
   ludoEmptyCloseMinutes: 5,
+  ludoWatchAppPerMinute: 6,
+  ludoWatchHostPerMinute: 4,
+  ludoWatchAppStepSeconds: 5,
+  ludoWatchHostStepSeconds: 15,
 };
 
 /**

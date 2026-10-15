@@ -17,7 +17,7 @@ import GengalAvatar from '../GengalAvatar';
 import { Alert } from '../CustomAlert';
 import { auth } from '../../config/firebase';
 import { DEFAULT_SETTINGS, getGlobalSettings, GlobalSettings } from '../../services/adminService';
-import { isPerMinute, ludoRate, payingPlayers } from '../../services/ludoService';
+import { isPerMinute, ludoRate, payingPlayers, watchPerMinute } from '../../services/ludoService';
 import type { LudoRoom, LudoTerms, TokenColor } from '../../services/ludoService';
 import { GEMS, ludo, numeric } from '../../theme/ludoTheme';
 import { skeuo } from '../../theme/skeuomorphic';
@@ -49,6 +49,12 @@ export function termsFromSettings(settings: GlobalSettings): LudoTerms {
     hostMaxLeaves: settings.ludoHostMaxLeaves,
     hostMaxMissed: settings.ludoHostMaxMissedTurns,
     emptyCloseSecs: settings.ludoEmptyCloseMinutes * 60,
+    watch: {
+      appPerMinute: settings.ludoWatchAppPerMinute,
+      hostPerMinute: settings.ludoWatchHostPerMinute,
+      appStepSecs: settings.ludoWatchAppStepSeconds,
+      hostStepSecs: settings.ludoWatchHostStepSeconds,
+    },
   };
 }
 
@@ -129,7 +135,9 @@ export function LudoTableCard({
   const host = room.players.find((p) => p.uid === room.hostUid) ?? room.players[0];
   // Somebody who already holds a seat is going back to their game, not watching.
   const amSeated = room.players.some((p) => p.uid === auth.currentUser?.uid);
-  const cta = amSeated ? 'Rejoin' : open ? 'Take a seat' : 'Watch';
+  // Watching a game in play costs coins; say how many on the button itself.
+  const watchFee = room.phase === 'playing' && !paused ? watchPerMinute(room.terms) : 0;
+  const cta = amSeated ? 'Rejoin' : open ? 'Take a seat' : watchFee > 0 ? `Watch · ${watchFee}/min` : 'Watch';
   const watching = Math.max(0, (room.presentCount ?? seated) - seated);
   const paying = payingPlayers(room).length;
   // A newcomer sees what *they* would pay; everyone else what is being paid now.
@@ -252,6 +260,11 @@ export function LudoOpenSheet({
             <Rule icon="timer">
               Players pay per minute: {r['3']} each with 3, {r['2']} each with 2, {r['1']} alone. You keep {terms.hostSharePercent}%.
             </Rule>
+            {terms.watch && terms.watch.appPerMinute + terms.watch.hostPerMinute > 0 && (
+              <Rule icon="visibility">
+                Watchers pay {terms.watch.appPerMinute + terms.watch.hostPerMinute} a minute while you play. You get {terms.watch.hostPerMinute} of it.
+              </Rule>
+            )}
             <Rule icon="emoji-events">The winner gets a {terms.winnerPrize}-coin bonus.</Rule>
             <Rule icon="logout">
               Stay to the end. You can leave and come back {terms.hostMaxLeaves} times and miss {terms.hostMaxMissed} turns.

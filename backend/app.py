@@ -2063,6 +2063,12 @@ def ludo_legal_moves(tokens, color, dice):
 #   (3 players: 15, 2: 12, 1: 10). The host plays free and keeps 30% of it.
 #   A player who cannot pay for the next minute loses the seat.
 # - The winner gets a fixed bonus from the app.
+# - Watchers pay 10 a minute while a game is being played (not while it waits,
+#   is paused or is over; a watcher with no mic pays all the same), measured to
+#   the second and taken in steps: the app takes 1 coin per started 5 seconds up
+#   to 6 a minute, the host 1 per started 15 seconds up to 4. So 20 seconds
+#   costs 4 + 2, and a full minute exactly 6 + 4. A benched host's part goes to
+#   the app, as with the players' minutes.
 # - With no players left the board pauses; the host may go and fetch friends
 #   without it counting against them. Five minutes empty and the table ends.
 # - A host, or a player, cannot open or sit at another Ludo table until their
@@ -2078,6 +2084,9 @@ LUDO_BILL_SECONDS = 60
 # A player counts as at the table if their heartbeat, or their last roll or
 # move, is this recent. Nobody pays for minutes their phone was closed.
 LUDO_PRESENT_SECONDS = 60
+# A watcher's phone reports every 15 seconds; a longer silence (asleep, killed)
+# is not billed beyond this much of it.
+LUDO_WATCH_GAP_SECONDS = 30
 # The host's heartbeat going quiet this long counts as leaving the table.
 LUDO_HOST_AWAY_SECONDS = 60
 # A table nobody has taken a turn on for this long holds nobody to it.
@@ -2099,6 +2108,10 @@ LUDO_SETTING_DEFAULTS = {
     "ludoHostMaxLeaves": 3,
     "ludoHostMaxMissedTurns": 3,
     "ludoEmptyCloseMinutes": 5,
+    "ludoWatchAppPerMinute": 6,
+    "ludoWatchHostPerMinute": 4,
+    "ludoWatchAppStepSeconds": 5,
+    "ludoWatchHostStepSeconds": 15,
 }
 
 LUDO_SETTING_BOUNDS = {
@@ -2114,6 +2127,10 @@ LUDO_SETTING_BOUNDS = {
     "ludoHostMaxLeaves": (0, 100),
     "ludoHostMaxMissedTurns": (0, 100),
     "ludoEmptyCloseMinutes": (1, 120),
+    "ludoWatchAppPerMinute": (0, 10000),
+    "ludoWatchHostPerMinute": (0, 10000),
+    "ludoWatchAppStepSeconds": (1, 60),
+    "ludoWatchHostStepSeconds": (1, 60),
 }
 
 # Fields the per-minute logic may change; written back in one update.
@@ -2155,6 +2172,13 @@ def ludo_terms(settings):
         "hostMaxLeaves": int(num("ludoHostMaxLeaves")),
         "hostMaxMissed": int(num("ludoHostMaxMissedTurns")),
         "emptyCloseSecs": int(num("ludoEmptyCloseMinutes") * 60),
+        # Watchers: 1 coin per started step to each side, capped per minute.
+        "watch": {
+            "appPerMinute": int(num("ludoWatchAppPerMinute")),
+            "hostPerMinute": int(num("ludoWatchHostPerMinute")),
+            "appStepSecs": int(num("ludoWatchAppStepSeconds")),
+            "hostStepSecs": int(num("ludoWatchHostStepSeconds")),
+        },
     }
 
 
@@ -2579,6 +2603,144 @@ def ludo_tick_endpoint():
         return jsonify({"error": str(e)}), 400
     except Exception as e:
         print(f"[LUDO] Tick error: {e}")
+        return jsonify({"error": "Could not update the table"}), 500
+
+
+class LudoWatchBroke(Exception):
+    """A watcher cannot pay for what they are watching."""
+
+
+def ludo_watch_due(secs, watch):
+    """What `secs` (0-60) of one minute's watching costs, as (app, host).
+
+    Each side takes 1 coin per started step, up to its cap for the minute:
+    20 seconds is 4 to the app (5-second steps) and 2 to the host (15-second
+    steps); a full minute is exactly the two caps, 6 + 4.
+    """
+    secs = int(secs)
+
+    def part(per_minute, step):
+        if secs <= 0 or per_minute <= 0:
+            return 0
+        return min(int(per_minute), math.ceil(secs / max(1, int(step))))
+
+    return (part(watch.get('appPerMinute', 0), watch.get('appStepSecs', 5)),
+            part(watch.get('hostPerMinute', 0), watch.get('hostStepSecs', 15)))
+
+
+def ludo_watch_billable(room):
+    """Watchers pay only while a game is being played at a table with players."""
+    return (room.get('phase') == 'playing' and not room.get('emptySince')
+            and not room.get('settled') and room.get('status', 'live') == 'live')
+
+
+def ludo_watch_settle(room, state, ledger, uid, now):
+    """Bring one watcher's bill up to `now`. Mutates `room` and `state`.
+
+    `state` is the watcher's own record: when they last reported, how many
+    seconds of the current minute they have watched, and what that minute has
+    taken so far. Raises LudoWatchBroke, charging nothing, if they cannot pay.
+    """
+    watch = (room.get('terms') or {}).get('watch') or {}
+    last = ludo_secs(state.get('last'))
+    state['last'] = now
+    if last is None or not watch or not ludo_watch_billable(room):
+        return 0
+    elapsed = now - last
+    # A phone that went quiet (asleep, killed, out of signal) is not billed for
+    # the silence at all, so a watcher coming back later never pays for it.
+    if elapsed <= 0 or elapsed > LUDO_WATCH_GAP_SECONDS:
+        return 0
+    window = float(state.get('windowSecs') or 0) + elapsed
+    app_paid = int(state.get('appPaid') or 0)
+    host_paid = int(state.get('hostPaid') or 0)
+    app_due = host_due = 0
+    while window >= LUDO_BILL_SECONDS:
+        full_app, full_host = ludo_watch_due(LUDO_BILL_SECONDS, watch)
+        app_due += max(0, full_app - app_paid)
+        host_due += max(0, full_host - host_paid)
+        app_paid = host_paid = 0
+        window -= LUDO_BILL_SECONDS
+    now_app, now_host = ludo_watch_due(window, watch)
+    app_due += max(0, now_app - app_paid)
+    host_due += max(0, now_host - host_paid)
+    total = app_due + host_due
+    if total and ledger.balance(uid) < total:
+        raise LudoWatchBroke()
+    ledger.add(uid, -total)
+    host = room.get('hostUid')
+    if host_due and host and not room.get('hostBenched'):
+        ledger.add(host, host_due)
+        room['hostEarned'] = round(float(room.get('hostEarned') or 0) + host_due, 2)
+    state.update(windowSecs=round(window, 3), appPaid=max(app_paid, now_app),
+                 hostPaid=max(host_paid, now_host),
+                 paid=round(float(state.get('paid') or 0) + total, 2))
+    return total
+
+
+@app.route('/api/v1/ludo/watch', methods=['POST', 'OPTIONS'])
+def ludo_watch_endpoint():
+    """A watcher's phone reporting in, every 15 seconds and once on leaving.
+
+    Each call bills the seconds watched since the last one. Coming in to a game
+    being played needs a minute's coins; `here: false` settles and lets go.
+    Seated players and the host are not watchers and are never charged here.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    room_id = str(data.get('roomId') or '').strip()
+    here = data.get('here', True) is not False
+    if not room_id:
+        return jsonify({"error": "Missing roomId"}), 400
+    try:
+        db_client = firestore.client()
+        room_ref = db_client.collection('ludo_rooms').document(room_id)
+        watcher_ref = room_ref.collection('watchers').document(uid)
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def apply(transaction):
+            snap = room_ref.get(transaction=transaction)
+            if not snap.exists:
+                raise ValueError("Unknown room")
+            before = snap.to_dict() or {}
+            if (not ludo_is_per_minute(before) or uid == before.get('hostUid')
+                    or uid in (before.get('playerUids') or [])):
+                return {"watching": False}
+            watcher = watcher_ref.get(transaction=transaction)
+            state = (watcher.to_dict() or {}) if watcher.exists else {}
+            room = copy.deepcopy(before)
+            now = time.time()
+            ledger = LudoLedger(transaction, db_client)
+            watch = (room.get('terms') or {}).get('watch') or {}
+            minute = sum(ludo_watch_due(LUDO_BILL_SECONDS, watch))
+            if here and not watcher.exists and ludo_watch_billable(room) and ledger.balance(uid) < minute:
+                raise LudoWatchBroke()
+            charged = ludo_watch_settle(room, state, ledger, uid, now)
+            ledger.write()
+            ludo_write_state(transaction, room_ref, before, room)
+            if here:
+                transaction.set(watcher_ref, state)
+            else:
+                transaction.delete(watcher_ref)
+            return {"watching": here, "charged": charged,
+                    "paid": float(state.get('paid') or 0), "perMinute": minute}
+
+        result = apply(transaction)
+        return jsonify({"ok": True, **result}), 200
+    except LudoWatchBroke:
+        return jsonify({
+            "error": "Not enough coins to keep watching. Watching costs coins each minute.",
+            "code": "watch_coins",
+        }), 402
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[LUDO] Watch error: {e}")
         return jsonify({"error": "Could not update the table"}), 500
 
 

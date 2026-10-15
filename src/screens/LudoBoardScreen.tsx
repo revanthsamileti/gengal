@@ -41,7 +41,7 @@ import {
   subscribeToLudoRoom, subscribeToLudoEvents,
   joinLudoRoom, leaveLudoRoom,
   startGame, rollDice, moveToken, skipTurn, SKIP_GRACE_MS, closeLudoRoom,
-  isPerMinute, ludoRate, payingPlayers, tickLudo,
+  isPerMinute, ludoRate, payingPlayers, tickLudo, watchLudo, watchPerMinute,
   getLegalMoves,
   sendLudoChat, sendLudoGift,
   buyLudoTicket, placeLudoBet,
@@ -234,6 +234,35 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     const id = setInterval(beat, 15_000);
     return () => clearInterval(id);
   }, [perMinute, room?.phase, isSeated, isHost, roomId]);
+
+  // Watchers pay by the second while a game is being played. Their phone
+  // reports in every 15 seconds and once more on leaving (or on taking a
+  // seat); the server works out what the time cost, and charges nothing while
+  // the table waits, is paused or is over.
+  const watchFee = perMinute ? watchPerMinute(room?.terms) : 0;
+  const reportsWatching = watchFee > 0 && asSpectator && !isHost && room?.status === 'live';
+  const [watchPaid, setWatchPaid] = useState(0);
+  useEffect(() => {
+    if (!reportsWatching) return;
+    let stopped = false;
+    const report = () => {
+      watchLudo(roomId, true)
+        .then((r) => { if (!stopped && r.watching) setWatchPaid(r.paid ?? 0); })
+        .catch((e) => {
+          if (stopped || e?.code !== 'watch_coins') return;
+          stopped = true;
+          Alert.alert('Not enough coins to watch', `Watching a game costs ${watchFee} coins a minute. Top up to keep watching.`);
+          goBack?.();
+        });
+    };
+    report();
+    const id = setInterval(report, 15_000);
+    return () => {
+      stopped = true;
+      clearInterval(id);
+      watchLudo(roomId, false).catch(() => {});
+    };
+  }, [reportsWatching, watchFee, roomId, goBack]);
 
   // Drives the "closes in m:ss" countdown on a paused table.
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -671,6 +700,12 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             tone: 'info',
             text: `${rateNow} coins a minute · paid ${Math.floor(room.paidBy?.[myUid] ?? 0)} so far`,
           };
+    } else if (watchFee > 0) {
+      notice = {
+        icon: 'visibility',
+        tone: 'info',
+        text: `Watching costs ${watchFee} coins a minute · paid ${Math.floor(watchPaid)} so far`,
+      };
     }
   }
   const canRoll = isMyTurn && !room.diceRolled && room.phase === 'playing' && !asSpectator && !rolling;
