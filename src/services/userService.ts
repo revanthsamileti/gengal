@@ -153,6 +153,8 @@ export interface UserProfile {
   /** Server-stamped on every billing tick while on a call. See isUserInCall. */
   inCallSince?: any;
   isDeleted?: boolean;
+  /** Set by an admin (server-only). Banned accounts are left out of every list. */
+  banned?: boolean;
   deletedAt?: any;
   tier?: 'VIP' | 'Advance' | 'Standard';
   bio?: string;
@@ -408,6 +410,7 @@ const blockAware = (
       last.filter(
         (u) =>
           !isBlocked(u.uid) &&
+          u.banned !== true &&
           // A disconnect RTDB has already seen beats any staleness window.
           // Only ever subtracts: a uid it has no record of is not hidden.
           !(stillListed && isKnownOffline(u.uid)) &&

@@ -51,6 +51,8 @@ export type SmsPollResult =
     }
   | { status: 'expired' }
   | { status: 'verified'; token: string; isNewUser: boolean }
+  /** The account was banned by an admin; no token is issued. */
+  | { status: 'banned' }
   /** Transient (network, throttle, 5xx): keep polling until the deadline. */
   | { status: 'retry' };
 
@@ -104,6 +106,10 @@ export const whatsappLink = (number: string, message: string) =>
 export const pollSmsVerification = async (sessionId: string): Promise<SmsPollResult> => {
   try {
     const response = await postJson('/api/v1/auth/sms/status', { sessionId });
+    if (response.status === 403) {
+      const refused = await response.json().catch(() => null);
+      if (refused?.code === 'banned') return { status: 'banned' };
+    }
     if (!response.ok) return { status: 'retry' };
     const data = await response.json();
     if (data?.status === 'verified' && typeof data.token === 'string') {

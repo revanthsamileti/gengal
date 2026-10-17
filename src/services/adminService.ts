@@ -174,6 +174,40 @@ export const hostBonus = (action: 'preview' | 'pay', day?: string, amountInr?: n
     ...(amountInr !== undefined ? { amountInr } : {}),
   });
 
+export interface ReportGroup {
+  targetUid: string;
+  nickname: string;
+  banned: boolean;
+  count: number;
+  reasons: Record<string, number>;
+  latestAt: string | null;
+  reports: { id: string; reason: string; source: string; reporter: string; createdAt: string | null }[];
+}
+
+export interface BannedAccount {
+  uid: string;
+  nickname: string;
+  reason: string;
+  bannedAt: string | null;
+}
+
+/** Open reports, grouped by the person reported, most-reported first; plus who is banned. */
+export const getReports = () =>
+  authedPost<{ groups: ReportGroup[]; banned: BannedAccount[] }>('/api/v1/admin/reports', { action: 'list' });
+
+/** Close one person's open reports without banning them. */
+export const dismissReports = (targetUid: string) =>
+  authedPost<{ closed: number }>('/api/v1/admin/reports', { action: 'dismiss', targetUid });
+
+/**
+ * Ban: signs them out, blocks sign-in, hides them from every list and closes
+ * their reports. `banned: false` lifts it.
+ */
+export const setBanned = (uid: string, banned: boolean, reason = '') =>
+  authedPost<{ banned: boolean; signInUpdated: boolean; reportsClosed: number }>(
+    '/api/v1/admin/ban', { uid, banned, reason },
+  );
+
 export const updateGlobalSettings = async (newSettings: Partial<GlobalSettings>) => {
   await authedPost('/api/v1/admin/settings', { settings: newSettings });
 };

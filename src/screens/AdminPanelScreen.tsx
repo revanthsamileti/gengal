@@ -13,6 +13,11 @@ import {
   GlobalSettings,
   hostBonus,
   HostBonusPlan,
+  getReports,
+  dismissReports,
+  setBanned,
+  ReportGroup,
+  BannedAccount,
 } from '../services/adminService';
 import { useActionLock } from '../hooks/useActionLock';
 import { tap40 } from '../theme/touch';
@@ -244,10 +249,144 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
             </TouchableOpacity>
 
             <HostBonusPanel />
+
+            <ReportsPanel />
           </ScrollView>
         )}
       </View>
     </ScreenShell>
+  );
+}
+
+/** Short date for a report, or '' when there is none. */
+function shortDate(iso: string | null) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+/**
+ * Reports, grouped by who was reported, most-reported first. Dismiss closes
+ * them; Ban signs that person out for good, hides them everywhere and closes
+ * the reports. Banned accounts are listed underneath with Unban.
+ */
+function ReportsPanel() {
+  const [groups, setGroups] = useState<ReportGroup[] | null>(null);
+  const [banned, setBannedList] = useState<BannedAccount[]>([]);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+
+  const load = async () => {
+    setFailed(null);
+    try {
+      const result = await getReports();
+      setGroups(result.groups);
+      setBannedList(result.banned);
+    } catch (e: any) {
+      setFailed(e?.message || 'Could not load reports.');
+    }
+  };
+  useEffect(() => { void load(); }, []);
+
+  const act = async (uid: string, work: () => Promise<unknown>) => {
+    setBusy(uid);
+    try {
+      await work();
+      await load();
+    } catch (e: any) {
+      Alert.alert('Reports', e?.message || 'Could not do that.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmBan = (g: ReportGroup) => {
+    const top = Object.entries(g.reasons).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'Reported';
+    Alert.alert(
+      `Ban ${g.nickname}?`,
+      `They are signed out, cannot sign back in, and disappear from every list. Their ${g.count} report(s) are closed. You can unban them later.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Ban', style: 'destructive', onPress: () => { void act(g.targetUid, () => setBanned(g.targetUid, true, top)); } },
+      ],
+    );
+  };
+
+  return (
+    <View>
+      <View style={styles.reportsHead}>
+        <Text style={styles.sectionHeading}>Reports{groups ? ` (${groups.reduce((n, g) => n + g.count, 0)} open)` : ''}</Text>
+        <TouchableOpacity onPress={() => { void load(); }} hitSlop={tap40} accessibilityRole="button" accessibilityLabel="Refresh reports">
+          <MaterialIcons name="refresh" size={20} color="#4B0054" />
+        </TouchableOpacity>
+      </View>
+
+      {failed ? (
+        <Text style={styles.fieldHint}>{failed}</Text>
+      ) : groups === null ? (
+        <ActivityIndicator color="#4B0054" style={{ marginVertical: 12 }} />
+      ) : groups.length === 0 ? (
+        <View style={styles.fieldCard}><Text style={styles.fieldHint}>No open reports.</Text></View>
+      ) : groups.map((g) => (
+        <View key={g.targetUid} style={styles.fieldCard}>
+          <View style={styles.reportTitleRow}>
+            <Text style={styles.fieldLabel} numberOfLines={1}>{g.nickname}</Text>
+            <Text style={styles.reportCount}>{g.count} report{g.count === 1 ? '' : 's'}</Text>
+          </View>
+          <Text style={styles.fieldHint}>
+            {Object.entries(g.reasons).map(([reason, n]) => (n > 1 ? `${reason} ×${n}` : reason)).join(' · ')}
+          </Text>
+          {g.reports.slice(0, 3).map((r) => (
+            <Text key={r.id} style={styles.reportLine}>
+              {r.reporter} · {r.reason} · from {r.source} · {shortDate(r.createdAt)}
+            </Text>
+          ))}
+          <View style={styles.bonusButtons}>
+            <TouchableOpacity
+              style={styles.bonusBtn}
+              disabled={!!busy}
+              onPress={() => { void act(g.targetUid, () => dismissReports(g.targetUid)); }}
+              accessibilityRole="button"
+              accessibilityLabel={`Dismiss reports about ${g.nickname}`}
+            >
+              {busy === g.targetUid ? <ActivityIndicator color="#4B0054" /> : <Text style={styles.bonusBtnText}>Dismiss</Text>}
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.bonusBtn, styles.banBtn]}
+              disabled={!!busy || g.banned}
+              onPress={() => confirmBan(g)}
+              accessibilityRole="button"
+              accessibilityLabel={`Ban ${g.nickname}`}
+            >
+              <Text style={[styles.bonusBtnText, { color: '#FFFDF8' }]}>{g.banned ? 'Banned' : 'Ban'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      ))}
+
+      {banned.length > 0 && (
+        <>
+          <Text style={styles.sectionHeading}>Banned accounts</Text>
+          {banned.map((b) => (
+            <View key={b.uid} style={[styles.fieldCard, styles.reportTitleRow]}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.fieldLabel} numberOfLines={1}>{b.nickname}</Text>
+                <Text style={styles.fieldHint}>{b.reason}{b.bannedAt ? ` · ${shortDate(b.bannedAt)}` : ''}</Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.bonusBtn, { flex: 0, paddingHorizontal: 16 }]}
+                disabled={!!busy}
+                onPress={() => { void act(b.uid, () => setBanned(b.uid, false)); }}
+                accessibilityRole="button"
+                accessibilityLabel={`Unban ${b.nickname}`}
+              >
+                {busy === b.uid ? <ActivityIndicator color="#4B0054" /> : <Text style={styles.bonusBtnText}>Unban</Text>}
+              </TouchableOpacity>
+            </View>
+          ))}
+        </>
+      )}
+    </View>
   );
 }
 
@@ -425,4 +564,9 @@ const styles = StyleSheet.create({
   bonusRank: { width: 30, color: '#9A8772', fontSize: 12, fontWeight: '800' },
   bonusName: { flex: 1, color: '#4B0054', fontSize: 13, fontWeight: '800' },
   bonusFigure: { color: '#7A6800', fontSize: 12, fontWeight: '700' },
+  reportsHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 18 },
+  reportTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  reportCount: { color: '#B3261E', fontSize: 12, fontWeight: '900' },
+  reportLine: { color: '#6E5F52', fontSize: 11, fontWeight: '600', marginTop: 4 },
+  banBtn: { backgroundColor: '#B3261E', borderColor: '#B3261E' },
 });

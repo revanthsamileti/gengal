@@ -246,6 +246,13 @@ export default function VerifyBySmsScreen({ navigate, goBack, route }: Props) {
       } else if (result.status === 'expired') {
         sessionRef.current = null;
         setPhase('expired');
+      } else if (result.status === 'banned') {
+        // Polling on would only run the clock out on an account that cannot
+        // sign in; say what happened instead.
+        finished.current = true;
+        sessionRef.current = null;
+        setErrorMsg('This account has been suspended. If you think this is a mistake, contact support.');
+        setPhase('error');
       } else if (result.status === 'verified') {
         finished.current = true;
         sessionRef.current = null;
