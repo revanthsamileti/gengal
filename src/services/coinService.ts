@@ -1,5 +1,5 @@
 import { auth } from '../config/firebase';
-import { getBackendUrl } from './authService';
+import { authedGet, getBackendUrl } from './authService';
 
 const authedPost = async <T>(path: string, body: Record<string, unknown>): Promise<T> => {
   const user = auth.currentUser;
@@ -70,6 +70,30 @@ export type CoinOrder = {
  * on the store screen is the number credited even if an admin changes the rate
  * while checkout is open.
  */
+export interface CoinOffers {
+  /** 0-50: packs cost this much less for the same coins. */
+  discountPercent: number;
+  /** Present only while this account has never recharged. */
+  firstBuy: { priceInr: number; coins: number } | null;
+}
+
+export const FIRST_BUY_PACKAGE = 'first_buy';
+
+export const getCoinOffers = () => authedGet<CoinOffers>('/api/v1/coins/offers');
+
+export interface DailyBonusStatus {
+  coins: number;
+  minMinutes: number;
+  talkedSeconds: number;
+  claimed: boolean;
+  canClaim: boolean;
+}
+
+/** Today's bonus: unlocked by paid voice minutes, claimed once. */
+export const getDailyBonus = () => authedGet<DailyBonusStatus>('/api/v1/bonus/daily');
+export const claimDailyBonus = () =>
+  authedPost<{ ok: boolean; coins: number; newBalance: number }>('/api/v1/bonus/daily', {});
+
 export const createCoinOrder = async (packageId: string, amountInr: number) => {
   return authedPost<CoinOrder>('/api/v1/coins/order', { packageId, amountInr });
 };

@@ -11,6 +11,8 @@ import {
   updateGlobalSettings,
   checkIsAdmin,
   GlobalSettings,
+  hostBonus,
+  HostBonusPlan,
 } from '../services/adminService';
 import { useActionLock } from '../hooks/useActionLock';
 import { tap40 } from '../theme/touch';
@@ -53,6 +55,14 @@ const FIELDS: FieldDef[] = [
   { key: 'ludoWatchAppStepSeconds', label: 'App part, 1 coin every', hint: 'Taken per started step until the app part for the minute is reached', icon: 'av-timer', suffix: 'sec' },
   { key: 'ludoWatchHostPerMinute', label: 'Watcher fee, host part', hint: 'Most a watcher pays the host in a minute of play', icon: 'visibility', suffix: 'coins/min' },
   { key: 'ludoWatchHostStepSeconds', label: 'Host part, 1 coin every', hint: 'Taken per started step until the host part for the minute is reached', icon: 'av-timer', suffix: 'sec' },
+  { key: 'coinDiscountPercent', section: 'Offers', label: 'Store discount', hint: 'Every pack costs this much less for the same coins. Up to 50%', icon: 'local-offer', suffix: '%' },
+  { key: 'firstBuyPriceInr', label: 'First recharge price', hint: 'One pack for an account that has never recharged. 0 turns it off', icon: 'redeem', prefix: '₹' },
+  { key: 'firstBuyCoins', label: 'First recharge coins', hint: 'Coins that pack gives', icon: 'redeem', suffix: 'coins' },
+  { key: 'dailyBonusCoins', label: 'Daily bonus', hint: 'Free coins, claimable once a day. 0 turns it off', icon: 'card-giftcard', suffix: 'coins' },
+  { key: 'dailyBonusMinVoiceMinutes', label: 'Daily bonus unlocks after', hint: 'Paid voice-call minutes that day', icon: 'phone-in-talk', suffix: 'min' },
+  { key: 'hostBonusMinMinutes', section: 'Host daily bonus', label: 'Hosts qualify after', hint: 'Paid talk time that day', icon: 'timer', suffix: 'min' },
+  { key: 'hostBonusTopCount', label: 'Winners', hint: 'Top hosts by talk time who share the pool', icon: 'emoji-events', suffix: 'hosts' },
+  { key: 'hostBonusPoolPercent', label: 'Pool', hint: "Share of the day's call revenue, paid as hearts. Up to 50%", icon: 'savings', suffix: '%' },
 ];
 
 export default function AdminPanelScreen({ navigate, goBack }: Props) {
@@ -232,10 +242,117 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
                   </>}
               </LinearGradient>
             </TouchableOpacity>
+
+            <HostBonusPanel />
           </ScrollView>
         )}
       </View>
     </ScreenShell>
+  );
+}
+
+/** A day in India time, YYYY-MM-DD, `offset` days from today. */
+function istDay(offset = 0) {
+  return new Date(Date.now() + 5.5 * 3600_000 + offset * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * Preview, then pay, one day's host bonus. The pool is the settings' share of
+ * that day's call revenue unless an amount is typed here. Pay is offered only
+ * for exactly what was last previewed, and the server pays a day once.
+ */
+function HostBonusPanel() {
+  const [day, setDay] = useState(istDay(-1));
+  const [amount, setAmount] = useState('');
+  const [plan, setPlan] = useState<HostBonusPlan | null>(null);
+  const [previewedFor, setPreviewedFor] = useState('');
+  const [busy, setBusy] = useState<null | 'preview' | 'pay'>(null);
+
+  const key = `${day.trim()}|${amount.trim()}`;
+  const amountValue = amount.trim() === '' ? undefined : Number(amount);
+
+  const run = async (action: 'preview' | 'pay') => {
+    if (amountValue !== undefined && (isNaN(amountValue) || amountValue < 0)) {
+      Alert.alert('Amount', 'Enter an amount in rupees, or leave it empty to use the pool %.');
+      return;
+    }
+    setBusy(action);
+    try {
+      const result = await hostBonus(action, day.trim(), amountValue);
+      setPlan(result);
+      setPreviewedFor(key);
+      if (action === 'pay') {
+        Alert.alert('Paid', `₹${result.poolInr} was added as hearts to ${result.winners.length} host(s) for ${result.day}.`);
+      }
+    } catch (e: any) {
+      Alert.alert('Host bonus', e?.message || 'Could not do that.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const canPay = !!plan && !plan.paid && previewedFor === key && plan.winners.length > 0 && day.trim() < istDay(0);
+  const confirmPay = () => {
+    if (!plan || !canPay) return;
+    Alert.alert(
+      'Pay the host bonus?',
+      `₹${plan.poolInr} as hearts to ${plan.winners.length} host(s) for ${plan.day}. A day is paid once and this cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Pay', style: 'destructive', onPress: () => { void run('pay'); } },
+      ],
+    );
+  };
+
+  return (
+    <View>
+      <Text style={styles.sectionHeading}>Pay host bonus</Text>
+      <View style={styles.fieldCard}>
+        <Text style={styles.fieldHint}>Day (India time)</Text>
+        <View style={styles.inputRow}>
+          <TextInput style={styles.input} value={day} onChangeText={setDay} placeholder="YYYY-MM-DD" placeholderTextColor="#BBA0A0" autoCapitalize="none" />
+        </View>
+        <Text style={[styles.fieldHint, { marginTop: 10 }]}>Pool amount (empty = the Pool % above)</Text>
+        <View style={styles.inputRow}>
+          <Text style={styles.inputAddon}>₹</Text>
+          <TextInput style={styles.input} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" placeholder="Pool %" placeholderTextColor="#BBA0A0" />
+        </View>
+        <View style={styles.bonusButtons}>
+          <TouchableOpacity style={styles.bonusBtn} onPress={() => { void run('preview'); }} disabled={!!busy} accessibilityRole="button">
+            {busy === 'preview' ? <ActivityIndicator color="#4B0054" /> : <Text style={styles.bonusBtnText}>Preview</Text>}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.bonusBtn, styles.bonusBtnPay, !canPay && { opacity: 0.4 }]}
+            onPress={confirmPay}
+            disabled={!canPay || !!busy}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !canPay }}
+          >
+            {busy === 'pay' ? <ActivityIndicator color="#FFFDF8" /> : <Text style={[styles.bonusBtnText, { color: '#FFFDF8' }]}>Pay</Text>}
+          </TouchableOpacity>
+        </View>
+
+        {plan && (
+          <View style={{ marginTop: 14 }}>
+            <Text style={styles.bonusSummary}>
+              {plan.day}: call revenue ₹{plan.revenueInr} · pool ₹{plan.poolInr}
+              {plan.fixedAmount ? ' (your amount)' : ` (${plan.poolPercent}%)`}
+              {plan.paid ? ' · PAID' : ''}
+            </Text>
+            {plan.winners.length === 0 ? (
+              <Text style={styles.fieldHint}>No host talked long enough that day.</Text>
+            ) : plan.winners.map((w) => (
+              <View key={w.uid} style={styles.bonusRow}>
+                <Text style={styles.bonusRank}>#{w.rank}</Text>
+                <Text style={styles.bonusName} numberOfLines={1}>{w.nickname}</Text>
+                <Text style={styles.bonusFigure}>{w.minutes} min</Text>
+                <Text style={styles.bonusFigure}>₹{w.inr} · {w.hearts}♥</Text>
+              </View>
+            ))}
+          </View>
+        )}
+      </View>
+    </View>
   );
 }
 
@@ -296,4 +413,16 @@ const styles = StyleSheet.create({
     gap: 10, paddingVertical: 16,
   },
   saveBtnText: { color: '#FFFDF8', fontSize: 15, fontWeight: '900', letterSpacing: 1 },
+  bonusButtons: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  bonusBtn: {
+    flex: 1, height: 42, borderRadius: 12, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: '#4B0054',
+  },
+  bonusBtnPay: { backgroundColor: '#4B0054' },
+  bonusBtnText: { color: '#4B0054', fontSize: 14, fontWeight: '900' },
+  bonusSummary: { color: '#4B0054', fontSize: 13, fontWeight: '800', marginBottom: 8 },
+  bonusRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 5 },
+  bonusRank: { width: 30, color: '#9A8772', fontSize: 12, fontWeight: '800' },
+  bonusName: { flex: 1, color: '#4B0054', fontSize: 13, fontWeight: '800' },
+  bonusFigure: { color: '#7A6800', fontSize: 12, fontWeight: '700' },
 });

@@ -7,7 +7,11 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { auth } from '../config/firebase';
 import { useUser } from '../context/UserContext';
 import { useActionLock } from '../hooks/useActionLock';
-import { createCoinOrder, purchaseCoins, RazorpayResult } from '../services/coinService';
+import {
+  createCoinOrder, purchaseCoins, RazorpayResult,
+  getCoinOffers, CoinOffers, FIRST_BUY_PACKAGE,
+  getDailyBonus, claimDailyBonus, DailyBonusStatus,
+} from '../services/coinService';
 import CheckoutModal from '../components/CheckoutModal';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
 import { skeuo, skeuoGradients } from '../theme/skeuomorphic';
@@ -62,9 +66,39 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
   // is set synchronously on the first tap, closing that window.
   const { run: runPurchaseSafe } = useActionLock();
 
+  // Offers come from the server, which knows whether this account has ever
+  // recharged (the first-purchase pack) and what today's talk time unlocked.
+  const [offers, setOffers] = useState<CoinOffers | null>(null);
+  const [bonus, setBonus] = useState<DailyBonusStatus | null>(null);
+  const [claiming, setClaiming] = useState(false);
+  const loadOffers = () => {
+    getCoinOffers().then(setOffers).catch(() => {});
+    getDailyBonus().then(setBonus).catch(() => {});
+  };
+
   useEffect(() => {
     getGlobalSettings().then(setSettings);
+    loadOffers();
   }, []);
+
+  /** A lower price for the same coins, as the server applies it (0-50%). */
+  const discount = Math.min(Math.max(offers?.discountPercent ?? 0, 0), 50) / 100;
+  /** What a pack actually costs today. */
+  const payPrice = (listPrice: number) => Math.round(listPrice * (1 - discount));
+
+  const handleClaimBonus = async () => {
+    if (claiming) return;
+    setClaiming(true);
+    try {
+      const result = await claimDailyBonus();
+      Alert.alert("Today's bonus", `${result.coins} coins have been added.`);
+    } catch (e: any) {
+      Alert.alert("Today's bonus", e?.message || 'Could not add the bonus.');
+    } finally {
+      setClaiming(false);
+      loadOffers();
+    }
+  };
 
   /**
    * Opens an order, runs Razorpay checkout in a WebView, then asks the backend
@@ -106,6 +140,8 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
       // propagates it automatically, usually within a second. A local override
       // would create two sources of truth that can diverge on retry.
       setCustomAmount('');
+      // The first-purchase pack is gone after any recharge.
+      loadOffers();
       Alert.alert('Purchase Successful!', `${confirmed.coinsCredited} coins have been added.`);
     } catch (e: any) {
       Alert.alert(
@@ -117,15 +153,23 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
     }
   };
 
-  const coinsFor = (priceInr: number) =>
-    Math.floor(priceInr * (settings?.inrToCoinRechargeRate ?? 0));
+  // Mirrors coins_for_inr on the server exactly, so the figure quoted is the
+  // figure credited: what is paid buys what the full price would have.
+  const coinsFor = (paidInr: number) =>
+    Math.floor(paidInr * (settings?.inrToCoinRechargeRate ?? 0) / (1 - discount));
 
   // Both handlers route through runPurchaseSafe so the synchronous inFlight
   // ref is set before the first await, which closes the double-tap window that
   // useState alone cannot close (state is async; a second tap can land before
   // the first re-render propagates the disabled prop to the button).
   const handlePurchase = (pkg: typeof COIN_PACKAGES[0]) => {
-    void runPurchaseSafe(() => runPurchase(pkg.id, pkg.id, pkg.priceInr));
+    void runPurchaseSafe(() => runPurchase(pkg.id, pkg.id, payPrice(pkg.priceInr)));
+  };
+
+  const handleFirstBuy = () => {
+    if (!offers?.firstBuy) return;
+    const price = offers.firstBuy.priceInr;
+    void runPurchaseSafe(() => runPurchase(FIRST_BUY_PACKAGE, FIRST_BUY_PACKAGE, price));
   };
 
   const handleCustomPurchase = () => {
@@ -136,7 +180,8 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
 
     // Validate before acquiring the lock so a bad amount does not consume
     // the cooldown and delay a valid retry.
-    if (isNaN(amountInr) || amountInr < minAmount) {
+    // The minimum is on the full price, as the server checks it.
+    if (isNaN(amountInr) || amountInr / (1 - discount) < minAmount - 0.005) {
       Alert.alert('Invalid Amount', `The minimum recharge amount is ₹${minAmount}.`);
       return;
     }
@@ -196,10 +241,65 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
           ) : null}
         </View>
 
+        {offers?.firstBuy && (
+          <TouchableOpacity
+            style={[styles.offerCard, styles.firstBuyCard]}
+            activeOpacity={0.85}
+            onPress={handleFirstBuy}
+            disabled={isPurchasing !== null}
+            accessibilityRole="button"
+            accessibilityLabel={`First recharge offer: ${offers.firstBuy.coins} coins for ${offers.firstBuy.priceInr} rupees`}
+          >
+            <MaterialIcons name="redeem" size={30} color={skeuo.gold} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.offerEyebrow}>FIRST RECHARGE ONLY</Text>
+              <Text style={styles.offerTitle}>{formatCoinBalance(offers.firstBuy.coins)} coins for {formatInr(offers.firstBuy.priceInr)}</Text>
+            </View>
+            <View style={styles.priceButton}>
+              {isPurchasing === FIRST_BUY_PACKAGE
+                ? <ActivityIndicator color={skeuo.plum} size="small" />
+                : <Text style={styles.priceText}>{formatInr(offers.firstBuy.priceInr)}</Text>}
+            </View>
+          </TouchableOpacity>
+        )}
+
+        {bonus && bonus.coins > 0 && (
+          <View style={styles.offerCard}>
+            <MaterialIcons name="card-giftcard" size={30} color={skeuo.gold} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.offerEyebrow}>DAILY BONUS</Text>
+              {bonus.claimed ? (
+                <Text style={styles.offerBody}>Claimed today. Come back tomorrow.</Text>
+              ) : bonus.canClaim ? (
+                <Text style={styles.offerBody}>{bonus.coins} free coins are ready.</Text>
+              ) : (
+                <>
+                  <Text style={styles.offerBody}>
+                    Talk {Math.max(1, Math.ceil(bonus.minMinutes - bonus.talkedSeconds / 60))} more min on voice calls today for {bonus.coins} free coins.
+                  </Text>
+                  <View style={styles.bonusTrack}>
+                    <View style={[styles.bonusFill, { width: `${Math.min(100, (bonus.talkedSeconds / 60 / Math.max(bonus.minMinutes, 0.01)) * 100)}%` }]} />
+                  </View>
+                </>
+              )}
+            </View>
+            {bonus.canClaim && (
+              <TouchableOpacity style={styles.priceButton} onPress={handleClaimBonus} disabled={claiming} accessibilityRole="button">
+                {claiming
+                  ? <ActivityIndicator color={skeuo.plum} size="small" />
+                  : <Text style={styles.priceText}>Claim</Text>}
+              </TouchableOpacity>
+            )}
+          </View>
+        )}
+
         {settings && (
           <View style={styles.customRechargeCard}>
             <Text style={styles.sectionTitle}>Custom Recharge</Text>
-            <Text style={styles.customHint}>Minimum amount: ₹{settings.minRechargeAmount}</Text>
+            <Text style={styles.customHint}>
+              Minimum amount: ₹{discount > 0 ? Math.ceil(settings.minRechargeAmount * (1 - discount)) : settings.minRechargeAmount}
+              {discount > 0 ? ` (${Math.round(discount * 100)}% off today)` : ''}
+            </Text>
             <View style={styles.customRow}>
               <View style={styles.customInputWrapper}>
                 <Text style={styles.currencySymbol}>₹</Text>
@@ -214,7 +314,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
               <TouchableOpacity
                 style={[
                   styles.customBuyBtn,
-                  (isPurchasing === 'custom' || !(Number(customAmount) >= (settings.minRechargeAmount || 49))) && styles.customBuyBtnIdle,
+                  (isPurchasing === 'custom' || !(Number(customAmount) / (1 - discount) >= (settings.minRechargeAmount || 49) - 0.005)) && styles.customBuyBtnIdle,
                 ]}
                 activeOpacity={0.8}
                 onPress={handleCustomPurchase}
@@ -247,22 +347,28 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
               onPress={() => handlePurchase(pkg)}
               disabled={isPurchasing !== null || !settings}
               accessibilityRole="button"
-              accessibilityLabel={`Buy ${pkg.name} for ${pkg.priceInr} rupees`}
+              accessibilityLabel={`Buy ${pkg.name} for ${payPrice(pkg.priceInr)} rupees`}
             >
               <View style={styles.packageIconFrame}>
                 <MaterialIcons name={pkg.icon as any} size={32} color={skeuo.gold} />
               </View>
               <View style={styles.packageInfo}>
                 <Text style={styles.packageCoins}>
-                  {settings ? `${formatCoinBalance(coinsFor(pkg.priceInr))} Coins` : '—'}
+                  {settings ? `${formatCoinBalance(coinsFor(payPrice(pkg.priceInr)))} Coins` : '—'}
                 </Text>
                 <Text style={styles.packageName}>{pkg.name}</Text>
+                {discount > 0 && (
+                  <Text style={styles.discountTag}>{Math.round(discount * 100)}% OFF</Text>
+                )}
               </View>
               <View style={styles.priceButton}>
                 {isPurchasing === pkg.id ? (
                   <ActivityIndicator color={skeuo.plum} size="small" />
                 ) : (
-                  <Text style={styles.priceText}>{formatInr(pkg.priceInr)}</Text>
+                  <View style={{ alignItems: 'center' }}>
+                    {discount > 0 && <Text style={styles.strikePrice}>{formatInr(pkg.priceInr)}</Text>}
+                    <Text style={styles.priceText}>{formatInr(payPrice(pkg.priceInr))}</Text>
+                  </View>
                 )}
               </View>
             </TouchableOpacity>
@@ -296,6 +402,19 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
 }
 
 const styles = StyleSheet.create({
+  offerCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    backgroundColor: skeuo.surfaceRaised, borderRadius: 18, padding: 14, marginBottom: 14,
+    borderWidth: 1, borderColor: skeuo.border,
+  },
+  firstBuyCard: { borderColor: '#D9A404', backgroundColor: '#FFF8E1' },
+  offerEyebrow: { fontSize: 10, fontWeight: '900', letterSpacing: 1, color: '#B07D00' },
+  offerTitle: { fontSize: 16, fontWeight: '900', color: skeuo.plum, marginTop: 2 },
+  offerBody: { fontSize: 13, fontWeight: '700', color: skeuo.plum, marginTop: 2 },
+  bonusTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(75,0,84,0.12)', marginTop: 8, overflow: 'hidden' },
+  bonusFill: { height: 6, borderRadius: 3, backgroundColor: '#D9A404' },
+  discountTag: { fontSize: 10, fontWeight: '900', color: '#B3261E', marginTop: 2 },
+  strikePrice: { fontSize: 11, fontWeight: '700', color: '#9A8772', textDecorationLine: 'line-through' },
   container: {
     flex: 1,
     backgroundColor: skeuo.surface,

@@ -33,20 +33,33 @@ export interface GlobalSettings {
   ludoWatchHostPerMinute: number;
   ludoWatchAppStepSeconds: number;
   ludoWatchHostStepSeconds: number;
+  // Offers (0 switches one off). Mirrors DEFAULT_SETTINGS in backend/app.py.
+  /** A lower price for the same coins on every pack, 0-50%. */
+  coinDiscountPercent: number;
+  /** One pack per account that has never recharged. */
+  firstBuyPriceInr: number;
+  firstBuyCoins: number;
+  /** Claimable once a day after this many paid voice minutes. */
+  dailyBonusCoins: number;
+  dailyBonusMinVoiceMinutes: number;
+  /** Daily host bonus: who qualifies, how many win, and the pool's share of the day's call revenue. */
+  hostBonusMinMinutes: number;
+  hostBonusTopCount: number;
+  hostBonusPoolPercent: number;
 }
 
 const SETTINGS_DOC_ID = 'pricing';
 
 export const DEFAULT_SETTINGS: GlobalSettings = {
-  voiceCallRatePerMin: 15,
-  videoCallRatePerMin: 30,
+  voiceCallRatePerMin: 10,
+  videoCallRatePerMin: 50,
   creatorSharePercentage: 70,
   femaleExpertHeartsThreshold: 50,
   maleExpertRespectThreshold: 30,
   callDurationForHeart: 3,
   heartToInrRate: 3,
   minRechargeAmount: 49,
-  inrToCoinRechargeRate: 1.12,
+  inrToCoinRechargeRate: 1.25,
   minWithdrawalHearts: 33,
   ludoHostDeposit: 50,
   ludoRateOnePlayer: 10,
@@ -64,6 +77,14 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   ludoWatchHostPerMinute: 4,
   ludoWatchAppStepSeconds: 5,
   ludoWatchHostStepSeconds: 15,
+  coinDiscountPercent: 0,
+  firstBuyPriceInr: 6,
+  firstBuyCoins: 60,
+  dailyBonusCoins: 30,
+  dailyBonusMinVoiceMinutes: 5,
+  hostBonusMinMinutes: 30,
+  hostBonusTopCount: 10,
+  hostBonusPoolPercent: 8,
 };
 
 /**
@@ -122,6 +143,37 @@ export const subscribeToGlobalSettings = (callback: (settings: GlobalSettings) =
  * allowlist and validates each value. Firestore rules deny all client writes to
  * /settings, so this cannot be done from the app directly.
  */
+export interface HostBonusWinner {
+  rank: number;
+  uid: string;
+  nickname: string;
+  minutes: number;
+  inr: number;
+  hearts: number;
+}
+
+export interface HostBonusPlan {
+  day: string;
+  paid: boolean;
+  revenueInr: number;
+  poolInr: number;
+  poolPercent: number;
+  fixedAmount: boolean;
+  winners: HostBonusWinner[];
+}
+
+/**
+ * One day's host bonus (India time, YYYY-MM-DD; the server defaults to
+ * yesterday). `amountInr` replaces the percentage pool with a set amount.
+ * `pay` credits the winners' hearts, once per day, and only for a day that is over.
+ */
+export const hostBonus = (action: 'preview' | 'pay', day?: string, amountInr?: number) =>
+  authedPost<HostBonusPlan>('/api/v1/admin/host-bonus', {
+    action,
+    ...(day ? { day } : {}),
+    ...(amountInr !== undefined ? { amountInr } : {}),
+  });
+
 export const updateGlobalSettings = async (newSettings: Partial<GlobalSettings>) => {
   await authedPost('/api/v1/admin/settings', { settings: newSettings });
 };
