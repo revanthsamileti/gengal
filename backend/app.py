@@ -11,6 +11,7 @@ except ImportError:
 import hashlib
 import hmac
 import math
+import re
 import secrets
 import threading
 import time
@@ -1272,6 +1273,11 @@ def call_billing_endpoint():
             snap = call_ref.get(transaction=transaction)
             payer_snap = payer_ref.get(transaction=transaction)
             receiver_snap = receiver_ref.get(transaction=transaction)
+            day = ist_day(datetime.now(timezone.utc))
+            payer_day_ref = user_day_ref(db_client, payer_id, day)
+            receiver_day_ref = user_day_ref(db_client, receiver_id, day)
+            payer_day = payer_day_ref.get(transaction=transaction)
+            receiver_day = receiver_day_ref.get(transaction=transaction)
             current = snap.to_dict() or {}
 
             # Elapsed time is measured between server-side timestamps, so a
@@ -1374,6 +1380,10 @@ def call_billing_endpoint():
 
             transaction.update(payer_ref, {"coins": payer_new})
             transaction.update(receiver_ref, {"coins": receiver_new})
+            paid_seconds = actual_deduction / (rate_per_min / 60.0) if rate_per_min > 0 else 0.0
+            add_to_day(transaction, payer_day_ref, payer_day, payer_id, day,
+                       spentCoins=actual_deduction, paidVoiceSecs=0.0 if is_video else paid_seconds)
+            add_to_day(transaction, receiver_day_ref, receiver_day, receiver_id, day, hostSecs=paid_seconds)
             transaction.update(call_ref, {
                 # Anchored to what was actually billed, not to "now": on the
                 # closing tick of an ended call those differ, and using `now`
@@ -4060,19 +4070,35 @@ def rtc_config():
 # ==========================================
 
 DEFAULT_SETTINGS = {
-    "voiceCallRatePerMin": 15,
-    "videoCallRatePerMin": 30,
+    "voiceCallRatePerMin": 10,
+    "videoCallRatePerMin": 50,
     "creatorSharePercentage": 70,
     "femaleExpertHeartsThreshold": 50,
     "maleExpertRespectThreshold": 30,
     "callDurationForHeart": 3,
     "heartToInrRate": 3,
     "minRechargeAmount": 49,
-    "inrToCoinRechargeRate": 1.12,
+    # ₹8 = 10 coins.
+    "inrToCoinRechargeRate": 1.25,
     # Floor for a payout request. Lived as a bare `33` in EarningsScreen, so the
     # only way to change it was to ship a new build — and the server had no
     # opinion at all, which is what let a patched client request any amount.
     "minWithdrawalHearts": 33,
+    # Offers. Each is an admin setting; 0 switches an offer off.
+    # A lower price for the same coins, on every pack and custom amount.
+    "coinDiscountPercent": 0,
+    # One pack per account, at a price below the minimum recharge.
+    "firstBuyPriceInr": 6,
+    "firstBuyCoins": 60,
+    # Free coins, claimable once a day after this many paid voice minutes.
+    "dailyBonusCoins": 30,
+    "dailyBonusMinVoiceMinutes": 5,
+    # Daily host bonus: the hosts who talked the most (at least the minimum)
+    # share a pool, paid as hearts, of this share of the day's call revenue --
+    # or of an amount the admin types in when paying it.
+    "hostBonusMinMinutes": 30,
+    "hostBonusTopCount": 10,
+    "hostBonusPoolPercent": 8,
 }
 
 SETTINGS_BOUNDS = {
@@ -4088,6 +4114,18 @@ SETTINGS_BOUNDS = {
     # Lower bound of 1, never 0: a floor of zero would let anyone open a payout
     # request worth nothing and clear it through the manual review queue.
     "minWithdrawalHearts": (1, 100000),
+    # Capped at half price: past that, a minute can cost more to serve than it
+    # brings in once GST, the store's fee, the call provider and the host are paid.
+    "coinDiscountPercent": (0, 50),
+    "firstBuyPriceInr": (0, 100000),
+    "firstBuyCoins": (0, 100000),
+    "dailyBonusCoins": (0, 100000),
+    "dailyBonusMinVoiceMinutes": (0, 1440),
+    "hostBonusMinMinutes": (0, 1440),
+    "hostBonusTopCount": (1, 100),
+    # About 55% of what users pay for a call is left after GST, the store's
+    # fee, the call provider and the host; a pool above that loses money.
+    "hostBonusPoolPercent": (0, 50),
 }
 
 DEFAULT_SETTINGS.update(LUDO_SETTING_DEFAULTS)
@@ -4197,13 +4235,69 @@ def pricing_settings():
     return settings
 
 
+def coin_discount(settings):
+    """The store-wide discount as a fraction, within its 0-50% bounds."""
+    return min(max(float(settings.get('coinDiscountPercent') or 0), 0.0), 50.0) / 100.0
+
+
 def coins_for_inr(amount_inr, settings):
     """Coin yield for a rupee amount.
 
     Floors, matching `coinsFor` on the client, so the quoted figure on the
-    store screen is the figure actually credited.
+    store screen is the figure actually credited. A discount is a lower price
+    for the same coins: what is paid buys what the full price would have.
     """
-    return int(math.floor(float(amount_inr) * float(settings['inrToCoinRechargeRate'])))
+    rate = float(settings['inrToCoinRechargeRate'])
+    return int(math.floor(float(amount_inr) * rate / (1 - coin_discount(settings))))
+
+
+FIRST_BUY_PACKAGE = 'first_buy'
+
+
+def first_buy_offer(settings):
+    """(price, coins) of the first-purchase pack, or None when it is off."""
+    price = float(settings.get('firstBuyPriceInr') or 0)
+    coins = int(float(settings.get('firstBuyCoins') or 0))
+    return (price, coins) if price > 0 and coins > 0 else None
+
+
+def first_buy_eligible(db_client, uid):
+    """Nobody who has ever completed a recharge gets the first-purchase pack."""
+    user = db_client.collection('users').document(uid).get()
+    if user.exists and (user.to_dict() or {}).get('firstBuyUsed'):
+        return False
+    paid = (db_client.collection(COIN_ORDERS)
+            .where('uid', '==', uid).where('status', '==', 'paid').limit(1).stream())
+    return not list(paid)
+
+
+# ── Per-day totals, kept by call billing ─────────────────────────────────────
+#
+# One document per person per day (India time): the paid voice seconds a payer
+# talked (the daily bonus), the coins they spent on calls (the day's revenue)
+# and the paid seconds a host talked (the host bonus). Only paid seconds count,
+# so a caller with no coins cannot farm either. Server-only: the rules have no
+# match for this collection, so clients can neither read nor write it.
+
+USER_DAYS = 'user_days'
+IST = timezone(timedelta(hours=5, minutes=30))
+USER_DAY_TOTALS = ('paidVoiceSecs', 'spentCoins', 'hostSecs')
+
+
+def ist_day(moment):
+    return moment.astimezone(IST).strftime('%Y-%m-%d')
+
+
+def user_day_ref(db_client, uid, day):
+    return db_client.collection(USER_DAYS).document(f"{day}_{uid}")
+
+
+def add_to_day(transaction, ref, snap, uid, day, **amounts):
+    data = (snap.to_dict() or {}) if snap.exists else {}
+    out = {"uid": uid, "day": day, "bonusClaimed": bool(data.get('bonusClaimed'))}
+    for key in USER_DAY_TOTALS:
+        out[key] = round(float(data.get(key) or 0) + float(amounts.get(key) or 0), 3)
+    transaction.set(ref, out)
 
 
 @app.route('/api/v1/withdrawals/request', methods=['POST', 'OPTIONS'])
@@ -4438,18 +4532,30 @@ def create_coin_order():
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
 
-    minimum = float(settings['minRechargeAmount'])
-    if amount_inr < minimum:
-        return jsonify({"error": f"The minimum recharge amount is {minimum:g} rupees."}), 400
-    if amount_inr > MAX_RECHARGE_INR:
-        return jsonify({"error": f"The maximum recharge amount is {MAX_RECHARGE_INR} rupees."}), 400
+    package_id = str(data.get("packageId") or 'custom')[:40]
+    if package_id == FIRST_BUY_PACKAGE:
+        offer = first_buy_offer(settings)
+        if not offer:
+            return jsonify({"error": "This offer is not available."}), 400
+        price, coins = offer
+        if abs(amount_inr - price) > 0.005:
+            return jsonify({"error": "The offer price has changed. Reopen the Store."}), 400
+        if not first_buy_eligible(firestore.client(), uid):
+            return jsonify({"error": "The first-purchase offer is only for your first recharge."}), 400
+    else:
+        # The minimum is on the full price, so a discount never pushes a pack
+        # under it.
+        minimum = float(settings['minRechargeAmount'])
+        if amount_inr / (1 - coin_discount(settings)) < minimum - 0.005:
+            return jsonify({"error": f"The minimum recharge amount is {minimum:g} rupees."}), 400
+        if amount_inr > MAX_RECHARGE_INR:
+            return jsonify({"error": f"The maximum recharge amount is {MAX_RECHARGE_INR} rupees."}), 400
 
-    coins = coins_for_inr(amount_inr, settings)
-    if coins <= 0:
-        return jsonify({"error": "That amount does not buy any coins."}), 400
+        coins = coins_for_inr(amount_inr, settings)
+        if coins <= 0:
+            return jsonify({"error": "That amount does not buy any coins."}), 400
 
     amount_paise = int(round(amount_inr * 100))
-    package_id = str(data.get("packageId") or 'custom')[:40]
 
     try:
         response = requests.post(
@@ -4591,8 +4697,16 @@ def purchase_coins():
                 raise ValueError("The payment amount does not match the order")
 
             coins = int(order.get("coins") or 0)
+            if order.get("packageId") == FIRST_BUY_PACKAGE and (user_snap.to_dict() or {}).get("firstBuyUsed"):
+                # A second first-purchase order opened before the first was
+                # paid. The money is in, so it buys coins -- at the ordinary
+                # rate, not the offer's.
+                coins = int(math.floor(
+                    float(order.get("amountInr") or 0) * float(pricing_settings()['inrToCoinRechargeRate'])
+                ))
             new_balance = balance + coins
-            transaction.update(user_ref, {"coins": new_balance})
+            # Any completed recharge ends first-purchase eligibility.
+            transaction.update(user_ref, {"coins": new_balance, "firstBuyUsed": True})
             transaction.update(order_ref, {
                 "status": "paid",
                 "paymentId": payment_id,
@@ -4607,6 +4721,218 @@ def purchase_coins():
     except Exception as e:
         print(f"[COINS] Purchase credit error for order {order_id}: {e}")
         return jsonify({"error": "Could not add the coins to your balance."}), 500
+
+
+@app.route('/api/v1/coins/offers', methods=['GET'])
+def coin_offers():
+    """What the store shows: the discount, and the first-purchase pack if this
+    account can still have it."""
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    settings = pricing_settings()
+    offer = first_buy_offer(settings)
+    first_buy = None
+    if offer and first_buy_eligible(firestore.client(), uid):
+        first_buy = {"priceInr": offer[0], "coins": offer[1]}
+    return jsonify({
+        "ok": True,
+        "discountPercent": round(coin_discount(settings) * 100, 2),
+        "firstBuy": first_buy,
+    }), 200
+
+
+@app.route('/api/v1/bonus/daily', methods=['GET', 'POST', 'OPTIONS'])
+def daily_bonus():
+    """Free coins once a day, claimable after enough paid voice minutes.
+
+    GET says where today stands; POST claims. Both amounts are admin settings
+    (dailyBonusCoins, dailyBonusMinVoiceMinutes); 0 coins switches it off. The
+    talk time is what call billing recorded as paid, so it cannot be claimed.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    settings = pricing_settings()
+    bonus = int(float(settings.get('dailyBonusCoins') or 0))
+    need_secs = float(settings.get('dailyBonusMinVoiceMinutes') or 0) * 60
+    db_client = firestore.client()
+    day = ist_day(datetime.now(timezone.utc))
+    day_ref = user_day_ref(db_client, uid, day)
+
+    def status(data):
+        talked = float(data.get('paidVoiceSecs') or 0)
+        claimed = bool(data.get('bonusClaimed'))
+        return {
+            "coins": bonus,
+            "minMinutes": need_secs / 60,
+            "talkedSeconds": round(talked, 1),
+            "claimed": claimed,
+            "canClaim": bonus > 0 and not claimed and talked >= need_secs,
+        }
+
+    if request.method == 'GET':
+        snap = day_ref.get()
+        return jsonify({"ok": True, **status((snap.to_dict() or {}) if snap.exists else {})}), 200
+
+    user_ref = db_client.collection('users').document(uid)
+    try:
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def claim(transaction):
+            day_snap = day_ref.get(transaction=transaction)
+            user_snap = user_ref.get(transaction=transaction)
+            data = (day_snap.to_dict() or {}) if day_snap.exists else {}
+            now_status = status(data)
+            if bonus <= 0:
+                raise ValueError("There is no daily bonus right now.")
+            if now_status["claimed"]:
+                raise ValueError("You have already had today's bonus.")
+            if not now_status["canClaim"]:
+                left = max(0.0, need_secs - now_status["talkedSeconds"]) / 60
+                raise ValueError(f"Talk {math.ceil(left)} more minute(s) on a voice call to unlock today's bonus.")
+            balance = get_coin_balance(user_snap)
+            transaction.update(user_ref, {"coins": balance + bonus})
+            out = {"uid": uid, "day": day, "bonusClaimed": True}
+            for key in USER_DAY_TOTALS:
+                out[key] = float(data.get(key) or 0)
+            transaction.set(day_ref, out)
+            return balance + bonus
+
+        new_balance = claim(transaction)
+        return jsonify({"ok": True, "coins": bonus, "newBalance": new_balance}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[BONUS] Daily claim error: {e}")
+        return jsonify({"error": "Could not add today's bonus."}), 500
+
+
+# Shares of the host bonus pool, first place first. Past tenth, each further
+# winner weighs the same as tenth. Normalised over however many qualify.
+HOST_BONUS_SPLIT = (25, 18, 13, 10, 8, 7, 6, 5, 4, 4)
+HOST_BONUS_PAYOUTS = 'host_bonus_payouts'
+DAY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def host_bonus_plan(db_client, day, settings, amount_inr=None):
+    """Who wins the host bonus for `day`, and how much each gets.
+
+    The hosts who talked the most paid minutes that day, at least
+    hostBonusMinMinutes, up to hostBonusTopCount of them, share a pool of
+    hostBonusPoolPercent of the day's call revenue -- or `amount_inr` when the
+    admin names an amount. Paid as hearts at heartToInrRate.
+    """
+    rows = [d.to_dict() or {} for d in db_client.collection(USER_DAYS).where('day', '==', day).stream()]
+    rate = float(settings['inrToCoinRechargeRate']) or 1.0
+    revenue_inr = round(sum(float(r.get('spentCoins') or 0) for r in rows) / rate, 2)
+    min_secs = float(settings.get('hostBonusMinMinutes') or 0) * 60
+    top = int(float(settings.get('hostBonusTopCount') or 10))
+    hosts = sorted(
+        (r for r in rows if float(r.get('hostSecs') or 0) > 0 and float(r.get('hostSecs') or 0) >= min_secs),
+        key=lambda r: -float(r.get('hostSecs') or 0),
+    )[:top]
+    percent = float(settings.get('hostBonusPoolPercent') or 0)
+    pool = round(float(amount_inr) if amount_inr is not None else revenue_inr * percent / 100, 2)
+    weights = [HOST_BONUS_SPLIT[min(i, len(HOST_BONUS_SPLIT) - 1)] for i in range(len(hosts))]
+    total = sum(weights) or 1
+    heart_rate = float(settings.get('heartToInrRate') or 0)
+    winners = []
+    for rank, (row, weight) in enumerate(zip(hosts, weights), 1):
+        inr = round(pool * weight / total, 2)
+        winners.append({
+            "rank": rank,
+            "uid": row.get('uid'),
+            "minutes": round(float(row.get('hostSecs') or 0) / 60, 1),
+            "inr": inr,
+            "hearts": round(inr / heart_rate, 2) if heart_rate > 0 else 0,
+        })
+    return {
+        "day": day,
+        "revenueInr": revenue_inr,
+        "poolInr": pool,
+        "poolPercent": percent,
+        "fixedAmount": amount_inr is not None,
+        "winners": winners,
+    }
+
+
+@app.route('/api/v1/admin/host-bonus', methods=['POST', 'OPTIONS'])
+def admin_host_bonus():
+    """Preview or pay one day's host bonus. Admin only, once per day.
+
+    Body: day (YYYY-MM-DD, India time; defaults to yesterday), action
+    ('preview' | 'pay'), amountInr (optional: the pool instead of the
+    percentage). A day can only be paid once it is over.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    admin_uid, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    today = ist_day(datetime.now(timezone.utc))
+    day = str(data.get('day') or ist_day(datetime.now(timezone.utc) - timedelta(days=1))).strip()
+    action = str(data.get('action') or 'preview')
+    if not DAY_RE.match(day):
+        return jsonify({"error": "day must be YYYY-MM-DD"}), 400
+    if action not in ('preview', 'pay'):
+        return jsonify({"error": "action must be preview or pay"}), 400
+    amount_inr = None
+    if data.get('amountInr') not in (None, ''):
+        try:
+            amount_inr = float(data.get('amountInr'))
+        except (TypeError, ValueError):
+            return jsonify({"error": "amountInr must be a number"}), 400
+        if amount_inr < 0 or amount_inr > 1000000:
+            return jsonify({"error": "amountInr must be between 0 and 1000000"}), 400
+
+    db_client = firestore.client()
+    settings = pricing_settings()
+    payout_ref = db_client.collection(HOST_BONUS_PAYOUTS).document(day)
+
+    def with_names(plan):
+        for w in plan["winners"]:
+            snap = db_client.collection('users').document(w["uid"]).get()
+            info = (snap.to_dict() or {}) if snap.exists else {}
+            w["nickname"] = info.get('nickname') or info.get('username') or 'Host'
+        return plan
+
+    if action == 'preview':
+        paid = payout_ref.get()
+        if paid.exists:
+            return jsonify({"ok": True, "paid": True, **serialize_doc(paid.to_dict() or {})}), 200
+        return jsonify({"ok": True, "paid": False, **with_names(host_bonus_plan(db_client, day, settings, amount_inr))}), 200
+
+    if day >= today:
+        return jsonify({"error": "A day can be paid once it is over."}), 400
+    plan = with_names(host_bonus_plan(db_client, day, settings, amount_inr))
+    if not plan["winners"]:
+        return jsonify({"error": "No host qualified that day."}), 400
+    try:
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def pay(transaction):
+            if payout_ref.get(transaction=transaction).exists:
+                raise ValueError("That day's host bonus has already been paid.")
+            refs = [db_client.collection('users').document(w["uid"]) for w in plan["winners"]]
+            snaps = [ref.get(transaction=transaction) for ref in refs]
+            for ref, snap, w in zip(refs, snaps, plan["winners"]):
+                hearts = float((snap.to_dict() or {}).get('hearts') or 0) if snap.exists else 0.0
+                transaction.update(ref, {"hearts": round(hearts + w["hearts"], 2)})
+            transaction.set(payout_ref, {**plan, "paidBy": admin_uid, "paidAt": datetime.now(timezone.utc)})
+
+        pay(transaction)
+        return jsonify({"ok": True, "paid": True, **plan}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[BONUS] Host bonus payout error for {day}: {e}")
+        return jsonify({"error": "Could not pay the host bonus."}), 500
 
 
 # The app opens this in a WebView rather than bundling a payments SDK, so the
