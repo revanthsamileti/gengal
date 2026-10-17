@@ -114,6 +114,10 @@ def require_bearer_uid():
     uid = bearer_uid()
     if not uid:
         return None, (jsonify({"error": "Authentication required"}), 401)
+    # An ID token stays valid for up to an hour after a ban disables the
+    # account; this refuses it at once (see MODERATION).
+    if uid in banned_uids():
+        return None, (jsonify({"error": "This account has been suspended.", "code": "banned"}), 403)
     return uid, None
 
 def admin_uids():
@@ -760,11 +764,15 @@ def sms_status():
     # Look up and mint BEFORE consuming, so a Firestore or token failure leaves
     # the session verified and the app's next poll can simply retry.
     try:
-        is_new_user = not firestore.client().collection('users').document(uid).get().exists
+        user_snap = firestore.client().collection('users').document(uid).get()
+        is_new_user = not user_snap.exists
     except Exception as e:
         print(f"[AUTH] sms status users lookup failed: {e}", flush=True)
         log_sms("lookup_failed", phone)
         return jsonify({"error": "Temporarily unavailable", "code": "lookup_failed"}), 503
+    if user_snap.exists and (user_snap.to_dict() or {}).get('banned'):
+        log_sms("banned", phone)
+        return jsonify({"error": "This account has been suspended.", "code": "banned"}), 403
     try:
         token = auth.create_custom_token(uid)
         token = token.decode("utf-8") if isinstance(token, bytes) else token
@@ -3646,7 +3654,7 @@ def get_online_users_admin():
             if current_uid and d.id == current_uid:
                 continue
             raw_dict = d.to_dict() or {}
-            if raw_dict.get('isDeleted') == True or raw_dict.get('deletedAt'):
+            if raw_dict.get('isDeleted') == True or raw_dict.get('deletedAt') or raw_dict.get('banned'):
                 continue
             if raw_dict.get('isActiveMode') == False or raw_dict.get('isOnline') == False or raw_dict.get('isSessionActive') == False:
                 continue
@@ -3689,7 +3697,7 @@ def get_recent_users_admin():
             if current_uid and d.id == current_uid:
                 continue
             raw_dict = d.to_dict() or {}
-            if raw_dict.get('isDeleted') == True or raw_dict.get('deletedAt'):
+            if raw_dict.get('isDeleted') == True or raw_dict.get('deletedAt') or raw_dict.get('banned'):
                 continue
             if raw_dict.get('isActiveMode') == False or raw_dict.get('isOnline') == False or raw_dict.get('isSessionActive') == False:
                 continue
@@ -4933,6 +4941,182 @@ def admin_host_bonus():
     except Exception as e:
         print(f"[BONUS] Host bonus payout error for {day}: {e}")
         return jsonify({"error": "Could not pay the host bonus."}), 500
+
+
+# ==========================================
+# MODERATION: REPORTS AND BANS
+# ==========================================
+#
+# Reports are written by clients (profile / chat / call) and were readable only
+# in the Firebase console. The admin panel now lists them grouped by the person
+# reported, and can dismiss them or ban that person. A ban:
+#   * sets users.banned (server-only: not in the rules' userMutableKeys),
+#   * disables the Firebase account and revokes its sessions, so the app signs
+#     out and cannot sign back in,
+#   * is refused by every authenticated endpoint at once (require_bearer_uid),
+#     without waiting the up-to-an-hour an existing ID token stays valid,
+#   * hides them from every user list, and closes their open reports.
+# Unbanning reverses all of it except the closed reports.
+
+BANNED_CACHE = {"at": 0.0, "uids": frozenset()}
+BANNED_CACHE_SECONDS = 60
+
+
+def banned_uids():
+    """Banned accounts, re-read at most once a minute (a ban clears this at once)."""
+    now = time.time()
+    if now - BANNED_CACHE["at"] > BANNED_CACHE_SECONDS:
+        try:
+            snaps = firestore.client().collection('users').where('banned', '==', True).stream()
+            BANNED_CACHE["uids"] = frozenset(s.id for s in snaps)
+            BANNED_CACHE["at"] = now
+        except Exception as e:
+            # Keep the last good list rather than unbanning everybody.
+            print(f"[MOD] Could not refresh the banned list: {e}")
+    return BANNED_CACHE["uids"]
+
+
+def report_time(report):
+    return ludo_secs(report.get('createdAt')) or 0.0
+
+
+@app.route('/api/v1/admin/reports', methods=['POST', 'OPTIONS'])
+def admin_reports():
+    """List reports grouped by who was reported, or dismiss them. Admin only.
+
+    action 'list' (status 'open' by default, or 'resolved'): groups ordered by
+    how many reports each person has, with reasons, reporters and dates, plus
+    the banned accounts. action 'dismiss' with targetUid closes that person's
+    open reports without banning them.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    admin_uid, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    action = str(data.get('action') or 'list')
+    db_client = firestore.client()
+
+    if action == 'dismiss':
+        target = str(data.get('targetUid') or '').strip()
+        if not target:
+            return jsonify({"error": "Missing targetUid"}), 400
+        closed = close_reports(db_client, target, admin_uid, 'dismissed')
+        return jsonify({"ok": True, "closed": closed}), 200
+    if action != 'list':
+        return jsonify({"error": "action must be list or dismiss"}), 400
+
+    status = 'resolved' if data.get('status') == 'resolved' else 'open'
+    reports = [(s.id, s.to_dict() or {}) for s in db_client.collection('reports').where('status', '==', status).stream()]
+    reports.sort(key=lambda r: -report_time(r[1]))
+    reports = reports[:300]
+
+    names = {}
+
+    def name(uid):
+        if uid not in names:
+            snap = db_client.collection('users').document(uid).get() if uid else None
+            info = (snap.to_dict() or {}) if snap is not None and snap.exists else {}
+            names[uid] = {
+                "nickname": info.get('nickname') or info.get('username') or 'Unknown',
+                "banned": bool(info.get('banned')),
+            }
+        return names[uid]
+
+    groups = {}
+    for report_id, r in reports:
+        target = r.get('targetUid') or ''
+        group = groups.setdefault(target, {
+            "targetUid": target, "nickname": name(target)["nickname"], "banned": name(target)["banned"],
+            "count": 0, "reasons": {}, "latestAt": None, "reports": [],
+        })
+        group["count"] += 1
+        reason = r.get('reason') or 'Something else'
+        group["reasons"][reason] = group["reasons"].get(reason, 0) + 1
+        if group["latestAt"] is None:
+            group["latestAt"] = serialize_doc({"at": r.get('createdAt')}).get('at')
+        if len(group["reports"]) < 10:
+            group["reports"].append({
+                "id": report_id,
+                "reason": reason,
+                "source": r.get('source'),
+                "reporter": name(r.get('reporterUid') or '')["nickname"],
+                "createdAt": serialize_doc({"at": r.get('createdAt')}).get('at'),
+            })
+    ordered = sorted(groups.values(), key=lambda g: -g["count"])
+
+    banned = []
+    for snap in db_client.collection('users').where('banned', '==', True).stream():
+        info = snap.to_dict() or {}
+        banned.append({
+            "uid": snap.id,
+            "nickname": info.get('nickname') or info.get('username') or 'Unknown',
+            "reason": info.get('banReason') or '',
+            "bannedAt": serialize_doc({"at": info.get('bannedAt')}).get('at'),
+        })
+    return jsonify({"ok": True, "status": status, "groups": ordered, "banned": banned}), 200
+
+
+def close_reports(db_client, target_uid, admin_uid, resolution):
+    """Mark every open report about `target_uid` resolved. Returns how many."""
+    closed = 0
+    open_reports = db_client.collection('reports').where('targetUid', '==', target_uid).where('status', '==', 'open').stream()
+    for snap in open_reports:
+        db_client.collection('reports').document(snap.id).update({
+            "status": "resolved",
+            "resolution": resolution,
+            "resolvedBy": admin_uid,
+            "resolvedAt": datetime.now(timezone.utc),
+        })
+        closed += 1
+    return closed
+
+
+@app.route('/api/v1/admin/ban', methods=['POST', 'OPTIONS'])
+def admin_ban():
+    """Ban (banned: true, with a reason) or unban (banned: false) an account."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    admin_uid, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    target = str(data.get('uid') or '').strip()
+    banned = data.get('banned', True) is not False
+    reason = str(data.get('reason') or '').strip()[:200]
+    if not target:
+        return jsonify({"error": "Missing uid"}), 400
+    if banned and target in admin_uids():
+        return jsonify({"error": "An admin account cannot be banned."}), 400
+
+    db_client = firestore.client()
+    user_ref = db_client.collection('users').document(target)
+    if not user_ref.get().exists:
+        return jsonify({"error": "No such account"}), 404
+    now = datetime.now(timezone.utc)
+    if banned:
+        user_ref.update({
+            "banned": True, "banReason": reason or 'Reported', "bannedAt": now, "bannedBy": admin_uid,
+            # Off the lists straight away rather than when the presence times out.
+            "isOnline": False,
+        })
+    else:
+        user_ref.update({"banned": False, "banReason": None, "bannedAt": None, "bannedBy": None})
+
+    sign_in = True
+    try:
+        auth.update_user(target, disabled=banned)
+        if banned:
+            auth.revoke_refresh_tokens(target)
+    except Exception as e:
+        # The ban still stands: every endpoint refuses the account regardless.
+        sign_in = False
+        print(f"[MOD] Could not {'disable' if banned else 'enable'} sign-in for {target}: {e}")
+
+    closed = close_reports(db_client, target, admin_uid, 'banned') if banned else 0
+    BANNED_CACHE["at"] = 0.0
+    return jsonify({"ok": True, "banned": banned, "signInUpdated": sign_in, "reportsClosed": closed}), 200
 
 
 # The app opens this in a WebView rather than bundling a payments SDK, so the

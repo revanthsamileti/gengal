@@ -497,3 +497,15 @@ def test_health_does_not_touch_firestore(client, sms, monkeypatch):
         raise AssertionError("health must not touch Firestore")
     monkeypatch.setattr(app_module.firestore, "client", explode)
     assert client.get("/api/v1/auth/sms/health").status_code == 200
+
+
+def test_a_banned_account_is_told_and_gets_no_token(client, sms):
+    sms.store["users/" + UID] = {"uid": UID, "banned": True}
+    body = start(client).get_json()
+    inbound(client, sms_event(PHONE, body["message"]))
+
+    response = status(client, body["sessionId"])
+
+    assert response.status_code == 403
+    assert response.get_json()["code"] == "banned"
+    assert sms.minted == []
