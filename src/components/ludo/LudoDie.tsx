@@ -1,47 +1,43 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
 import { GEMS, ludo, numeric } from '../../theme/ludoTheme';
 import type { PlayerColor } from '../../screens/LudoConstants';
-import { RING, buildFaceTrack, facePerspective, landingIndex, sideValue } from './dieGeometry';
 
 /**
  * The die is the primary control, so it is sized and placed for the thumb.
  *
- * It is a cube: at rest it sits a little turned so a second face shows, it
- * tumbles a quarter turn at a time while a roll is in flight, and it comes down
- * on the rolled value. Three states still read differently at a glance: flat
- * and grey when it is not your turn, white with a coloured edge and a slow rock
- * when it is, and tumbling while the roll resolves.
+ * A classic white die with black pips, the one the owner asked for. It looks
+ * solid without any 3D transform: a shaded face, a darker edge offset behind it
+ * for thickness, and a slight tilt. The earlier cube turned in depth, which
+ * Android draws unreliably, and it was never tried on a phone; players there
+ * reported the die "not working". Everything here is flat (rotate, scale,
+ * translate) and runs on the native driver.
  *
- * See dieGeometry.ts for why it turns one axis at a time.
+ * Three states read differently at a glance: grey and still when it is not your
+ * turn, white with a coloured glow and a slow breathe when it is, and shaking
+ * through faces while the roll resolves.
  */
 
-const SIZE = 76;
-const PERSPECTIVE = 420;
-const FACE_PERSPECTIVE = facePerspective(SIZE, PERSPECTIVE);
-/** How far round the resting die sits, in quarter turns: enough to show an edge. */
-const REST = 0.13;
-const QUARTER_MS = 150;
-/** A roll whose value never arrives must not spin for ever. */
-const SPIN_LIMIT_MS = 1500;
-
-const TRACKS = Array.from({ length: RING }, (_, j) => buildFaceTrack(j, SIZE, PERSPECTIVE));
+const SIZE = 70;
+/** How thick the die looks: the edge drawn behind the face. */
+const DEPTH = 5;
+/** Resting tilt, like a die that has just come to a stop. */
+const REST_DEG = -9;
+/** How often the pips change while it is shaking. */
+const FLICKER_MS = 85;
+/** Another player's roll still shows as a short shake. */
+const OTHERS_ROLL_MS = 450;
 
 const PIPS: Record<number, [number, number][]> = {
   1: [[50, 50]],
-  2: [[28, 28], [72, 72]],
-  3: [[28, 28], [50, 50], [72, 72]],
-  4: [[28, 28], [72, 28], [28, 72], [72, 72]],
-  5: [[28, 28], [72, 28], [50, 50], [28, 72], [72, 72]],
-  6: [[28, 24], [72, 24], [28, 50], [72, 50], [28, 76], [72, 76]],
+  2: [[27, 27], [73, 73]],
+  3: [[27, 27], [50, 50], [73, 73]],
+  4: [[27, 27], [73, 27], [27, 73], [73, 73]],
+  5: [[27, 27], [73, 27], [50, 50], [27, 73], [73, 73]],
+  6: [[27, 24], [73, 24], [27, 50], [73, 50], [27, 76], [73, 76]],
 };
-
-/** Values for the four views, with `front` showing in view `at`. */
-function ringShowing(front: number, at: number): number[] {
-  const side = sideValue(front);
-  const order = [front, side, 7 - front, 7 - side];
-  return Array.from({ length: RING }, (_, j) => order[(j - at + RING) % RING]);
-}
+const PIP = SIZE * 0.17;
 
 type Props = {
   value: number | null;
@@ -55,174 +51,111 @@ type Props = {
 };
 
 export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, reduceMotion }: Props) {
-  const turn = useRef(new Animated.Value(REST)).current;
-  const rock = useRef(new Animated.Value(0)).current;
-  const settle = useRef(new Animated.Value(1)).current;
-  const [ring, setRing] = useState(() => ringShowing(value ?? 1, 0));
-
-  /** The value the die is showing, or is on its way down to. */
-  const shown = useRef(value ?? 1);
-  /** The last `value` seen, so a roll of the same number again still tumbles. */
+  const spin = useRef(new Animated.Value(0)).current;
+  const hop = useRef(new Animated.Value(0)).current;
+  const breathe = useRef(new Animated.Value(0)).current;
+  const [face, setFace] = useState(value ?? 1);
+  const [shaking, setShaking] = useState(false);
   const lastValue = useRef(value);
-  const spinning = useRef(false);
-  /** While tumbling: the listener that deals new numbers, and where it is up to. */
-  const dealer = useRef<string | null>(null);
-  const dealt = useRef({ step: -1, next: 0 });
 
-  const stopDealing = useCallback(() => {
-    if (dealer.current) turn.removeListener(dealer.current);
-    dealer.current = null;
-  }, [turn]);
-  useEffect(() => stopDealing, [stopDealing]);
-
-  const spin = useCallback(() => {
-    spinning.current = true;
-    Animated.spring(settle, { toValue: 0.88, friction: 7, tension: 160, useNativeDriver: true }).start();
-    // Four views would otherwise show the same four numbers lap after lap. Each
-    // time a face comes square-on, the view that has just gone out of sight is
-    // given the next number -- it is two quarter turns from being seen again,
-    // which is ample time for the change to land -- so all six sides go by.
-    stopDealing();
-    dealt.current.step = -1;
-    dealer.current = turn.addListener(({ value: t }) => {
-      const step = Math.floor(t) % RING;
-      if (step === dealt.current.step) return;
-      dealt.current.step = step;
-      const face = ((dealt.current.next++) % 6) + 1;
-      setRing((prev) => {
-        const out = [...prev];
-        out[(step + RING - 1) % RING] = face;
-        return out;
-      });
-    });
-    turn.stopAnimation((current) => {
-      // The pose repeats every lap, so starting from the same place one lap
-      // back keeps the numbers small without anything moving.
-      const from = current % RING;
-      turn.setValue(from);
-      Animated.loop(
-        Animated.timing(turn, {
-          toValue: from + RING, duration: RING * QUARTER_MS, easing: Easing.linear, useNativeDriver: true,
-        })
-      ).start();
-    });
-  }, [turn, settle, stopDealing]);
-
-  const land = useCallback((next: number) => {
-    shown.current = next;
-    spinning.current = false;
-    stopDealing();
-    turn.stopAnimation((current) => {
-      const from = current % RING;
-      turn.setValue(from);
-      const target = landingIndex(from);
-      // Both views being written are out of sight at this moment; the one after
-      // the target is the edge that shows beside it at rest.
-      setRing((prev) => {
-        const out = [...prev];
-        out[target % RING] = next;
-        out[(target + 1) % RING] = sideValue(next);
-        return out;
-      });
-      const run = () => {
-        Animated.timing(turn, {
-          toValue: target + REST,
-          duration: Math.round((target + REST - from) * QUARTER_MS * 1.4),
-          easing: Easing.out(Easing.back(1.3)),
-          useNativeDriver: true,
-        }).start(({ finished }) => {
-          if (finished) turn.setValue((target % RING) + REST);
-        });
-        Animated.sequence([
-          Animated.delay(Math.round((target - from) * QUARTER_MS)),
-          Animated.spring(settle, { toValue: 1, friction: 4, tension: 150, useNativeDriver: true }),
-        ]).start();
-      };
-      // Let the new pips reach the screen before those views swing into sight.
-      requestAnimationFrame(() => requestAnimationFrame(run));
-    });
-  }, [turn, settle, stopDealing]);
-
-  /** No tumble: put the value on the face that is already showing. */
-  const show = useCallback((next: number) => {
-    shown.current = next;
-    spinning.current = false;
-    stopDealing();
-    turn.stopAnimation((current) => {
-      const at = Math.floor(current % RING);
-      turn.setValue(at + REST);
-      settle.setValue(1);
-      setRing(ringShowing(next, at));
-    });
-  }, [turn, settle, stopDealing]);
-
-  // Our own roll: tumble until the value comes back.
+  // Shaking: spin and hop on the native driver, pips flicker on a timer.
   useEffect(() => {
-    if (rolling && !reduceMotion) spin();
-  }, [rolling, reduceMotion, spin]);
+    if (!shaking) return;
+    const loop = Animated.loop(
+      Animated.parallel([
+        Animated.timing(spin, { toValue: 1, duration: 420, easing: Easing.linear, useNativeDriver: true }),
+        Animated.sequence([
+          Animated.timing(hop, { toValue: 1, duration: 140, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.timing(hop, { toValue: 0, duration: 140, easing: Easing.in(Easing.quad), useNativeDriver: true }),
+        ]),
+      ]),
+    );
+    spin.setValue(0);
+    loop.start();
+    let n = Math.floor(Math.random() * 6);
+    const flicker = setInterval(() => {
+      n = (n + 1 + Math.floor(Math.random() * 4)) % 6;
+      setFace(n + 1);
+    }, FLICKER_MS);
+    return () => {
+      loop.stop();
+      clearInterval(flicker);
+    };
+  }, [shaking, spin, hop]);
 
-  // A value arriving -- ours, or another player's -- brings the die down on it.
+  // Coming to rest: a quick settle onto the resting tilt.
+  const settle = (next: number) => {
+    setShaking(false);
+    setFace(next);
+    spin.setValue(0);
+    hop.setValue(0.6);
+    Animated.spring(hop, { toValue: 0, friction: 4, tension: 160, useNativeDriver: true }).start();
+  };
+
+  // Our own roll shakes for exactly as long as the server takes.
+  useEffect(() => {
+    if (rolling && !reduceMotion) setShaking(true);
+  }, [rolling, reduceMotion]);
+
+  // A value arriving -- ours, or another player's -- lands the die on it.
   useEffect(() => {
     if (rolling) return;
-    const fresh = value != null && (spinning.current || lastValue.current == null || value !== shown.current);
+    const changed = value != null && value !== lastValue.current;
     lastValue.current = value;
-    if (fresh && value != null) {
-      if (reduceMotion) show(value);
-      else land(value);
+    if (value == null) {
+      setShaking(false);
       return;
     }
-    if (!spinning.current) return;
-    // The roll has finished but its value has not arrived (a refused roll, or
-    // a slow snapshot). Give it a moment, then settle back where it was.
-    const timer = setTimeout(() => { if (spinning.current) land(shown.current); }, SPIN_LIMIT_MS);
-    return () => clearTimeout(timer);
-  }, [rolling, value, reduceMotion, land, show]);
+    if (shaking) {
+      settle(value);
+      return;
+    }
+    if (changed && !reduceMotion) {
+      // Somebody else rolled: show it as a short shake, then the number.
+      setShaking(true);
+      const t = setTimeout(() => settle(value), OTHERS_ROLL_MS);
+      return () => clearTimeout(t);
+    }
+    setFace(value);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rolling, value, reduceMotion]);
 
-  // Idle invitation when the roll is available.
+  // A roll that ends without a value (refused, timed out) must not keep shaking.
+  useEffect(() => {
+    if (rolling || !shaking || value != null) return;
+    const t = setTimeout(() => setShaking(false), 600);
+    return () => clearTimeout(t);
+  }, [rolling, shaking, value]);
+
+  // Your turn: a slow breathe that says "tap me".
   useEffect(() => {
     if (!enabled || rolling || reduceMotion) {
-      rock.setValue(0);
+      breathe.setValue(0);
       return;
     }
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(rock, { toValue: 0.07, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-        Animated.timing(rock, { toValue: 0, duration: 900, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-      ])
+        Animated.timing(breathe, { toValue: 1, duration: 800, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        Animated.timing(breathe, { toValue: 0, duration: 800, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+      ]),
     );
     loop.start();
     return () => loop.stop();
-  }, [enabled, rolling, reduceMotion, rock]);
+  }, [enabled, rolling, reduceMotion, breathe]);
 
-  const faces = useMemo(() => {
-    const position = Animated.add(turn, rock);
-    const at = (outputRange: number[] | string[], inputRange: number[]) =>
-      position.interpolate({ inputRange, outputRange, extrapolate: 'clamp' });
-    return TRACKS.map((track) => ({
-      opacity: at(track.opacity, track.input),
-      shade: at(track.shade, track.input),
-      transform: [
-        { perspective: FACE_PERSPECTIVE },
-        { translateX: at(track.translateX, track.input) },
-        { translateY: at(track.translateY, track.input) },
-        { scale: at(track.scale, track.input) },
-        { rotateX: at(track.rotateX, track.input) },
-        { rotateY: at(track.rotateY, track.input) },
-      ],
-    }));
-  }, [turn, rock]);
-
-  // The edge says whose turn it is; the pips have to be read, so they take the
-  // ink variant. Yellow core on a white die face was 1.8:1.
+  const live = enabled || rolling || shaking;
   const accent = GEMS[turnColor].core;
-  const pipColor = GEMS[turnColor].ink;
-  const live = enabled || rolling;
+  const rotate = spin.interpolate({ inputRange: [0, 1], outputRange: [`${REST_DEG}deg`, `${REST_DEG + 360}deg`] });
+  const translateY = hop.interpolate({ inputRange: [0, 1], outputRange: [0, -10] });
+  const scale = breathe.interpolate({ inputRange: [0, 1], outputRange: [1, 1.06] });
+  const glowOpacity = breathe.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.7] });
 
   return (
     <View style={styles.wrap}>
       <Pressable
         onPress={onPress}
         disabled={!enabled}
+        hitSlop={10}
         accessibilityRole="button"
         accessibilityLabel={
           enabled ? (cost ? `Roll the dice, costs ${cost} coins` : 'Roll the dice') : 'Dice, not your turn'
@@ -230,33 +163,39 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
         accessibilityState={{ disabled: !enabled, busy: rolling }}
         style={({ pressed }) => [styles.press, pressed && enabled && styles.pressed]}
       >
-        <Animated.View style={[styles.stage, { opacity: live ? 1 : 0.5, transform: [{ scale: settle }] }]}>
-          <View style={[styles.ground, live && { backgroundColor: accent, opacity: 0.22 }]} />
-          {faces.map((face, j) => (
-            <Animated.View
-              key={j}
-              pointerEvents="none"
-              style={[
-                styles.face,
-                { borderColor: live ? accent : ludo.grid, opacity: face.opacity, transform: face.transform },
-              ]}
-            >
-              {(PIPS[ring[j]] ?? PIPS[1]).map(([px, py], i) => (
-                <View
-                  key={i}
-                  style={[
-                    styles.pip,
-                    {
-                      left: (px / 100) * SIZE - 8,
-                      top: (py / 100) * SIZE - 8,
-                      backgroundColor: live ? pipColor : ludo.inkFaint,
-                    },
-                  ]}
-                />
-              ))}
-              <Animated.View style={[styles.shade, { opacity: face.shade }]} />
-            </Animated.View>
-          ))}
+        {/* Turn colour, as a glow under the die. */}
+        <Animated.View
+          pointerEvents="none"
+          style={[styles.glow, { backgroundColor: accent, opacity: live ? glowOpacity : 0 }]}
+        />
+        <Animated.View
+          style={[
+            styles.stage,
+            { opacity: live ? 1 : 0.55, transform: [{ translateY }, { rotate }, { scale }] },
+          ]}
+        >
+          {/* The edge behind the face makes it read as a solid block. */}
+          <View style={styles.edge} />
+          <LinearGradient
+            colors={live ? ['#FFFFFF', '#F1F1F1', '#D9D9D9'] : ['#F2F2F2', '#E4E4E4', '#CFCFCF']}
+            start={{ x: 0.15, y: 0.05 }}
+            end={{ x: 0.95, y: 1 }}
+            style={styles.face}
+          >
+            <View style={styles.highlight} />
+            {(PIPS[face] ?? PIPS[1]).map(([px, py], i) => (
+              <View
+                key={i}
+                style={[
+                  styles.pip,
+                  { left: (px / 100) * SIZE - PIP / 2, top: (py / 100) * SIZE - PIP / 2 },
+                  !live && styles.pipIdle,
+                ]}
+              >
+                <View style={styles.pipShine} />
+              </View>
+            ))}
+          </LinearGradient>
         </Animated.View>
       </Pressable>
 
@@ -271,20 +210,24 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
 
 const styles = StyleSheet.create({
   wrap: { alignItems: 'center', gap: 5 },
-  press: { padding: 5, borderRadius: 20 },
-  pressed: { opacity: 0.85, transform: [{ scale: 0.96 }] },
-  stage: { width: SIZE, height: SIZE },
-  // The cast shadow lives on the ground, not on the faces: a shadow on a view
-  // that is rotating in depth is drawn as if it were still flat.
-  ground: {
+  press: { padding: 8, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  pressed: { opacity: 0.85, transform: [{ scale: 0.95 }] },
+  glow: {
     position: 'absolute',
-    left: SIZE * 0.1,
-    right: SIZE * 0.1,
-    bottom: -9,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: '#000000',
-    opacity: 0.12,
+    width: SIZE * 0.9,
+    height: 14,
+    bottom: 2,
+    borderRadius: 7,
+  },
+  stage: { width: SIZE + DEPTH, height: SIZE + DEPTH },
+  edge: {
+    position: 'absolute',
+    left: DEPTH,
+    top: DEPTH,
+    width: SIZE,
+    height: SIZE,
+    borderRadius: 15,
+    backgroundColor: '#A9A9A9',
   },
   face: {
     position: 'absolute',
@@ -292,13 +235,41 @@ const styles = StyleSheet.create({
     top: 0,
     width: SIZE,
     height: SIZE,
-    borderRadius: 13,
-    borderWidth: 3,
-    backgroundColor: '#FFFFFF',
+    borderRadius: 15,
+    borderWidth: 1,
+    borderColor: 'rgba(0,0,0,0.12)',
     overflow: 'hidden',
   },
-  // Pips sit inside the 3pt border, so they are placed against the padding box.
-  pip: { position: 'absolute', width: 10, height: 10, borderRadius: 5 },
-  shade: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0, backgroundColor: '#1C1C1C' },
+  // A soft shine on the upper left, where the light comes from.
+  highlight: {
+    position: 'absolute',
+    left: 5,
+    top: 4,
+    width: SIZE * 0.55,
+    height: SIZE * 0.22,
+    borderRadius: SIZE * 0.11,
+    backgroundColor: 'rgba(255,255,255,0.75)',
+  },
+  pip: {
+    position: 'absolute',
+    width: PIP,
+    height: PIP,
+    borderRadius: PIP / 2,
+    backgroundColor: '#141414',
+    borderTopWidth: 1.5,
+    borderLeftWidth: 1.5,
+    borderColor: '#000000',
+  },
+  pipIdle: { backgroundColor: '#8C8C8C', borderColor: '#7A7A7A' },
+  // The little glint that makes a drilled pip look round.
+  pipShine: {
+    position: 'absolute',
+    right: PIP * 0.16,
+    bottom: PIP * 0.16,
+    width: PIP * 0.28,
+    height: PIP * 0.28,
+    borderRadius: PIP * 0.14,
+    backgroundColor: 'rgba(255,255,255,0.28)',
+  },
   cost: { color: ludo.inkFaint, fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
 });

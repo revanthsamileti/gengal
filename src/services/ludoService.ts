@@ -598,6 +598,22 @@ export const speakLudo = (
 
 // Host (or current player) rolls dice — returns rolled value.
 // Per-token mode is charged on the server in the same write that sets the die.
+/**
+ * The board waits on a roll or a move with the die locked. A request stuck on a
+ * bad connection used to hold it locked for as long as the network took to
+ * give up -- the die simply stopped answering. After this long the board is
+ * released with a message; if the request did land, the room shows it anyway.
+ */
+const BOARD_REQUEST_MS = 8000;
+const withinMs = <T,>(work: Promise<T>, ms: number, message: string): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    work.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+
 export const rollDice = async (
   roomId: string,
   rollerUid: string,
@@ -605,9 +621,10 @@ export const rollDice = async (
   rollerAvatarData: any,
   _room: LudoRoom,
 ): Promise<number> => {
-  const data = await authedPost<{ diceValue: number; forfeited?: boolean }>(
-    '/api/v1/ludo/roll',
-    { roomId },
+  const data = await withinMs(
+    authedPost<{ diceValue: number; forfeited?: boolean }>('/api/v1/ludo/roll', { roomId }),
+    BOARD_REQUEST_MS,
+    'The roll is taking too long. Check your connection and tap the dice again.',
   );
   const value = data.diceValue;
 
@@ -647,10 +664,14 @@ export const moveToken = async (
   room: LudoRoom,
 ) => {
   if (!room.diceRolled || room.diceValue === null) return;
-  const result = await authedPost<{
-    fromPos: number; toPos: number; diceValue: number;
-    captured: string | null; colorDone: boolean;
-  }>('/api/v1/ludo/move', { roomId, tokenId });
+  const result = await withinMs(
+    authedPost<{
+      fromPos: number; toPos: number; diceValue: number;
+      captured: string | null; colorDone: boolean;
+    }>('/api/v1/ludo/move', { roomId, tokenId }),
+    BOARD_REQUEST_MS,
+    'The move is taking too long. Check your connection and tap the pawn again.',
+  );
 
   // The feed is not waited for, so the board never lags behind it.
   const by = { senderUid: moverUid, senderName: moverName, senderAvatarData: moverAvatarData };
