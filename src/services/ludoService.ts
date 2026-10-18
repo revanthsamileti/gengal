@@ -447,7 +447,15 @@ const boardFingerprint = (r: LudoRoom | null) => r && JSON.stringify([
 ]);
 
 /** How often the board checks its live listener against the server. */
-const ROOM_WATCHDOG_MS = 8000;
+const ROOM_WATCHDOG_MS = 5000;
+
+/**
+ * One "check the server now" per open board. Called right after this phone's
+ * own start, roll, move or skip: the host who tapped Start used to sit on the
+ * waiting card for up to 8 s while the game ran, and lose the opening turn.
+ */
+const roomResyncers = new Map<string, () => void>();
+const resyncLudoRoom = (roomId: string) => { roomResyncers.get(roomId)?.(); };
 
 /** The table with this code (typed, or from a link). Throws code 'no_table' if none is open. */
 export const findLudoTable = (code: string) =>
@@ -506,8 +514,7 @@ export const subscribeToLudoRoom = (
   // begun, so it never saw its turn and every one ran out on the clock. Every
   // few seconds the board asks the server directly; if what it is showing is
   // out of date it takes the server's copy and restarts the listener.
-  const watchdog = setInterval(() => {
-    if (!last || last.status !== 'live') return;
+  const check = () => {
     getDocFromServer(ref)
       .then((snap) => {
         if (stopped || !snap.exists()) return;
@@ -518,11 +525,16 @@ export const subscribeToLudoRoom = (
         listen();
       })
       .catch(() => {});
+  };
+  roomResyncers.set(roomId, check);
+  const watchdog = setInterval(() => {
+    if (last && last.status === 'live') check();
   }, ROOM_WATCHDOG_MS);
 
   return () => {
     stopped = true;
     clearInterval(watchdog);
+    if (roomResyncers.get(roomId) === check) roomResyncers.delete(roomId);
     unsub?.();
   };
 };
@@ -640,6 +652,7 @@ export const leaveLudoRoom = async (roomId: string, uid: string, nickname: strin
  */
 export const startGame = async (roomId: string) => {
   await authedPost('/api/v1/ludo/start', { roomId });
+  resyncLudoRoom(roomId);
   logEvent(roomId, { type: 'system', senderUid: '', senderName: 'Game', text: 'Game started!' }).catch(() => {});
 };
 
@@ -715,6 +728,7 @@ export const rollDice = async (
     'The roll is taking too long. Check your connection and tap the dice again.',
   );
   const value = data.diceValue;
+  resyncLudoRoom(roomId);
 
   // The feed entries are not waited for. They used to be, so the die kept
   // tumbling for a second write to finish after the value was already known.
@@ -760,6 +774,7 @@ export const moveToken = async (
     BOARD_REQUEST_MS,
     'The move is taking too long. Check your connection and tap the pawn again.',
   );
+  resyncLudoRoom(roomId);
 
   // The feed is not waited for, so the board never lags behind it.
   const by = { senderUid: moverUid, senderName: moverName, senderAvatarData: moverAvatarData };
@@ -789,6 +804,7 @@ export const moveToken = async (
  */
 export const skipTurn = async (roomId: string, _room?: LudoRoom) => {
   await authedPost<{ currentTurn: string }>('/api/v1/ludo/skip', { roomId });
+  resyncLudoRoom(roomId);
 };
 
 /**

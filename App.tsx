@@ -388,7 +388,14 @@ export default function App() {
       return;
     }
 
-    setNavStack(prev => [...prev, { name: next, params: nextParams, key: nextNavKey() }]);
+    setNavStack(prev => {
+      // The same table opened again on top of itself (a link delivered twice,
+      // a double tap) is one entry, not two. Otherwise leaving the top copy
+      // uncovered the other, still offering the seat you had just given up.
+      const top = prev[prev.length - 1];
+      if (top && top.name === next && nextParams.roomId && top.params.roomId === nextParams.roomId) return prev;
+      return [...prev, { name: next, params: nextParams, key: nextNavKey() }];
+    });
   };
 
   /**

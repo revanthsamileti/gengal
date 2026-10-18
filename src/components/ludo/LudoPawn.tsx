@@ -5,8 +5,9 @@ import { cellForPosition, pathBetween, PlayerColor } from '../../screens/LudoCon
 import { GEMS } from '../../theme/ludoTheme';
 
 /**
- * A player's pawn: the classic Ludo silhouette — round head over a bell body,
- * with a gloss highlight and a soft shadow so it reads as sitting on the board.
+ * A player's pawn, as Ludo King draws it: a silver map pin with the player's
+ * colour in its head, standing on a coloured ring that marks the square. The
+ * pin rises above the board, so pawns stay readable even on small squares.
  *
  * Movement is animated hop by hop along the squares the pawn actually travels,
  * rather than cutting to the destination — on a shared board that is the only
@@ -30,35 +31,47 @@ type Props = {
   label: string;
 };
 
+/** The art's box, and where the ring it stands on is centred in it. */
+const ART_W = 40;
+const ART_H = 50;
+const RING_Y = 43;
+
 function PawnArt({ width, height, color }: { width: number; height: number; color: PlayerColor }) {
   const c = GEMS[color];
   return (
-    <Svg width={width} height={height} viewBox="0 0 40 44">
+    <Svg width={width} height={height} viewBox={`0 0 ${ART_W} ${ART_H}`}>
       <Defs>
         <LinearGradient id={`pw-${color}`} x1="0.2" y1="0" x2="0.85" y2="1">
           <Stop offset="0" stopColor={c.light} />
-          <Stop offset="0.45" stopColor={c.core} />
+          <Stop offset="0.5" stopColor={c.core} />
           <Stop offset="1" stopColor={c.dark} />
+        </LinearGradient>
+        <LinearGradient id="pw-silver" x1="0" y1="0" x2="1" y2="1">
+          <Stop offset="0" stopColor="#FFFFFF" />
+          <Stop offset="0.55" stopColor="#E3E7EC" />
+          <Stop offset="1" stopColor="#9EA7B1" />
         </LinearGradient>
       </Defs>
 
-      {/* Contact shadow */}
-      <Ellipse cx="20" cy="39.5" rx="12" ry="3.2" fill="#000" opacity="0.22" />
+      {/* The ring on the square: the player's colour with a dark rim */}
+      <Ellipse cx="20" cy={RING_Y} rx="12.5" ry="5.6" fill={c.dark} />
+      <Ellipse cx="20" cy={RING_Y - 0.6} rx="10.8" ry="4.5" fill={c.core} />
+      <Ellipse cx="20" cy={RING_Y - 0.6} rx="6.4" ry="2.5" fill={c.dark} opacity="0.35" />
 
-      {/* Body — narrow at the neck, bellied at the base */}
+      {/* The pin: a silver teardrop whose point stands in the ring */}
       <Path
-        d="M20 15 C25.5 15 29 21 30.5 28 C31.8 34 29 38.5 20 38.5 C11 38.5 8.2 34 9.5 28 C11 21 14.5 15 20 15 Z"
-        fill={`url(#pw-${color})`}
-        stroke={c.dark}
-        strokeWidth="1.6"
+        d={`M20 ${RING_Y} C16 35 7.5 28.5 7.5 17 A12.5 12.5 0 1 1 32.5 17 C32.5 28.5 24 35 20 ${RING_Y} Z`}
+        fill="url(#pw-silver)"
+        stroke="#7D8792"
+        strokeWidth="1.3"
         strokeLinejoin="round"
       />
-      {/* Head */}
-      <Circle cx="20" cy="11" r="8" fill={`url(#pw-${color})`} stroke={c.dark} strokeWidth="1.6" />
+      {/* The player's colour in the head */}
+      <Circle cx="20" cy="16.5" r="7.6" fill={`url(#pw-${color})`} stroke={c.dark} strokeWidth="1.2" />
 
       {/* Gloss */}
-      <Ellipse cx="16.6" cy="8.2" rx="3.1" ry="3.6" fill="#FFFFFF" opacity="0.55" transform="rotate(-20 16.6 8.2)" />
-      <Path d="M14.6 22 C13.4 26 13 30 13.6 34" stroke="#FFFFFF" strokeWidth="2.4" strokeLinecap="round" opacity="0.30" fill="none" />
+      <Ellipse cx="17" cy="13.6" rx="2.6" ry="2.1" fill="#FFFFFF" opacity="0.7" transform="rotate(-25 17 13.6)" />
+      <Path d="M11.5 12 C10.6 16 11.2 21 13.4 25" stroke="#FFFFFF" strokeWidth="1.8" strokeLinecap="round" opacity="0.8" fill="none" />
     </Svg>
   );
 }
@@ -114,16 +127,18 @@ function LudoPawnImpl({
     return () => loop.stop();
   }, [movable, reduceMotion, lift]);
 
-  // Pawns stand taller than a cell, so the art overhangs upward.
-  const pawnW = cellSize * 1.02;
-  const pawnH = pawnW * (44 / 40);
+  // Pins stand taller than a cell, so the art overhangs upward.
+  const pawnW = cellSize * 1.16;
+  const pawnH = pawnW * (ART_H / ART_W);
   const pad = Math.max(0, (MIN_TOUCH - pawnW) / 2);
+  // Where the ring sits, measured up from the bottom of the art.
+  const ringFromBottom = pawnH * ((ART_H - RING_Y) / ART_H);
 
-  // cellForPosition gives the CENTRE of the square. Centre the pawn on that x,
-  // and plant its base on the square's bottom edge so it reads as standing on
-  // the square rather than floating over it.
+  // cellForPosition gives the CENTRE of the square: centre the pawn on that x,
+  // and put the ring it stands on just below the centre, so the ring marks the
+  // square and the pin rises out of it.
   const offsetX = -pawnW / 2 + stackOffset * cellSize;
-  const offsetY = cellSize / 2 - pawnH + stackOffset * cellSize;
+  const offsetY = cellSize * 0.12 - (pawnH - ringFromBottom) + stackOffset * cellSize;
 
   const translateX = anim.x.interpolate({
     inputRange: [0, 1], outputRange: [offsetX, offsetX + cellSize],
@@ -167,6 +182,7 @@ function LudoPawnImpl({
                 width: cellSize * 0.92,
                 height: cellSize * 0.92,
                 borderRadius: cellSize * 0.46,
+                bottom: ringFromBottom - cellSize * 0.46,
                 borderColor: GEMS[color].light,
                 opacity: lift.interpolate({ inputRange: [0, 1], outputRange: [0.35, 0.95] }),
               },
@@ -184,7 +200,7 @@ function LudoPawnImpl({
 const styles = StyleSheet.create({
   root: { position: 'absolute', left: 0, top: 0 },
   press: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'flex-end' },
-  halo: { position: 'absolute', bottom: -2, borderWidth: 2 },
+  halo: { position: 'absolute', borderWidth: 2.5 },
 });
 
 export const LudoPawn = memo(LudoPawnImpl);
