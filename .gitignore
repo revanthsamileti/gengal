@@ -166,3 +166,6 @@ firestore.rules.snapshot-*
 # Firebase Android config: supplied to EAS builds as the GOOGLE_SERVICES_JSON
 # file variable, never committed (see app.config.js).
 google-services.json
+
+# Play Console upload key for eas submit. Never commit or upload it.
+play-service-account.json
