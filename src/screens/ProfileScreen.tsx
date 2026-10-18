@@ -17,7 +17,7 @@ import { useActionLock } from '../hooks/useActionLock';
 import { launchCall } from '../services/callPermissionService';
 
 import { useUser } from '../context/UserContext';
-import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, getFollowerCount, isUserAvailableNow, UserProfile as FirebaseUser } from '../services/userService';
+import { subscribeToOnlineUsers, saveUserProfile, followUser, unfollowUser, subscribeToFollowerIds, subscribeToUserProfile, isUserAvailableNow, UserProfile as FirebaseUser } from '../services/userService';
 import { blockUser, unblockUser, reportUser, REPORT_REASONS, useBlockedUids } from '../services/safetyService';
 import GengalAvatar from '../components/GengalAvatar';
 import CallPriceTag from '../components/CallPriceTag';
@@ -232,21 +232,27 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
     );
   };
 
-  // Followers are a subcollection now, so the count comes from an aggregate query
-  // rather than the length of an array on the profile document.
+  // Both counts are live listeners. They used to be read once when the
+  // profile opened (followers) or copied from whatever list it was opened
+  // from (following), so a follow from another phone never showed.
   const [followerCount, setFollowerCount] = useState<number | null>(null);
+  const [followingCount, setFollowingCount] = useState<number | null>(null);
   const countedUid = targetUid || (isCurrentUser ? myProfile?.uid : undefined);
   useEffect(() => {
-    if (!countedUid) {
-      setFollowerCount(null);
-      return;
-    }
-    let active = true;
-    getFollowerCount(countedUid).then(count => {
-      if (active) setFollowerCount(count);
-    });
-    return () => { active = false; };
-  }, [countedUid, isFollowing]);
+    setFollowerCount(null);
+    if (!countedUid) return;
+    return subscribeToFollowerIds(countedUid, (ids) => setFollowerCount(ids.length));
+  }, [countedUid]);
+  useEffect(() => {
+    setFollowingCount(null);
+    if (!countedUid) return;
+    return subscribeToUserProfile(countedUid, (u) =>
+      setFollowingCount(Array.isArray(u?.following) ? u!.following.length : 0));
+  }, [countedUid]);
+  const openFollowList = (tab: 'followers' | 'following') => {
+    if (!countedUid) return;
+    navigate('FollowList', { uid: countedUid, name: profile?.name, tab });
+  };
 
   useEffect(() => {
     if (targetUid) {
@@ -374,19 +380,23 @@ export default function ProfileScreen({ profileName, navigate, route }: ProfileS
             </View>
 
             <View style={styles.statsRow}>
-              {/* Plain Views: there is no followers/following list to open,
-                  and a Touchable that does nothing reads as a broken button. */}
-              <View style={styles.statItem}>
+              <TouchableOpacity style={styles.statItem} activeOpacity={0.7} disabled={!countedUid}
+                onPress={() => openFollowList('followers')}
+                accessibilityRole="button" accessibilityLabel="See followers">
                 <Text style={styles.statValue}>
-                  {followerCount !== null ? followerCount.toString() : profile.followers}
+                  {followerCount !== null ? followerCount.toString() : '–'}
                 </Text>
                 <Text style={styles.statLabel}>Followers</Text>
-              </View>
+              </TouchableOpacity>
               <View style={styles.statDivider} />
-              <View style={styles.statItem}>
-                <Text style={styles.statValue}>{profile.following}</Text>
+              <TouchableOpacity style={styles.statItem} activeOpacity={0.7} disabled={!countedUid}
+                onPress={() => openFollowList('following')}
+                accessibilityRole="button" accessibilityLabel="See who they follow">
+                <Text style={styles.statValue}>
+                  {followingCount !== null ? followingCount.toString() : '–'}
+                </Text>
                 <Text style={styles.statLabel}>Following</Text>
-              </View>
+              </TouchableOpacity>
             </View>
 
             {profile.bio ? <Text style={styles.bio}>{profile.bio}</Text> : null}

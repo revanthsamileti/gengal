@@ -17,6 +17,8 @@ import {
   getCountFromServer,
   arrayUnion,
   arrayRemove,
+  documentId,
+  getDocs,
   deleteField
 } from 'firebase/firestore';
 
@@ -594,6 +596,35 @@ export const unfollowUser = async (currentUid: string, targetUid: string) => {
     updateDoc(doc(db, 'users', currentUid), { following: arrayRemove(targetUid) }),
     deleteDoc(doc(db, 'users', targetUid, 'followers', currentUid)),
   ]);
+};
+
+/**
+ * Who follows `uid`, live, newest first. The count on a profile used to be
+ * read once when it opened, so a follow from anyone else never showed.
+ */
+export const subscribeToFollowerIds = (uid: string, callback: (uids: string[]) => void) =>
+  onSnapshot(
+    collection(db, 'users', uid, 'followers'),
+    (snap) => {
+      const rows = snap.docs.map((d) => ({ id: d.id, at: (d.data() as any)?.createdAt?.toMillis?.() ?? 0 }));
+      callback(rows.sort((a, b) => b.at - a.at).map((r) => r.id));
+    },
+    (error) => console.warn('[follow] follower listener stopped:', error),
+  );
+
+/** Profiles for a list of uids, in the same order; missing or deleted ones are left out. */
+export const getUsersByIds = async (uids: string[]): Promise<UserProfile[]> => {
+  const found = new Map<string, UserProfile>();
+  for (let i = 0; i < uids.length; i += 10) {
+    const chunk = uids.slice(i, i + 10);
+    const snap = await getDocs(query(collection(db, 'users'), where(documentId(), 'in', chunk)));
+    snap.forEach((d) => {
+      const data = d.data() as UserProfile;
+      if (data.isDeleted === true || data.deletedAt || data.banned) return;
+      found.set(d.id, { ...data, uid: d.id });
+    });
+  }
+  return uids.map((u) => found.get(u)).filter((u): u is UserProfile => !!u);
 };
 
 export const getFollowerCount = async (uid: string): Promise<number> => {

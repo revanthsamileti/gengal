@@ -27,6 +27,7 @@ import ActiveConnectsScreen from './src/screens/ActiveConnectsScreen';
 import ActivityScreen from './src/screens/ActivityScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import BlockedUsersScreen from './src/screens/BlockedUsersScreen';
+import FollowListScreen from './src/screens/FollowListScreen';
 import AdminPanelScreen from './src/screens/AdminPanelScreen';
 import CoinsScreen from './src/screens/CoinsScreen';
 import { UserProvider } from './src/context/UserContext';
@@ -202,6 +203,9 @@ const SCREENS = {
   Activity: ({ navigate }: ScreenContext) => <ActivityScreen navigate={navigate} />,
   Settings: ({ navigate, goBack }: ScreenContext) => <SettingsScreen navigate={navigate} goBack={goBack} />,
   BlockedUsers: ({ navigate, goBack }: ScreenContext) => <BlockedUsersScreen navigate={navigate} goBack={goBack} />,
+  FollowList: ({ navigate, goBack, params }: ScreenContext) => (
+    <FollowListScreen navigate={navigate} goBack={goBack} uid={params.uid} name={params.name} tab={params.tab} />
+  ),
   AdminPanel: ({ navigate, goBack }: ScreenContext) => <AdminPanelScreen navigate={navigate} goBack={goBack} />,
   Coins: ({ navigate, goBack }: ScreenContext) => <CoinsScreen navigate={navigate} goBack={goBack} />,
   Earnings: ({ navigate, goBack }: ScreenContext) => <EarningsScreen navigate={navigate} goBack={goBack} />,
