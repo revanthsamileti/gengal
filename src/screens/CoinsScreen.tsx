@@ -10,7 +10,7 @@ import { useActionLock } from '../hooks/useActionLock';
 import {
   createCoinOrder, purchaseCoins, RazorpayResult,
   getCoinOffers, CoinOffers, FIRST_BUY_PACKAGE,
-  getDailyBonus, claimDailyBonus, DailyBonusStatus, redeemCoupon,
+  getDailyBonus, claimDailyBonus, DailyBonusStatus, redeemCoupon, claimFreePack,
 } from '../services/coinService';
 import CheckoutModal from '../components/CheckoutModal';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
@@ -83,6 +83,9 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
 
   /** A lower price for the same coins, as the server applies it (0-50%). */
   const discount = Math.min(Math.max(offers?.discountPercent ?? 0, 0), 50) / 100;
+  /** 100% off: every pack is free, one per person per day, and nothing is paid. */
+  const freePacks = offers?.freePacks === true;
+  const freeClaimed = freePacks && offers?.freePackClaimedToday === true;
   /** What a pack actually costs today. */
   const payPrice = (listPrice: number) => Math.round(listPrice * (1 - discount));
 
@@ -180,6 +183,21 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
   // useState alone cannot close (state is async; a second tap can land before
   // the first re-render propagates the disabled prop to the button).
   const handlePurchase = (pkg: typeof COIN_PACKAGES[0]) => {
+    if (freePacks) {
+      void runPurchaseSafe(async () => {
+        setIsPurchasing(pkg.id);
+        try {
+          const result = await claimFreePack(pkg.id);
+          Alert.alert('Free pack added', `${formatCoinBalance(result.coins)} coins have been added. Come back tomorrow for another.`);
+        } catch (e: any) {
+          Alert.alert('Free pack', e?.message || 'Could not add the free pack.');
+        } finally {
+          setIsPurchasing(null);
+          loadOffers();
+        }
+      });
+      return;
+    }
     void runPurchaseSafe(() => runPurchase(pkg.id, pkg.id, payPrice(pkg.priceInr)));
   };
 
@@ -337,7 +355,7 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
           </View>
         )}
 
-        {settings && (
+        {settings && !freePacks && (
           <View style={styles.customRechargeCard}>
             <Text style={styles.sectionTitle}>Custom Recharge</Text>
             <Text style={styles.customHint}>
@@ -380,6 +398,13 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
         )}
 
         <Text style={styles.sectionTitle}>Coin Packages</Text>
+        {freePacks && (
+          <Text style={styles.freeNote}>
+            {freeClaimed
+              ? 'You have had today\u2019s free pack. Come back tomorrow for another.'
+              : 'Every pack is free today. Pick one \u2014 one free pack a day.'}
+          </Text>
+        )}
 
         {/* Packages Grid */}
         <View style={styles.packagesContainer}>
@@ -389,19 +414,25 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
               style={styles.packageCard}
               activeOpacity={0.8}
               onPress={() => handlePurchase(pkg)}
-              disabled={isPurchasing !== null || !settings}
+              disabled={isPurchasing !== null || !settings || freeClaimed}
               accessibilityRole="button"
-              accessibilityLabel={`Buy ${pkg.name} for ${payPrice(pkg.priceInr)} rupees`}
+              accessibilityLabel={freePacks ? `Claim ${pkg.name} free` : `Buy ${pkg.name} for ${payPrice(pkg.priceInr)} rupees`}
             >
               <View style={styles.packageIconFrame}>
                 <MaterialIcons name={pkg.icon as any} size={32} color={skeuo.gold} />
               </View>
               <View style={styles.packageInfo}>
                 <Text style={styles.packageCoins}>
-                  {settings ? `${formatCoinBalance(coinsFor(payPrice(pkg.priceInr)))} Coins` : '—'}
+                  {settings
+                    ? `${formatCoinBalance(freePacks
+                        ? Math.floor(pkg.priceInr * settings.inrToCoinRechargeRate)
+                        : coinsFor(payPrice(pkg.priceInr)))} Coins`
+                    : '—'}
                 </Text>
                 <Text style={styles.packageName}>{pkg.name}</Text>
-                {discount > 0 && (
+                {freePacks ? (
+                  <Text style={styles.discountTag}>100% OFF</Text>
+                ) : discount > 0 && (
                   <Text style={styles.discountTag}>{Math.round(discount * 100)}% OFF</Text>
                 )}
               </View>
@@ -409,9 +440,11 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
                 {isPurchasing === pkg.id ? (
                   <ActivityIndicator color={skeuo.plum} size="small" />
                 ) : (
-                  <View style={{ alignItems: 'center' }}>
-                    {discount > 0 && <Text style={styles.strikePrice}>{formatInr(pkg.priceInr)}</Text>}
-                    <Text style={styles.priceText}>{formatInr(payPrice(pkg.priceInr))}</Text>
+                  <View style={{ alignItems: 'center', opacity: freeClaimed ? 0.5 : 1 }}>
+                    {(freePacks || discount > 0) && <Text style={styles.strikePrice}>{formatInr(pkg.priceInr)}</Text>}
+                    <Text style={styles.priceText}>
+                      {freePacks ? (freeClaimed ? 'Claimed' : 'FREE') : formatInr(payPrice(pkg.priceInr))}
+                    </Text>
                   </View>
                 )}
               </View>
@@ -462,6 +495,7 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: skeuo.border, backgroundColor: '#FFFFFF',
     fontSize: 16, fontWeight: '900', letterSpacing: 2, color: skeuo.plum,
   },
+  freeNote: { marginTop: -6, marginBottom: 10, color: '#B3261E', fontSize: 13, fontWeight: '800' },
   discountTag: { fontSize: 10, fontWeight: '900', color: '#B3261E', marginTop: 2 },
   strikePrice: { fontSize: 11, fontWeight: '700', color: '#9A8772', textDecorationLine: 'line-through' },
   container: {

@@ -71,11 +71,18 @@ export type CoinOrder = {
  * while checkout is open.
  */
 export interface CoinOffers {
-  /** 0-50: packs cost this much less for the same coins. */
+  /** 0-50: packs cost this much less for the same coins. 100 = free packs. */
   discountPercent: number;
   /** Present only while this account has never recharged. */
   firstBuy: { priceInr: number; coins: number } | null;
+  /** The admin set 100% off: one pack free per person per day, no paying. */
+  freePacks?: boolean;
+  freePackClaimedToday?: boolean;
 }
+
+/** Today's free pack, while the store is at 100% off. */
+export const claimFreePack = (packageId: string) =>
+  authedPost<{ ok: boolean; coins: number; newBalance: number }>('/api/v1/coins/free-pack', { packageId });
 
 export const FIRST_BUY_PACKAGE = 'first_buy';
 

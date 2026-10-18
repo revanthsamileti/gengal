@@ -89,6 +89,69 @@ class TestDiscount:
 
         assert response.status_code == 400
 
+    def test_but_100_is_allowed(self, client, store, monkeypatch):
+        monkeypatch.setattr(app_module, "require_admin_uid", lambda: (ADMIN, None))
+
+        response = client.post("/api/v1/admin/settings", json={"settings": {"coinDiscountPercent": 100}})
+
+        assert response.status_code == 200
+
+
+# ── 100% off: one free pack a day ───────────────────────────────────────────
+
+
+class TestFreePacks:
+    def claim(self, client, package="2"):
+        return client.post("/api/v1/coins/free-pack", json={"packageId": package})
+
+    def test_a_pack_is_free_once_a_day(self, client, as_user, store):
+        settings(store, coinDiscountPercent=100)
+
+        first = self.claim(client, "2")
+        second = self.claim(client, "1")
+
+        assert first.status_code == 200
+        assert first.get_json()["coins"] == 561          # ₹449 at 1.25
+        assert store["users/%s" % TEST_UID]["coins"] == 661
+        assert second.status_code == 400
+        assert "tomorrow" in second.get_json()["error"]
+        assert store["users/%s" % TEST_UID]["coins"] == 661
+
+    def test_yesterdays_claim_does_not_count(self, client, as_user, store):
+        settings(store, coinDiscountPercent=100)
+        store["free_pack_claims/%s_%s" % (yesterday(), TEST_UID)] = {"coins": 111}
+
+        assert self.claim(client).status_code == 200
+
+    def test_not_free_below_100(self, client, as_user, store):
+        settings(store, coinDiscountPercent=50)
+
+        assert self.claim(client).status_code == 400
+        assert store["users/%s" % TEST_UID]["coins"] == 100
+
+    def test_unknown_pack(self, client, as_user, store):
+        settings(store, coinDiscountPercent=100)
+
+        assert self.claim(client, "99").status_code == 400
+
+    def test_paid_orders_are_off_while_packs_are_free(self, client, as_user, store, razorpay):
+        settings(store, coinDiscountPercent=100)
+
+        response = order(client, "1", 89)
+
+        assert response.status_code == 400
+        assert response.get_json()["code"] == "free_packs"
+        assert razorpay == {}
+
+    def test_the_store_is_told(self, client, as_user, store):
+        settings(store, coinDiscountPercent=100)
+        self.claim(client)
+
+        offers = client.get("/api/v1/coins/offers").get_json()
+
+        assert offers["freePacks"] is True and offers["freePackClaimedToday"] is True
+        assert offers["discountPercent"] == 100 and offers["firstBuy"] is None
+
 
 # ── First purchase ──────────────────────────────────────────────────────────
 

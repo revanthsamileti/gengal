@@ -4264,9 +4264,10 @@ SETTINGS_BOUNDS = {
     # Lower bound of 1, never 0: a floor of zero would let anyone open a payout
     # request worth nothing and clear it through the manual review queue.
     "minWithdrawalHearts": (1, 100000),
-    # Capped at half price: past that, a minute can cost more to serve than it
-    # brings in once GST, the store's fee, the call provider and the host are paid.
-    "coinDiscountPercent": (0, 50),
+    # Up to half price, or exactly 100 (see FREE_PACK_PERCENT). Past half price
+    # a minute can cost more to serve than it brings in once GST, the store's
+    # fee, the call provider and the host are paid, so 51-99 is refused below.
+    "coinDiscountPercent": (0, 100),
     "firstBuyPriceInr": (0, 100000),
     "firstBuyCoins": (0, 100000),
     "dailyBonusCoins": (0, 100000),
@@ -4321,6 +4322,8 @@ def admin_settings():
         low, high = SETTINGS_BOUNDS[key]
         if numeric < low or numeric > high:
             return jsonify({"error": f"{key} must be between {low} and {high}"}), 400
+        if key == 'coinDiscountPercent' and 50 < numeric < FREE_PACK_PERCENT:
+            return jsonify({"error": "The store discount is up to 50%, or 100% for one free pack a day."}), 400
         updates[key] = numeric
 
     if not updates:
@@ -4386,8 +4389,22 @@ def pricing_settings():
 
 
 def coin_discount(settings):
-    """The store-wide discount as a fraction, within its 0-50% bounds."""
+    """The store-wide discount on paid packs as a fraction, within 0-50%."""
     return min(max(float(settings.get('coinDiscountPercent') or 0), 0.0), 50.0) / 100.0
+
+
+# A 100% discount does not make packs cost nothing to buy -- that would be
+# unlimited coins for everyone. It switches the store to one free pack per
+# person per India day instead, and paid top-ups are off while it lasts.
+FREE_PACK_PERCENT = 100
+FREE_PACK_CLAIMS = 'free_pack_claims'
+# The store's packs by id and full price, as CoinsScreen lists them. Only
+# needed here for free packs: a paid order states its own amount.
+STORE_PACKS_INR = {'1': 89, '2': 449, '3': 899, '4': 1799}
+
+
+def free_packs_on(settings):
+    return float(settings.get('coinDiscountPercent') or 0) >= FREE_PACK_PERCENT
 
 
 def coins_for_inr(amount_inr, settings):
@@ -4676,6 +4693,8 @@ def create_coin_order():
 
     data = request.json or {}
     settings = pricing_settings()
+    if free_packs_on(settings):
+        return jsonify({"error": "Packs are free today. Tap one to claim it.", "code": "free_packs"}), 400
 
     try:
         amount_inr = parse_positive_number(data.get("amountInr"), "amountInr")
@@ -4885,11 +4904,71 @@ def coin_offers():
     first_buy = None
     if offer and first_buy_eligible(firestore.client(), uid):
         first_buy = {"priceInr": offer[0], "coins": offer[1]}
+    free = free_packs_on(settings)
+    claimed = False
+    if free:
+        day = ist_day(datetime.now(timezone.utc))
+        claimed = firestore.client().collection(FREE_PACK_CLAIMS).document(f"{day}_{uid}").get().exists
     return jsonify({
         "ok": True,
-        "discountPercent": round(coin_discount(settings) * 100, 2),
-        "firstBuy": first_buy,
+        # Old apps clamp this to 50 and try to pay, which create_coin_order
+        # refuses with a message saying packs are free.
+        "discountPercent": FREE_PACK_PERCENT if free else round(coin_discount(settings) * 100, 2),
+        "firstBuy": None if free else first_buy,
+        "freePacks": free,
+        "freePackClaimedToday": claimed,
     }), 200
+
+
+@app.route('/api/v1/coins/free-pack', methods=['POST', 'OPTIONS'])
+def claim_free_pack():
+    """One store pack free, once per person per India day, while the admin
+    has the store discount at 100%. The coins are what the pack's full price
+    buys at the current rate."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    settings = pricing_settings()
+    if not free_packs_on(settings):
+        return jsonify({"error": "Packs are not free right now."}), 400
+    package_id = str((request.json or {}).get('packageId') or '')
+    price = STORE_PACKS_INR.get(package_id)
+    if price is None:
+        return jsonify({"error": "No such pack."}), 400
+    coins = int(math.floor(price * float(settings['inrToCoinRechargeRate'])))
+
+    db_client = firestore.client()
+    day = ist_day(datetime.now(timezone.utc))
+    claim_ref = db_client.collection(FREE_PACK_CLAIMS).document(f"{day}_{uid}")
+    user_ref = db_client.collection('users').document(uid)
+    try:
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def claim(transaction):
+            claim_snap = claim_ref.get(transaction=transaction)
+            user_snap = user_ref.get(transaction=transaction)
+            if claim_snap.exists:
+                raise ValueError("You have had today's free pack. Come back tomorrow.")
+            if not user_snap.exists:
+                raise ValueError("Your account is not set up yet.")
+            balance = get_coin_balance(user_snap)
+            transaction.update(user_ref, {"coins": balance + coins})
+            transaction.set(claim_ref, {
+                "uid": uid, "day": day, "packageId": package_id,
+                "coins": coins, "at": datetime.now(timezone.utc),
+            })
+            return balance + coins
+
+        new_balance = claim(transaction)
+        return jsonify({"ok": True, "coins": coins, "newBalance": new_balance}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COINS] Free pack error: {e}")
+        return jsonify({"error": "Could not add the free pack."}), 500
 
 
 @app.route('/api/v1/bonus/daily', methods=['GET', 'POST', 'OPTIONS'])

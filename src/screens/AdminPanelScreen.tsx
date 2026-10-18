@@ -64,7 +64,7 @@ const FIELDS: FieldDef[] = [
   { key: 'ludoWatchAppStepSeconds', label: 'App part, 1 coin every', hint: 'Taken per started step until the app part for the minute is reached', icon: 'av-timer', suffix: 'sec' },
   { key: 'ludoWatchHostPerMinute', label: 'Watcher fee, host part', hint: 'Most a watcher pays the host in a minute of play', icon: 'visibility', suffix: 'coins/min' },
   { key: 'ludoWatchHostStepSeconds', label: 'Host part, 1 coin every', hint: 'Taken per started step until the host part for the minute is reached', icon: 'av-timer', suffix: 'sec' },
-  { key: 'coinDiscountPercent', section: 'Offers', label: 'Store discount', hint: 'Every pack costs this much less for the same coins. Up to 50%', icon: 'local-offer', suffix: '%' },
+  { key: 'coinDiscountPercent', section: 'Offers', label: 'Store discount', hint: 'Every pack costs this much less for the same coins. Up to 50%, or 100 = one free pack per person per day', icon: 'local-offer', suffix: '%' },
   { key: 'firstBuyPriceInr', label: 'First recharge price', hint: 'One pack for an account that has never recharged. 0 turns it off', icon: 'redeem', prefix: '₹' },
   { key: 'firstBuyCoins', label: 'First recharge coins', hint: 'Coins that pack gives', icon: 'redeem', suffix: 'coins' },
   { key: 'dailyBonusCoins', label: 'Daily bonus', hint: 'Free coins, claimable once a day. 0 turns it off', icon: 'card-giftcard', suffix: 'coins' },
