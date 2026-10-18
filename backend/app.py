@@ -3557,10 +3557,21 @@ def ludo_roll_endpoint():
             value = secrets.randbelow(6) + 1
             consec = int(room.get('consecutiveSixes') or 0)
             new_consec = consec + 1 if value == 6 else 0
+            # Every phone animates the die from lastRoll, which nothing clears:
+            # diceValue goes back to None as soon as the pawn moves or the turn
+            # passes, so a phone whose update arrived after that never saw the
+            # roll at all -- the die simply did not move there. seq tells two
+            # rolls of the same number apart.
+            prev_roll = room.get('lastRoll') or {}
             updates = {
                 "diceValue": value,
                 "diceRolled": True,
                 "consecutiveSixes": new_consec,
+                "lastRoll": {
+                    "value": value,
+                    "color": room.get('currentTurn'),
+                    "seq": int(prev_roll.get('seq') or 0) + 1,
+                },
             }
             if per_minute:
                 active = dict(room.get('lastActive') or {})

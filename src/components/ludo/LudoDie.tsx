@@ -43,6 +43,8 @@ type Props = {
   reduceMotion: boolean;
   /** 0..1 of the turn left, drawn as a draining ring round the slot; null hides it. */
   turnProgress?: number | null;
+  /** Goes up with every roll at the table (room.lastRoll.seq); each new one animates. */
+  rollSeq?: number;
 };
 
 const RING = 96;
@@ -56,7 +58,11 @@ const buzz = (pattern: number | number[]) => {
   try { Vibration.vibrate(pattern as any); } catch { /* no vibrator */ }
 };
 
-export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, reduceMotion, turnProgress = null }: Props) {
+export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, reduceMotion, turnProgress = null, rollSeq = 0 }: Props) {
+  const lastSeq = useRef(rollSeq);
+  const seqAtRoll = useRef(rollSeq);
+  /** Our own roll landed before its counter arrived: that arrival is not a new roll. */
+  const ownUnseen = useRef(false);
   const burst = useRef(new Animated.Value(0)).current;
   const punch = useRef(new Animated.Value(0)).current;
   /** This die's own roll is in flight: only that one buzzes on landing. */
@@ -127,6 +133,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
   // Our own roll shakes for exactly as long as the server takes.
   useEffect(() => {
     if (!rolling) return;
+    seqAtRoll.current = lastSeq.current;
     ownRoll.current = true;
     buzz(15);
     if (!reduceMotion && !use3D) setShaking(true);
@@ -135,25 +142,35 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
   // A value arriving -- ours, or another player's -- lands the die on it.
   useEffect(() => {
     // The 3D die throws itself and reports when it lands (onLanded below).
+    if (rolling) lastSeq.current = rollSeq;
     if (rolling || use3D) return;
     const changed = value != null && value !== lastValue.current;
+    const seqChanged = rollSeq !== lastSeq.current;
     lastValue.current = value;
+    lastSeq.current = rollSeq;
     if (value == null) {
       setShaking(false);
       return;
     }
     if (shaking) {
+      ownUnseen.current = rollSeq === seqAtRoll.current;
       settle(value);
       return;
     }
-    if (changed && !reduceMotion) {
+    if (seqChanged && ownUnseen.current) {
+      ownUnseen.current = false;
+      setFace(value);
+      return;
+    }
+    // Every new roll animates, even the same number again (see lastRoll on the server).
+    if ((rollSeq ? seqChanged : changed) && !reduceMotion) {
       setShaking(true);
       const t = setTimeout(() => settle(value), OTHERS_ROLL_MS);
       return () => clearTimeout(t);
     }
     setFace(value);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rolling, value, reduceMotion, use3D]);
+  }, [rolling, value, reduceMotion, use3D, rollSeq]);
 
   // A roll that ends without a value (refused, timed out) must not keep shaking.
   useEffect(() => {
@@ -253,6 +270,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
             <Die3D
               value={value}
               rolling={rolling}
+              rollSeq={rollSeq}
               color={gem.core}
               size={SLOT - 6}
               reduceMotion={reduceMotion}

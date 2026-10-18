@@ -183,6 +183,11 @@ export interface LudoRoom {
   micGuests?: Record<string, LudoMicEntry>;
   /** Coins each person has given at this table. Orders the mic requests. */
   giftTotals?: Record<string, number>;
+  /**
+   * The latest roll at the table, kept after the pawn moves (diceValue is
+   * cleared then). Every phone animates its die when seq goes up.
+   */
+  lastRoll?: { value: number; color: TokenColor; seq: number } | null;
   /** Six letters; friends join with it, typed or inside a link. */
   code?: string;
   /** Left out of the lobby: only the code or link finds it. */

@@ -141,6 +141,8 @@ type Props = {
   value: number | null;
   /** Our own roll is waiting on the server: the die spins in the air. */
   rolling: boolean;
+  /** Goes up with every roll at the table (room.lastRoll.seq); each new one is thrown. */
+  rollSeq?: number;
   /** Turn colour, hex. */
   color: string;
   size: number;
@@ -151,7 +153,12 @@ type Props = {
   onUnavailable?: () => void;
 };
 
-export function Die3D({ value, rolling, color, size, reduceMotion, onLanded, onUnavailable }: Props) {
+export function Die3D({ value, rolling, rollSeq = 0, color, size, reduceMotion, onLanded, onUnavailable }: Props) {
+  const lastSeq = useRef(rollSeq);
+  /** The roll counter when our own roll started. */
+  const seqAtRoll = useRef(rollSeq);
+  /** Our own roll was thrown before its counter arrived: that arrival is not a new roll. */
+  const ownUnseen = useRef(false);
   const three = useRef<{
     gl: ExpoWebGLRenderingContext;
     renderer: THREE.WebGLRenderer;
@@ -301,17 +308,36 @@ export function Die3D({ value, rolling, color, size, reduceMotion, onLanded, onU
   useEffect(() => {
     if (!three.current) return;
     if (rolling) {
-      if (mode.current !== 'spin') spin();
+      if (mode.current !== 'spin') {
+        seqAtRoll.current = lastSeq.current;
+        spin();
+      }
+      lastSeq.current = rollSeq;
       return;
     }
     const changed = value !== lastValue.current;
+    const seqChanged = rollSeq !== lastSeq.current;
     lastValue.current = value;
+    lastSeq.current = rollSeq;
     if (value == null) {
       if (mode.current !== 'throw') rest(shown.current);
       return;
     }
-    if (mode.current === 'spin' || changed) throwTo(value);
-  }, [rolling, value, spin, throwTo, rest]);
+    if (mode.current === 'spin') {
+      // Our own roll came back. If its counter has not arrived yet, the next
+      // counter change is this same roll, not somebody else's.
+      ownUnseen.current = rollSeq === seqAtRoll.current;
+      throwTo(value);
+      return;
+    }
+    if (seqChanged && ownUnseen.current) {
+      ownUnseen.current = false;
+      return;
+    }
+    // Every new roll at the table is thrown, even the same number again;
+    // a table from before lastRoll existed falls back to the value changing.
+    if (rollSeq ? seqChanged : changed) throwTo(value);
+  }, [rolling, value, rollSeq, spin, throwTo, rest]);
 
   useEffect(() => () => stop(), []);
 

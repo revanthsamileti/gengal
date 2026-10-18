@@ -869,3 +869,30 @@ class TestTableCodes:
         page = client.get("/ludo/" + body["code"]).get_data(as_text=True)
 
         assert "<script>x</script>" not in page
+
+
+class TestLastRoll:
+    def test_every_roll_is_kept_for_the_other_phones_with_a_counter(self, act, store):
+        room_id = started_table(act, store, P1)
+        turn = room(store, room_id)["currentTurn"]
+        mover = HOST if turn == "red" else P1
+
+        act(mover, "roll", roomId=room_id)
+        first = dict(room(store, room_id)["lastRoll"])
+
+        assert first["seq"] == 1
+        assert first["value"] == room(store, room_id)["diceValue"]
+        assert first["color"] == turn
+
+    def test_the_last_roll_survives_the_turn_moving_on(self, act, store):
+        room_id = started_table(act, store, P1)
+        turn = room(store, room_id)["currentTurn"]
+        mover = HOST if turn == "red" else P1
+        act(mover, "roll", roomId=room_id)
+        seen = dict(room(store, room_id)["lastRoll"])
+
+        # Whatever happens next (a move or a pass) clears diceValue, not lastRoll.
+        room(store, room_id)["diceValue"] = None
+        room(store, room_id)["diceRolled"] = False
+
+        assert room(store, room_id)["lastRoll"] == seen

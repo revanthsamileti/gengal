@@ -1003,7 +1003,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
           <View style={[styles.seatRow, styles.bottomRow, { width: boardSize + 8 }]}>
             {renderSeat(SEAT_LAYOUT[1][0].color, SEAT_LAYOUT[1][0].align)}
             <LudoDie
-              value={rolled ?? room.diceValue}
+              // After the pawn moves diceValue is cleared; the die keeps showing the last roll.
+              value={rolled ?? room.diceValue ?? room.lastRoll?.value ?? null}
+              rollSeq={room.lastRoll?.seq ?? 0}
               rolling={rolling}
               enabled={canRoll}
               turnColor={room.currentTurn as PlayerColor}
