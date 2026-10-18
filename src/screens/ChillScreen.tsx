@@ -453,7 +453,8 @@ export default function ChillScreen({ navigate }: Props) {
         Alert.alert('That table has closed', 'It closed before you could join. Pick another one or open your own.');
         return;
       }
-      navigate('LudoBoard', { roomId: room.id });
+      // takeSeat: the card said "Take a seat", so arrive with one offered.
+      navigate('LudoBoard', { roomId: room.id, takeSeat: true });
     } catch (e: any) {
       Alert.alert('Could not open that table', e?.message || 'Check your connection and try again.');
     } finally {

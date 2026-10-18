@@ -85,7 +85,9 @@ export default function LudoScreen({ navigate }: Props) {
         Alert.alert('That table is gone', 'It closed before you could join. Try another one.');
         return;
       }
-      navigate('LudoBoard', { roomId: room.id });
+      // takeSeat: the card said "Take a seat", so arrive with one offered
+      // (the board only offers it where a seat really can be taken).
+      navigate('LudoBoard', { roomId: room.id, takeSeat: true });
     } catch (e: any) {
       Alert.alert('Could not open that table', e?.message || 'Try again in a moment.');
     } finally {

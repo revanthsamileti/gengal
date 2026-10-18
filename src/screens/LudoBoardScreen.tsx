@@ -51,7 +51,8 @@ import {
 interface Props {
   navigate: (screen: string, params?: any) => void;
   goBack?: () => void;
-  route?: { params?: { roomId?: string } };
+  /** takeSeat: came from a lobby "Take a seat", so offer the first free seat on arrival. */
+  route?: { params?: { roomId?: string; takeSeat?: boolean } };
 }
 
 /** Seats sit at the corner of the board their colour occupies. */
@@ -480,6 +481,28 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       ],
     );
   }, [room, profile, doTakeSeat, navigate]);
+
+  // Opening a table only lets you watch; a seat is a separate, paid choice.
+  // Two phones showed what that cost: the second opened the table from "Take a
+  // seat", never found the seats on the board, and the host sat at "One more
+  // player to start". So the first free seat is offered on arrival from the
+  // lobby, and the waiting card has a button for it.
+  const freeSeat = useMemo<TokenColor | null>(() => {
+    if (!room || room.players.length >= 4) return null;
+    return (['red', 'blue', 'green', 'yellow'] as TokenColor[])
+      .find((c) => !room.players.some((p) => p.color === c)) ?? null;
+  }, [room]);
+  const seatOpenToMe = !!room && room.status === 'live' && !room.players.some((p) => p.uid === myUid)
+    && room.hostUid !== myUid
+    && (room.phase === 'waiting' || (isPerMinute(room) && room.phase === 'playing' && !!room.emptySince));
+  const offeredSeat = useRef(false);
+  useEffect(() => {
+    // Waits for the profile: the offer checks the balance, and before it loads
+    // that reads as zero coins.
+    if (offeredSeat.current || !route?.params?.takeSeat || !seatOpenToMe || !freeSeat || !profile) return;
+    offeredSeat.current = true;
+    handleTakeSeat(freeSeat);
+  }, [route?.params?.takeSeat, seatOpenToMe, freeSeat, handleTakeSeat, profile]);
 
   const handleBet = useCallback((color: TokenColor) => runCoin(async () => {
     if (!room) return;
@@ -1033,7 +1056,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                 // Somebody already seated has no seat left to tap.
                 ? (myPlayer
                   ? 'Ludo needs at least two. Waiting for somebody to take a seat.'
-                  : 'Ludo needs at least two. Tap an open seat to join, or wait for somebody else.')
+                  : 'Ludo needs at least two. Take a seat to play, or wait for somebody else.')
                 : isHost
                   ? 'Start when everyone is in. Empty seats sit out the game.'
                   : `${hostName} starts the game.`}
@@ -1060,6 +1083,17 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
               >
                 <MaterialIcons name="play-arrow" size={18} color="#FFFFFF" />
                 <Text style={styles.primaryBtnText}>Start game</Text>
+              </Pressable>
+            ) : seatOpenToMe && freeSeat ? (
+              <Pressable
+                onPress={() => handleTakeSeat(freeSeat)}
+                disabled={coinBusy}
+                accessibilityRole="button"
+                accessibilityLabel="Take a seat"
+                style={({ pressed }) => [styles.primaryBtn, pressed && styles.pressed, coinBusy && { opacity: 0.5 }]}
+              >
+                <MaterialIcons name="event-seat" size={18} color="#FFFFFF" />
+                <Text style={styles.primaryBtnText}>Take a seat</Text>
               </Pressable>
             ) : enoughToStart ? (
               // Only spin while something really is being waited on. Below the
