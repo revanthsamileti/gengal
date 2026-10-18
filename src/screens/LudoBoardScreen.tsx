@@ -349,7 +349,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   useEffect(() => {
     if (!room || !isMyTurn || !room.diceRolled || rolling) return;
     if (legalMoveIds.length > 0) return;
-    const t = setTimeout(() => skipTurn(roomId, room).catch(() => {}), 900);
+    // Long enough for the 3D die to finish its throw and show what it landed on.
+    const t = setTimeout(() => skipTurn(roomId, room).catch(() => {}), 1500);
     return () => clearTimeout(t);
   }, [room, isMyTurn, legalMoveIds.length, rolling, roomId]);
 
@@ -434,7 +435,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     const t = setTimeout(() => {
       autoMoved.current = key;
       handleTokenPress(legalMoveIds[0]);
-    }, 650);
+    }, 1300);
     return () => clearTimeout(t);
   }, [room, isMyTurn, rolling, busyToken, asSpectator, legalMoveIds, handleTokenPress]);
 

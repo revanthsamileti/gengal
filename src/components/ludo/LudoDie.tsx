@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Animated, Easing, Pressable, StyleSheet, Text, Vibration, View } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
+import { Die3D } from './Die3D';
 import { MaterialIcons } from '@expo/vector-icons';
 import { GEMS, ludo, numeric } from '../../theme/ludoTheme';
 import type { PlayerColor } from '../../screens/LudoConstants';
@@ -60,6 +61,8 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
   const punch = useRef(new Animated.Value(0)).current;
   /** This die's own roll is in flight: only that one buzzes on landing. */
   const ownRoll = useRef(false);
+  /** The physics die, unless this phone's 3D view could not start. */
+  const [use3D, setUse3D] = useState(true);
   const spin = useRef(new Animated.Value(0)).current;
   const hop = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0)).current;
@@ -126,12 +129,13 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
     if (!rolling) return;
     ownRoll.current = true;
     buzz(15);
-    if (!reduceMotion) setShaking(true);
-  }, [rolling, reduceMotion]);
+    if (!reduceMotion && !use3D) setShaking(true);
+  }, [rolling, reduceMotion, use3D]);
 
   // A value arriving -- ours, or another player's -- lands the die on it.
   useEffect(() => {
-    if (rolling) return;
+    // The 3D die throws itself and reports when it lands (onLanded below).
+    if (rolling || use3D) return;
     const changed = value != null && value !== lastValue.current;
     lastValue.current = value;
     if (value == null) {
@@ -149,7 +153,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
     }
     setFace(value);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rolling, value, reduceMotion]);
+  }, [rolling, value, reduceMotion, use3D]);
 
   // A roll that ends without a value (refused, timed out) must not keep shaking.
   useEffect(() => {
@@ -244,6 +248,19 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
         accessibilityState={{ disabled: !enabled, busy: rolling }}
         style={({ pressed }) => [styles.slot, enabled && { borderColor: gem.core }, pressed && enabled && styles.pressed]}
       >
+        {use3D ? (
+          <Animated.View style={{ opacity: live ? 1 : 0.6, transform: [{ scale }] }}>
+            <Die3D
+              value={value}
+              rolling={rolling}
+              color={gem.core}
+              size={SLOT - 6}
+              reduceMotion={reduceMotion}
+              onLanded={(v) => settle(v)}
+              onUnavailable={() => setUse3D(false)}
+            />
+          </Animated.View>
+        ) : (
         <Animated.View
           style={[styles.die, { opacity: live ? 1 : 0.55, transform: [{ translateY }, { rotate }, { scale }] }]}
         >
@@ -258,6 +275,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
             ))}
           </View>
         </Animated.View>
+        )}
       </Pressable>
       {cost ? (
         <Text style={[styles.cost, numeric]} accessibilityElementsHidden>
