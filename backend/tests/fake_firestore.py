@@ -138,6 +138,9 @@ class FakeCollection:
     def limit(self, n):
         return FakeQuery(self._store, self._name).limit(n)
 
+    def stream(self):
+        return FakeQuery(self._store, self._name).stream()
+
 
 class FakeTransaction:
     """Applies writes immediately.

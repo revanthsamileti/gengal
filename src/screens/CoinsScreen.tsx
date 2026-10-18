@@ -10,7 +10,7 @@ import { useActionLock } from '../hooks/useActionLock';
 import {
   createCoinOrder, purchaseCoins, RazorpayResult,
   getCoinOffers, CoinOffers, FIRST_BUY_PACKAGE,
-  getDailyBonus, claimDailyBonus, DailyBonusStatus,
+  getDailyBonus, claimDailyBonus, DailyBonusStatus, redeemCoupon,
 } from '../services/coinService';
 import CheckoutModal from '../components/CheckoutModal';
 import { getGlobalSettings, GlobalSettings } from '../services/adminService';
@@ -85,6 +85,23 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
   const discount = Math.min(Math.max(offers?.discountPercent ?? 0, 0), 50) / 100;
   /** What a pack actually costs today. */
   const payPrice = (listPrice: number) => Math.round(listPrice * (1 - discount));
+
+  const [coupon, setCoupon] = useState('');
+  const [redeeming, setRedeeming] = useState(false);
+  const handleRedeem = async () => {
+    const code = coupon.trim();
+    if (!code || redeeming) return;
+    setRedeeming(true);
+    try {
+      const result = await redeemCoupon(code);
+      setCoupon('');
+      Alert.alert('Coupon applied', `${result.coins} coins have been added.`);
+    } catch (e: any) {
+      Alert.alert('Coupon', e?.message || 'That coupon did not work.');
+    } finally {
+      setRedeeming(false);
+    }
+  };
 
   const handleClaimBonus = async () => {
     if (claiming) return;
@@ -263,6 +280,33 @@ export default function CoinsScreen({ navigation, navigate: directNavigate, goBa
           </TouchableOpacity>
         )}
 
+        <View style={styles.offerCard}>
+          <MaterialIcons name="confirmation-number" size={30} color={skeuo.gold} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.offerEyebrow}>HAVE A COUPON?</Text>
+            <TextInput
+              value={coupon}
+              onChangeText={(v) => setCoupon(v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20))}
+              placeholder="Enter code"
+              placeholderTextColor="#B9AC9E"
+              autoCapitalize="characters"
+              autoCorrect={false}
+              onSubmitEditing={() => { void handleRedeem(); }}
+              style={styles.couponInput}
+              accessibilityLabel="Coupon code"
+            />
+          </View>
+          <TouchableOpacity
+            style={[styles.priceButton, !coupon.trim() && { opacity: 0.45 }]}
+            onPress={() => { void handleRedeem(); }}
+            disabled={!coupon.trim() || redeeming}
+            accessibilityRole="button"
+            accessibilityLabel="Redeem coupon"
+          >
+            {redeeming ? <ActivityIndicator color={skeuo.plum} size="small" /> : <Text style={styles.priceText}>Redeem</Text>}
+          </TouchableOpacity>
+        </View>
+
         {bonus && bonus.coins > 0 && (
           <View style={styles.offerCard}>
             <MaterialIcons name="card-giftcard" size={30} color={skeuo.gold} />
@@ -413,6 +457,11 @@ const styles = StyleSheet.create({
   offerBody: { fontSize: 13, fontWeight: '700', color: skeuo.plum, marginTop: 2 },
   bonusTrack: { height: 6, borderRadius: 3, backgroundColor: 'rgba(75,0,84,0.12)', marginTop: 8, overflow: 'hidden' },
   bonusFill: { height: 6, borderRadius: 3, backgroundColor: '#D9A404' },
+  couponInput: {
+    marginTop: 4, height: 40, borderRadius: 10, paddingHorizontal: 10,
+    borderWidth: 1, borderColor: skeuo.border, backgroundColor: '#FFFFFF',
+    fontSize: 16, fontWeight: '900', letterSpacing: 2, color: skeuo.plum,
+  },
   discountTag: { fontSize: 10, fontWeight: '900', color: '#B3261E', marginTop: 2 },
   strikePrice: { fontSize: 11, fontWeight: '700', color: '#9A8772', textDecorationLine: 'line-through' },
   container: {

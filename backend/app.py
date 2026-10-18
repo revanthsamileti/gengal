@@ -5261,6 +5261,153 @@ def admin_ban():
     return jsonify({"ok": True, "banned": banned, "signInUpdated": sign_in, "reportsClosed": closed}), 200
 
 
+# ==========================================
+# COUPON CODES
+# ==========================================
+#
+# The admin makes codes worth some coins (100 by default); a user types one in
+# the Store and gets the coins. Each person can use a code once, a code can be
+# capped in uses and given an end date, and the admin can switch it off.
+# Server-only: the rules have no match for coupons or coupon_redemptions.
+
+COUPONS = 'coupons'
+COUPON_REDEMPTIONS = 'coupon_redemptions'
+COUPON_DEFAULT_COINS = 100
+COUPON_MAX_COINS = 100000
+COUPON_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def coupon_normalize(raw):
+    code = re.sub(r'[^A-Za-z0-9]', '', str(raw or '')).upper()
+    return code if 4 <= len(code) <= 20 else None
+
+
+@app.route('/api/v1/coupons/redeem', methods=['POST', 'OPTIONS'])
+def coupon_redeem_endpoint():
+    """Redeem a coupon code for coins, once per person."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    uid, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    # Guessing codes: a handful of tries, then wait.
+    if rate_limited(f"coupon:{uid}", 8, 600):
+        return jsonify({"error": "Too many tries. Wait a few minutes and try again.", "code": "rate_limited"}), 429
+    code = coupon_normalize((request.json or {}).get('code'))
+    if not code:
+        return jsonify({"error": "That is not a coupon code."}), 400
+
+    db_client = firestore.client()
+    coupon_ref = db_client.collection(COUPONS).document(code)
+    used_ref = db_client.collection(COUPON_REDEMPTIONS).document(f"{code}_{uid}")
+    user_ref = db_client.collection('users').document(uid)
+    try:
+        transaction = db_client.transaction()
+
+        @firestore.transactional
+        def redeem(transaction):
+            coupon = coupon_ref.get(transaction=transaction)
+            used = used_ref.get(transaction=transaction)
+            user = user_ref.get(transaction=transaction)
+            if not coupon.exists:
+                raise ValueError("That coupon code does not exist.")
+            c = coupon.to_dict() or {}
+            if not c.get('active', True):
+                raise ValueError("That coupon has been switched off.")
+            ends = c.get('expiresAt')
+            if ends is not None and ludo_secs(ends) is not None and ludo_secs(ends) < time.time():
+                raise ValueError("That coupon has expired.")
+            max_uses = int(c.get('maxUses') or 0)
+            uses = int(c.get('uses') or 0)
+            if max_uses and uses >= max_uses:
+                raise ValueError("That coupon has been used up.")
+            if used.exists:
+                raise ValueError("You have already used this coupon.")
+            if not user.exists:
+                raise ValueError("Your account is not set up yet.")
+            coins = int(c.get('coins') or 0)
+            balance = get_coin_balance(user)
+            transaction.update(user_ref, {"coins": balance + coins})
+            transaction.update(coupon_ref, {"uses": uses + 1})
+            transaction.set(used_ref, {"code": code, "uid": uid, "coins": coins, "at": datetime.now(timezone.utc)})
+            return coins, balance + coins
+
+        coins, new_balance = redeem(transaction)
+        return jsonify({"ok": True, "coins": coins, "newBalance": new_balance}), 200
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print(f"[COUPON] Redeem error: {e}")
+        return jsonify({"error": "Could not use that coupon."}), 500
+
+
+@app.route('/api/v1/admin/coupons', methods=['POST', 'OPTIONS'])
+def admin_coupons():
+    """Admin: list, create or switch off coupon codes.
+
+    create: code (optional; made up when blank), coins (100), maxUses (0 =
+    unlimited), days (0 = no end date). disable/enable: code.
+    """
+    if request.method == 'OPTIONS':
+        return '', 200
+    admin_uid, error_response = require_admin_uid()
+    if error_response:
+        return error_response
+    data = request.json or {}
+    action = str(data.get('action') or 'list')
+    db_client = firestore.client()
+
+    if action == 'create':
+        code = coupon_normalize(data.get('code')) if data.get('code') else None
+        if data.get('code') and not code:
+            return jsonify({"error": "A code is 4 to 20 letters and numbers."}), 400
+        if not code:
+            code = ''.join(secrets.choice(COUPON_ALPHABET) for _ in range(8))
+        try:
+            coins = int(float(data.get('coins') if data.get('coins') not in (None, '') else COUPON_DEFAULT_COINS))
+            max_uses = int(float(data.get('maxUses') or 0))
+            days = float(data.get('days') or 0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Coins, uses and days must be numbers."}), 400
+        if coins < 1 or coins > COUPON_MAX_COINS:
+            return jsonify({"error": f"Coins must be between 1 and {COUPON_MAX_COINS}."}), 400
+        if max_uses < 0 or days < 0:
+            return jsonify({"error": "Uses and days cannot be negative."}), 400
+        ref = db_client.collection(COUPONS).document(code)
+        if ref.get().exists:
+            return jsonify({"error": "That code already exists."}), 400
+        now = datetime.now(timezone.utc)
+        ref.set({
+            "code": code, "coins": coins, "maxUses": max_uses, "uses": 0, "active": True,
+            "expiresAt": now + timedelta(days=days) if days else None,
+            "createdBy": admin_uid, "createdAt": now,
+        })
+        return jsonify({"ok": True, "code": code}), 200
+
+    if action in ('disable', 'enable'):
+        code = coupon_normalize(data.get('code'))
+        ref = db_client.collection(COUPONS).document(code or '-')
+        if not code or not ref.get().exists:
+            return jsonify({"error": "No such coupon."}), 404
+        ref.update({"active": action == 'enable'})
+        return jsonify({"ok": True}), 200
+
+    if action != 'list':
+        return jsonify({"error": "action must be list, create, disable or enable"}), 400
+    coupons = []
+    for snap in db_client.collection(COUPONS).stream():
+        c = snap.to_dict() or {}
+        coupons.append({
+            "code": snap.id, "coins": c.get('coins'), "maxUses": c.get('maxUses') or 0,
+            "uses": c.get('uses') or 0, "active": c.get('active', True),
+            "expiresAt": serialize_doc({"t": c.get('expiresAt')}).get('t'),
+            "createdAt": serialize_doc({"t": c.get('createdAt')}).get('t'),
+            "_sort": ludo_secs(c.get('createdAt')) or 0,
+        })
+    coupons.sort(key=lambda c: -c.pop('_sort'))
+    return jsonify({"ok": True, "coupons": coupons[:100]}), 200
+
+
 # The app opens this in a WebView rather than bundling a payments SDK, so the
 # checkout runs on Razorpay's own script and no card details pass through our
 # code. The result is handed back to the app over postMessage, and is only

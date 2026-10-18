@@ -94,6 +94,10 @@ export const getDailyBonus = () => authedGet<DailyBonusStatus>('/api/v1/bonus/da
 export const claimDailyBonus = () =>
   authedPost<{ ok: boolean; coins: number; newBalance: number }>('/api/v1/bonus/daily', {});
 
+/** Redeem a coupon code for coins (once per person; the server checks everything). */
+export const redeemCoupon = (code: string) =>
+  authedPost<{ ok: boolean; coins: number; newBalance: number }>('/api/v1/coupons/redeem', { code });
+
 export const createCoinOrder = async (packageId: string, amountInr: number) => {
   return authedPost<CoinOrder>('/api/v1/coins/order', { packageId, amountInr });
 };

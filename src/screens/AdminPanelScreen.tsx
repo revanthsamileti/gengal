@@ -18,6 +18,10 @@ import {
   setBanned,
   ReportGroup,
   BannedAccount,
+  listCoupons,
+  createCoupon,
+  setCouponActive,
+  Coupon,
 } from '../services/adminService';
 import { useActionLock } from '../hooks/useActionLock';
 import { tap40 } from '../theme/touch';
@@ -251,10 +255,116 @@ export default function AdminPanelScreen({ navigate, goBack }: Props) {
             <HostBonusPanel />
 
             <ReportsPanel />
+
+            <CouponsPanel />
           </ScrollView>
         )}
       </View>
     </ScreenShell>
+  );
+}
+
+/**
+ * Coupon codes: make one (blank code = made up), see how many have used
+ * each, switch one off or back on.
+ */
+function CouponsPanel() {
+  const [coupons, setCoupons] = useState<Coupon[] | null>(null);
+  const [code, setCode] = useState('');
+  const [coins, setCoins] = useState('100');
+  const [maxUses, setMaxUses] = useState('');
+  const [days, setDays] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = () => { listCoupons().then((r) => setCoupons(r.coupons)).catch(() => setCoupons([])); };
+  useEffect(load, []);
+
+  const create = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const made = await createCoupon({
+        code: code.trim() || undefined,
+        coins: Number(coins) || 0,
+        maxUses: Number(maxUses) || 0,
+        days: Number(days) || 0,
+      });
+      setCode('');
+      Alert.alert('Coupon made', `Share the code ${made.code}.`);
+      load();
+    } catch (e: any) {
+      Alert.alert('Coupon', e?.message || 'Could not make that coupon.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const toggle = async (c: Coupon) => {
+    try {
+      await setCouponActive(c.code, !c.active);
+      load();
+    } catch (e: any) {
+      Alert.alert('Coupon', e?.message || 'Could not change that coupon.');
+    }
+  };
+
+  return (
+    <View>
+      <Text style={styles.sectionHeading}>Coupons</Text>
+      <View style={styles.fieldCard}>
+        <Text style={styles.fieldHint}>Code (empty = make one up)</Text>
+        <View style={styles.inputRow}>
+          <TextInput
+            style={styles.input}
+            value={code}
+            onChangeText={(v) => setCode(v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20))}
+            placeholder="GRAB100"
+            placeholderTextColor="#BBA0A0"
+            autoCapitalize="characters"
+          />
+        </View>
+        <View style={styles.couponRow}>
+          {([
+            ['Coins', coins, setCoins, '100'],
+            ['Max uses', maxUses, setMaxUses, 'No limit'],
+            ['Days', days, setDays, 'Forever'],
+          ] as const).map(([label, val, set, ph]) => (
+            <View key={label} style={{ flex: 1 }}>
+              <Text style={styles.fieldHint}>{label}</Text>
+              <View style={styles.inputRow}>
+                <TextInput
+                  style={[styles.input, { fontSize: 15 }]}
+                  value={val}
+                  onChangeText={set}
+                  keyboardType="number-pad"
+                  placeholder={ph}
+                  placeholderTextColor="#BBA0A0"
+                />
+              </View>
+            </View>
+          ))}
+        </View>
+        <TouchableOpacity style={[styles.bonusBtn, styles.bonusBtnPay, { marginTop: 12 }]} onPress={() => { void create(); }} disabled={busy} accessibilityRole="button">
+          {busy ? <ActivityIndicator color="#FFFDF8" /> : <Text style={[styles.bonusBtnText, { color: '#FFFDF8' }]}>Make coupon</Text>}
+        </TouchableOpacity>
+      </View>
+
+      {(coupons ?? []).map((c) => (
+        <View key={c.code} style={[styles.fieldCard, styles.reportTitleRow]}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.fieldLabel} selectable>{c.code} · {c.coins} coins</Text>
+            <Text style={styles.fieldHint}>
+              Used {c.uses}{c.maxUses ? ` of ${c.maxUses}` : ''}
+              {c.expiresAt ? ` · ends ${shortDate(c.expiresAt)}` : ''}
+              {c.active ? '' : ' · OFF'}
+            </Text>
+          </View>
+          <TouchableOpacity style={[styles.bonusBtn, { flex: 0, paddingHorizontal: 14 }]} onPress={() => { void toggle(c); }} accessibilityRole="button">
+            <Text style={styles.bonusBtnText}>{c.active ? 'Switch off' : 'Switch on'}</Text>
+          </TouchableOpacity>
+        </View>
+      ))}
+    </View>
   );
 }
 
@@ -568,5 +678,6 @@ const styles = StyleSheet.create({
   reportTitleRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   reportCount: { color: '#B3261E', fontSize: 12, fontWeight: '900' },
   reportLine: { color: '#6E5F52', fontSize: 11, fontWeight: '600', marginTop: 4 },
+  couponRow: { flexDirection: 'row', gap: 8, marginTop: 10 },
   banBtn: { backgroundColor: '#B3261E', borderColor: '#B3261E' },
 });

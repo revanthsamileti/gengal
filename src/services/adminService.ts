@@ -208,6 +208,27 @@ export const setBanned = (uid: string, banned: boolean, reason = '') =>
     '/api/v1/admin/ban', { uid, banned, reason },
   );
 
+export interface Coupon {
+  code: string;
+  coins: number;
+  /** 0 = unlimited. */
+  maxUses: number;
+  uses: number;
+  active: boolean;
+  expiresAt: string | null;
+  createdAt: string | null;
+}
+
+export const listCoupons = () =>
+  authedPost<{ coupons: Coupon[] }>('/api/v1/admin/coupons', { action: 'list' });
+
+/** Blank code: the server makes one up. maxUses 0 = unlimited; days 0 = no end date. */
+export const createCoupon = (c: { code?: string; coins: number; maxUses: number; days: number }) =>
+  authedPost<{ code: string }>('/api/v1/admin/coupons', { action: 'create', ...c });
+
+export const setCouponActive = (code: string, active: boolean) =>
+  authedPost('/api/v1/admin/coupons', { action: active ? 'enable' : 'disable', code });
+
 export const updateGlobalSettings = async (newSettings: Partial<GlobalSettings>) => {
   await authedPost('/api/v1/admin/settings', { settings: newSettings });
 };
