@@ -803,3 +803,69 @@ class TestMicRequests:
         gift(OUTSIDER, P2, 40, room_id)
 
         assert "giftTotals" not in room(store, room_id)
+
+
+# ── Codes, private tables and share links ───────────────────────────────────
+
+
+class TestTableCodes:
+    def test_every_table_gets_a_six_letter_code(self, act, store):
+        response = act(HOST, "create-table", gameMode="per_minute", nickname="Hem")
+        room_id, code = response.get_json()["roomId"], response.get_json()["code"]
+
+        assert len(code) == 6 and app_module.ludo_normalize_code(code) == code
+        assert room(store, room_id)["code"] == code
+        assert room(store, room_id)["private"] is False
+
+    def test_a_private_table_is_marked_so(self, act, store):
+        room_id = act(HOST, "create-table", gameMode="per_minute", private=True).get_json()["roomId"]
+
+        assert room(store, room_id)["private"] is True
+
+    def test_find_by_code_ignores_case_and_spaces(self, act, store):
+        body = act(HOST, "create-table", gameMode="per_minute", nickname="Hem", private=True).get_json()
+        typed = " ".join(body["code"].lower())
+
+        found = act(P1, "find", code=typed).get_json()
+
+        assert found["roomId"] == body["roomId"]
+        assert found["private"] is True
+        assert found["hostName"] == "Hem"
+
+    def test_an_ended_table_is_not_found(self, act, store):
+        body = act(HOST, "create-table", gameMode="per_minute").get_json()
+        room(store, body["roomId"])["status"] = "closed"
+
+        response = act(P1, "find", code=body["code"])
+
+        assert response.status_code == 404
+        assert response.get_json()["code"] == "no_table"
+
+    def test_a_malformed_code_is_refused(self, act, store):
+        assert act(P1, "find", code="12").status_code == 400
+
+    def test_the_link_page_opens_the_app_at_the_table(self, client, act, store):
+        body = act(HOST, "create-table", gameMode="per_minute", nickname="Hem").get_json()
+
+        page = client.get("/ludo/" + body["code"].lower()).get_data(as_text=True)
+
+        assert "Hem&#x27;s Ludo table" in page or "Hem's Ludo table" in page
+        assert "intent://ludo?code=" + body["code"] in page
+        assert "scheme=exp+gengal" in page
+        assert "play.google.com" in page
+
+    def test_the_link_page_for_an_ended_table_says_so_and_does_not_redirect(self, client, act, store):
+        body = act(HOST, "create-table", gameMode="per_minute").get_json()
+        room(store, body["roomId"])["status"] = "closed"
+
+        page = client.get("/ludo/" + body["code"]).get_data(as_text=True)
+
+        assert "has ended" in page
+        assert "location.href" not in page
+
+    def test_a_host_name_cannot_inject_html(self, client, act, store):
+        body = act(HOST, "create-table", gameMode="per_minute", nickname="<script>x</script>").get_json()
+
+        page = client.get("/ludo/" + body["code"]).get_data(as_text=True)
+
+        assert "<script>x</script>" not in page

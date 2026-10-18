@@ -9,7 +9,6 @@ import {
   Modal,
   Platform,
   Pressable,
-  Share,
   ScrollView,
   StyleSheet,
   Text,
@@ -43,7 +42,7 @@ import {
   joinLudoRoom, leaveLudoRoom,
   startGame, rollDice, moveToken, skipTurn, SKIP_GRACE_MS, closeLudoRoom,
   isPerMinute, ludoRate, payingPlayers, tickLudo, watchLudo, watchPerMinute,
-  micQueue, speakLudo,
+  micQueue, speakLudo, shareLudoTable,
   getLegalMoves,
   sendLudoChat, sendLudoGift,
   buyLudoTicket, placeLudoBet,
@@ -886,13 +885,16 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
       <SafeAreaView style={{ flex: 1 }}>
         {/* Header */}
         <View style={styles.header}>
+          {/* A labelled button: a bare arrow did not read as "leave the game". */}
           <Pressable
             onPress={handleLeave}
             accessibilityRole="button"
             accessibilityLabel="Leave the table"
-            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+            hitSlop={6}
+            style={({ pressed }) => [styles.leaveBtn, pressed && styles.pressed]}
           >
-            <MaterialIcons name="arrow-back" size={20} color={ludo.ink} />
+            <MaterialIcons name="logout" size={16} color={ludo.danger} />
+            <Text style={styles.leaveText}>Leave</Text>
           </Pressable>
           <View style={styles.headerMid}>
             <Text style={ludoType.eyebrow}>Ludo table</Text>
@@ -906,6 +908,17 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                 : room.gameMode === 'per_token' ? 'Roll & Back' : 'Ticket Table'}
             </Text>
           </View>
+          {room.code ? (
+            <Pressable
+              onPress={() => { void shareLudoTable(room); }}
+              accessibilityRole="button"
+              accessibilityLabel="Share this table"
+              hitSlop={6}
+              style={({ pressed }) => [styles.iconBtn, pressed && styles.pressed]}
+            >
+              <MaterialIcons name="share" size={18} color={ludo.ink} />
+            </Pressable>
+          ) : null}
           <View style={styles.watchers}>
             <MaterialIcons name="visibility" size={13} color={ludo.inkFaint} />
             <Text style={[styles.watchersText, numeric]}>{watcherCount}</Text>
@@ -1068,6 +1081,11 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                 sit down. */}
             <Text style={styles.lobbyTitle}>{lobbyCopy.title}</Text>
             <Text style={styles.lobbyBody}>{lobbyCopy.body}</Text>
+            {room.code ? (
+              <Text style={[styles.lobbyCode, numeric]} selectable>
+                {room.private ? 'Private table · ' : ''}Code {room.code}
+              </Text>
+            ) : null}
             {perMinute ? (
               <Text style={[styles.lobbyNote, numeric]}>
                 {isHost
@@ -1078,11 +1096,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             {isHost && !enoughToStart ? (
               // The card tells the host to ask a friend; this is how.
               <Pressable
-                onPress={() => {
-                  Share.share({
-                    message: `Play Ludo with me on GenGal! Open GenGal, go to Chill → Ludo, and tap "Take a seat" on ${hostName}'s table. Seats are free.`,
-                  }).catch(() => {});
-                }}
+                onPress={() => { void shareLudoTable(room); }}
                 accessibilityRole="button"
                 accessibilityLabel="Invite friends"
                 style={({ pressed }) => [styles.inviteBtn, pressed && styles.pressed]}
@@ -1406,6 +1420,13 @@ const styles = StyleSheet.create({
   },
   goneBtnText: { color: ludo.surface, fontSize: 15, fontWeight: '800' },
   pressed: { opacity: 0.7 },
+  leaveBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    height: 36, paddingHorizontal: 12, borderRadius: 18,
+    borderWidth: 1, borderColor: 'rgba(227,43,34,0.35)', backgroundColor: 'rgba(227,43,34,0.06)',
+  },
+  leaveText: { color: ludo.danger, fontSize: 13, fontWeight: '900' },
+  lobbyCode: { color: ludo.ink, fontSize: 15, fontWeight: '900', letterSpacing: 1.5, marginTop: 8, textAlign: 'center' },
   inviteBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
     alignSelf: 'stretch', height: 46, borderRadius: 23, marginBottom: 10,

@@ -19,7 +19,7 @@ import BottomNav from '../components/BottomNav';
 import GengalAvatar from '../components/GengalAvatar';
 import RosterStrip from '../components/rooms/RosterStrip';
 import {
-  explainLudoBusy, LudoOpenSheet, LudoTableCard, Pawn, SEAT_ORDER, sheetStyles, useLudoTerms,
+  explainLudoBusy, LudoJoinByCode, LudoOpenSheet, LudoTableCard, Pawn, SEAT_ORDER, sheetStyles, useLudoTerms,
 } from '../components/ludo/LudoLobby';
 import { skeuo } from '../theme/skeuomorphic';
 import { numeric } from '../theme/ludoTheme';
@@ -427,11 +427,11 @@ export default function ChillScreen({ navigate }: Props) {
     setLudoSheet(true);
   }, [profile, navigate, ludoTerms.deposit]);
 
-  const handleCreateLudo = useCallback(async () => {
+  const handleCreateLudo = useCallback(async (opts: { private: boolean }) => {
     setLudoSheet(false);
     setCreatingLudo(true);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData, 'per_minute');
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, 'per_minute', opts);
       navigate('LudoBoard', { roomId });
     } catch (e: any) {
       if (explainLudoBusy(e, navigate)) return;
@@ -533,6 +533,12 @@ export default function ChillScreen({ navigate }: Props) {
             </View>
             {isCharades ? charadesCta : ludoCta}
           </View>
+          {!isCharades && (
+            // A private table is only reachable this way (or by its link).
+            <View style={{ marginHorizontal: 16, marginBottom: 12, alignItems: 'flex-start' }}>
+              <LudoJoinByCode navigate={navigate} />
+            </View>
+          )}
 
           {isCharades ? (
             <>

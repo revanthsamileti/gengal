@@ -17,7 +17,9 @@ import {
   getDocFromServer,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
-import { authedPost } from './authService';
+import { authedPost, getBackendUrl } from './authService';
+import { Share } from 'react-native';
+import { auth } from '../config/firebase';
 
 // ── Board constants ───────────────────────────────────────────────────────────
 
@@ -181,6 +183,10 @@ export interface LudoRoom {
   micGuests?: Record<string, LudoMicEntry>;
   /** Coins each person has given at this table. Orders the mic requests. */
   giftTotals?: Record<string, number>;
+  /** Six letters; friends join with it, typed or inside a link. */
+  code?: string;
+  /** Left out of the lobby: only the code or link finds it. */
+  private?: boolean;
   // Meta
   createdAt?: Timestamp;
 }
@@ -389,12 +395,14 @@ export const createLudoRoom = async (
   hostNickname: string,
   hostAvatarData: any,
   gameMode: LudoMode = 'per_minute',
+  opts: { private?: boolean } = {},
 ): Promise<string> => {
   // The deposit is charged server-side in the same write that creates the room,
   // so a patched client cannot skip payment and a failed create cannot eat coins.
   // Refused with code 'ludo_busy' (and the table's roomId) while a game holds you.
   const data = await authedPost<{ roomId: string }>('/api/v1/ludo/create-table', {
     gameMode,
+    private: opts.private === true,
     nickname: hostNickname,
     avatarData: hostAvatarData || null,
   });
@@ -417,7 +425,11 @@ export const subscribeToLudoRooms = (
   // An errored lobby and an empty lobby both render as "no games". The screen
   // gets the error so it can tell the user which of the two actually happened.
   return onSnapshot(q, snap => {
-    callback(snap.docs.map(d => ({ id: d.id, ...d.data() } as LudoRoom)));
+    // Private tables stay out of the lobby, except to the people already at one.
+    const me = auth.currentUser?.uid;
+    callback(snap.docs
+      .map(d => ({ id: d.id, ...d.data() } as LudoRoom))
+      .filter(r => !r.private || (!!me && (r.hostUid === me || r.players.some((p) => p.uid === me)))));
   }, snapshotError('ludo:lobby', onError));
 };
 
@@ -431,6 +443,27 @@ const boardFingerprint = (r: LudoRoom | null) => r && JSON.stringify([
 
 /** How often the board checks its live listener against the server. */
 const ROOM_WATCHDOG_MS = 8000;
+
+/** The table with this code (typed, or from a link). Throws code 'no_table' if none is open. */
+export const findLudoTable = (code: string) =>
+  authedPost<{ roomId: string; private: boolean; hostName: string; phase: LudoPhase }>(
+    '/api/v1/ludo/find', { code },
+  );
+
+/** The https link a table is shared by; its page opens the app at the table. */
+export const ludoTableLink = (code: string) => `${getBackendUrl()}/ludo/${code}`;
+
+/** Opens the phone's share sheet (WhatsApp and the rest) with the table's link and code. */
+export const shareLudoTable = (room: Pick<LudoRoom, 'code' | 'players' | 'hostUid'>) => {
+  if (!room.code) return Promise.resolve();
+  const host = room.players.find((p) => p.uid === room.hostUid)?.nickname ?? 'my';
+  const owner = host === 'my' ? 'my' : `${host}'s`;
+  return Share.share({
+    message:
+      `Play Ludo with me on GenGal! Join ${owner} table:\n${ludoTableLink(room.code)}\n\n` +
+      `Or open GenGal, go to Chill \u2192 Ludo \u2192 Join with code, and type ${room.code}. Seats are free.`,
+  }).then(() => undefined).catch(() => undefined);
+};
 
 export const subscribeToLudoRoom = (
   roomId: string,

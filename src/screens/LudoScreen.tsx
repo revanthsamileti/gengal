@@ -18,7 +18,7 @@ import TopBar from '../components/TopBar';
 import { useUser } from '../context/UserContext';
 import { auth } from '../config/firebase';
 import {
-  explainLudoBusy, LudoOpenSheet, LudoTableCard, Pawn, SEAT_ORDER, useLudoTerms,
+  explainLudoBusy, LudoJoinByCode, LudoOpenSheet, LudoTableCard, Pawn, SEAT_ORDER, useLudoTerms,
 } from '../components/ludo/LudoLobby';
 import {
   createLudoRoom, joinLudoRoom, LudoRoom, subscribeToLudoRooms,
@@ -50,11 +50,11 @@ export default function LudoScreen({ navigate }: Props) {
 
   useEffect(() => subscribeToLudoRooms(setAllRooms), []);
 
-  const handleCreate = useCallback(async () => {
+  const handleCreate = useCallback(async (opts: { private: boolean }) => {
     setModeSheet(false);
     setCreating(true);
     try {
-      const roomId = await createLudoRoom(myUid, myName, myAvatarData, 'per_minute');
+      const roomId = await createLudoRoom(myUid, myName, myAvatarData, 'per_minute', opts);
       navigate('LudoBoard', { roomId });
     } catch (e: any) {
       if (explainLudoBusy(e, navigate)) return;
@@ -132,6 +132,9 @@ export default function LudoScreen({ navigate }: Props) {
                 </>
               )}
             </Pressable>
+            <View style={{ marginTop: 10 }}>
+              <LudoJoinByCode navigate={navigate} />
+            </View>
           </View>
 
           <Text style={styles.section}>

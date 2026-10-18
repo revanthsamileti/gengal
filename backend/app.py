@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import copy
+import html
 import json
 import os
 try:
@@ -13,6 +14,7 @@ import hmac
 import math
 import re
 import secrets
+import urllib.parse
 import threading
 import time
 import sys
@@ -1645,6 +1647,8 @@ def create_ludo_table_endpoint():
     game_mode = str(data.get('gameMode') or '').strip()
     nickname = str(data.get('nickname') or '').strip()[:40] or 'Host'
     avatar_data = data.get('avatarData')
+    # A private table stays out of the lobby; friends come in by code or link.
+    private = data.get('private') is True
     if game_mode not in ('per_game', 'per_token', LUDO_PER_MINUTE):
         return jsonify({"error": "gameMode must be per_minute, per_game or per_token"}), 400
 
@@ -1652,6 +1656,7 @@ def create_ludo_table_endpoint():
         db_client = firestore.client()
         user_ref = db_client.collection('users').document(uid)
         room_ref = db_client.collection('ludo_rooms').document()
+        code = ludo_new_code(db_client)
         # Older apps still open the original two table types; only the
         # per-minute table takes a deposit and plays by the newer rules.
         terms = ludo_terms(pricing_settings()) if game_mode == LUDO_PER_MINUTE else None
@@ -1720,6 +1725,8 @@ def create_ludo_table_endpoint():
                 "finishRank": 1,
                 "winnersOrder": [],
                 "spectatorCount": 0,
+                "code": code,
+                "private": private,
                 "createdAt": firestore.SERVER_TIMESTAMP,
             }))
             return ledger.balance(uid)
@@ -1728,6 +1735,7 @@ def create_ludo_table_endpoint():
         return jsonify({
             "ok": True,
             "roomId": room_ref.id,
+            "code": code,
             "newBalance": new_balance,
             "tableCost": cost,
         }), 200
@@ -2871,6 +2879,129 @@ def ludo_speak_endpoint():
     except Exception as e:
         print(f"[LUDO] Speak error: {e}")
         return jsonify({"error": "Could not update the request"}), 500
+
+
+# ==========================================
+# LUDO: TABLE CODES, PRIVATE TABLES AND SHARE LINKS
+# ==========================================
+#
+# Every table gets a short code. A private table is left out of the lobby, so
+# the code -- typed in, or inside a link -- is how friends reach it. The link
+# is an ordinary https address (WhatsApp will not make an app scheme
+# clickable) whose page hands the phone to the app through Android's intent
+# URL, or to the store when the app is not installed. The installed app
+# already accepts the exp+gengal:// scheme, so this needs no new build.
+
+LUDO_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"   # no 0/O, 1/I/L
+LUDO_CODE_LENGTH = 6
+APP_LINK_SCHEME = "exp+gengal"
+APP_PACKAGE = "com.revanth_fk.x.GenGal"
+PLAY_STORE_URL = f"https://play.google.com/store/apps/details?id={APP_PACKAGE}"
+
+
+def ludo_normalize_code(raw):
+    code = re.sub(r'[^A-Za-z0-9]', '', str(raw or '')).upper()
+    return code if len(code) == LUDO_CODE_LENGTH and all(c in LUDO_CODE_ALPHABET for c in code) else None
+
+
+def ludo_live_by_code(db_client, code):
+    """The live table with this code, as (id, room), or (None, None)."""
+    for snap in db_client.collection('ludo_rooms').where('code', '==', code).stream():
+        room = snap.to_dict() or {}
+        if room.get('status') == 'live':
+            return snap.id, room
+    return None, None
+
+
+def ludo_new_code(db_client):
+    """A code no live table is using."""
+    for _ in range(10):
+        code = ''.join(secrets.choice(LUDO_CODE_ALPHABET) for _ in range(LUDO_CODE_LENGTH))
+        if ludo_live_by_code(db_client, code)[0] is None:
+            return code
+    raise ValueError("Could not make a table code. Try again.")
+
+
+@app.route('/api/v1/ludo/find', methods=['POST', 'OPTIONS'])
+def ludo_find_endpoint():
+    """A table by its code, for "Join with code" and opened links."""
+    if request.method == 'OPTIONS':
+        return '', 200
+    _, error_response = require_bearer_uid()
+    if error_response:
+        return error_response
+    code = ludo_normalize_code((request.json or {}).get('code'))
+    if not code:
+        return jsonify({"error": f"A table code is {LUDO_CODE_LENGTH} letters and numbers."}), 400
+    room_id, room = ludo_live_by_code(firestore.client(), code)
+    if not room_id:
+        return jsonify({"error": "No open table has that code. It may have ended.", "code": "no_table"}), 404
+    host = next((p for p in room.get('players') or [] if (p or {}).get('uid') == room.get('hostUid')), {}) or {}
+    return jsonify({
+        "ok": True, "roomId": room_id, "private": bool(room.get('private')),
+        "hostName": host.get('nickname') or 'Host', "phase": room.get('phase'),
+    }), 200
+
+
+LUDO_LINK_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title}</title>
+<meta property="og:title" content="{title}">
+<meta property="og:description" content="Tap to open the table in GenGal. Seats are free.">
+<style>
+  body {{ margin:0; font-family: system-ui, -apple-system, Roboto, sans-serif; background:#FBF6EC; color:#2B1B2E;
+         min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; box-sizing:border-box; }}
+  .card {{ background:#fff; border-radius:24px; padding:28px 22px; max-width:380px; width:100%; text-align:center;
+          box-shadow:0 10px 30px rgba(75,0,84,.12); }}
+  h1 {{ font-size:22px; margin:6px 0 8px; }} p {{ color:#6E5F52; line-height:1.45; margin:0 0 18px; }}
+  .code {{ font-size:30px; letter-spacing:6px; font-weight:800; margin:4px 0 20px; color:#4B0054; }}
+  a.btn {{ display:block; text-decoration:none; padding:15px; border-radius:16px; font-weight:800; margin-top:10px; }}
+  .open {{ background:#1B6B35; color:#fff; }} .get {{ border:1.5px solid #4B0054; color:#4B0054; }}
+  small {{ display:block; color:#9A8772; margin-top:16px; }}
+</style></head>
+<body><div class="card">
+  <div style="font-size:44px">&#127922;</div>
+  <h1>{title}</h1>
+  <p>{status}</p>
+  <div class="code">{code}</div>
+  <a class="btn open" href="{intent}">Open in GenGal</a>
+  <a class="btn get" href="{store}">Get GenGal</a>
+  <small>Already have the app? Open GenGal, go to Chill &rarr; Ludo &rarr; Join with code, and type the code.</small>
+</div>
+<script>
+  // Try the app straight away; the buttons stay for when the browser blocks it.
+  if (/Android/i.test(navigator.userAgent)) {{ setTimeout(function () {{ location.href = {intent_js}; }}, 300); }}
+</script>
+</body></html>"""
+
+
+@app.route('/ludo/<raw_code>', methods=['GET'])
+def ludo_link_page(raw_code):
+    """The page a shared table link opens. Public: it shows only the host's
+    first name, whether the table is still open, and the code."""
+    code = ludo_normalize_code(raw_code)
+    if not code:
+        return "That is not a GenGal table link.", 404
+    room_id, room = ludo_live_by_code(firestore.client(), code)
+    if room_id:
+        host = next((p for p in room.get('players') or [] if (p or {}).get('uid') == room.get('hostUid')), {}) or {}
+        name = html.escape(str(host.get('nickname') or 'A friend')[:40])
+        title = f"{name}'s Ludo table"
+        status = ("Join the game: seats are free, players pay per minute once it starts."
+                  if room.get('phase') == 'waiting' else "A game is on. Open it to watch, or wait for a free seat.")
+    else:
+        title = "This Ludo table has ended"
+        status = "Ask your friend for a new link, or open GenGal to find another table."
+    intent = (f"intent://ludo?code={code}#Intent;scheme={APP_LINK_SCHEME};package={APP_PACKAGE};"
+              f"S.browser_fallback_url={urllib.parse.quote(PLAY_STORE_URL, safe='')};end")
+    page = LUDO_LINK_PAGE.format(
+        title=title, status=status, code=code, intent=html.escape(intent),
+        intent_js=json.dumps(intent) if room_id else '""', store=PLAY_STORE_URL,
+    )
+    if not room_id:
+        page = page.replace('setTimeout(function () { location.href = ""; }, 300);', '')
+    return page, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 
 def ludo_live_colours(room):

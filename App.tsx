@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, Component, ErrorInfo, ReactNode } from 'react';
-import { Platform, AppState } from 'react-native';
+import { Platform, AppState, Linking } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { View, Text, Animated, Easing } from 'react-native';
 import { auth } from './src/config/firebase';
@@ -41,7 +41,8 @@ import ChillScreen from './src/screens/ChillScreen';
 import DumCharadesRoomScreen from './src/screens/DumCharadesRoomScreen';
 import LudoScreen from './src/screens/LudoScreen';
 import LudoBoardScreen from './src/screens/LudoBoardScreen';
-import { CustomAlert } from './src/components/CustomAlert';
+import { Alert, CustomAlert } from './src/components/CustomAlert';
+import { findLudoTable } from './src/services/ludoService';
 
 /**
  * Global unhandled-rejection / error handler.
@@ -540,6 +541,32 @@ export default function App() {
     if (!signedInUid) return;
     return startBlockListSync(signedInUid);
   }, [signedInUid]);
+
+  // A shared Ludo table link (https://.../ludo/CODE opens the app as
+  // exp+gengal://ludo?code=CODE). It can arrive before sign-in, so it waits
+  // for an account, then opens the table with a seat offered.
+  const pendingTableCode = useRef<string | null>(null);
+  const [linkArrived, setLinkArrived] = useState(0);
+  useEffect(() => {
+    const take = (url: string | null) => {
+      const match = url && /ludo/i.test(url) ? /[?&]code=([A-Za-z0-9]{6})/.exec(url) : null;
+      if (!match) return;
+      pendingTableCode.current = match[1].toUpperCase();
+      setLinkArrived((n) => n + 1);
+    };
+    Linking.getInitialURL().then(take).catch(() => {});
+    const sub = Linking.addEventListener('url', ({ url }) => take(url));
+    return () => sub.remove();
+  }, []);
+  useEffect(() => {
+    const code = pendingTableCode.current;
+    if (!code || !signedInUid) return;
+    pendingTableCode.current = null;
+    findLudoTable(code)
+      .then((table) => navigate('LudoBoard', { roomId: table.roomId, takeSeat: true }))
+      .catch((e: any) => Alert.alert('Ludo table', e?.message || 'Could not open that table.'));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkArrived, signedInUid]);
 
   useEffect(() => {
     if (!signedInUid) return;

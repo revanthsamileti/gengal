@@ -7,7 +7,9 @@ import {
   Platform,
   Pressable,
   StyleSheet,
+  Switch,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -17,7 +19,7 @@ import GengalAvatar from '../GengalAvatar';
 import { Alert } from '../CustomAlert';
 import { auth } from '../../config/firebase';
 import { DEFAULT_SETTINGS, getGlobalSettings, GlobalSettings } from '../../services/adminService';
-import { isPerMinute, ludoRate, payingPlayers, watchPerMinute } from '../../services/ludoService';
+import { findLudoTable, isPerMinute, ludoRate, payingPlayers, watchPerMinute } from '../../services/ludoService';
 import type { LudoRoom, LudoTerms, TokenColor } from '../../services/ludoService';
 import { GEMS, ludo, numeric } from '../../theme/ludoTheme';
 import { skeuo } from '../../theme/skeuomorphic';
@@ -222,6 +224,98 @@ export function LudoTableCard({
   );
 }
 
+/**
+ * "Join with code": the way into a private table, or any table a friend read
+ * out. Finds the table and opens it with a seat offered.
+ */
+export function LudoJoinByCode({ navigate }: { navigate: (screen: string, params?: any) => void }) {
+  const [open, setOpen] = useState(false);
+  const [code, setCode] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const table = await findLudoTable(code);
+      setOpen(false);
+      setCode('');
+      navigate('LudoBoard', { roomId: table.roomId, takeSeat: true });
+    } catch (e: any) {
+      setError(e?.message || 'Could not find that table.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Pressable
+        onPress={() => { setError(null); setOpen(true); }}
+        accessibilityRole="button"
+        accessibilityLabel="Join a table with a code"
+        style={({ pressed }) => [codeStyles.trigger, pressed && sheetStyles.pressed]}
+      >
+        <MaterialIcons name="vpn-key" size={18} color={skeuo.plum} />
+        <Text style={codeStyles.triggerText}>Join with code</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)} statusBarTranslucent>
+        <View style={codeStyles.root}>
+          <Pressable style={sheetStyles.scrim} onPress={() => setOpen(false)} accessibilityLabel="Close" />
+          <View style={codeStyles.card}>
+            <Text style={sheetStyles.title}>Join with a code</Text>
+            <Text style={codeStyles.hint}>Type the 6-letter code your friend shared.</Text>
+            <TextInput
+              value={code}
+              onChangeText={(v) => setCode(v.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              autoFocus
+              maxLength={6}
+              placeholder="K7P2QX"
+              placeholderTextColor="#C9BFB3"
+              style={codeStyles.input}
+              onSubmitEditing={() => { if (code.length === 6) void submit(); }}
+              accessibilityLabel="Table code"
+            />
+            {error ? <Text style={codeStyles.error}>{error}</Text> : null}
+            <Pressable
+              onPress={() => { void submit(); }}
+              disabled={code.length !== 6 || busy}
+              accessibilityRole="button"
+              style={({ pressed }) => [sheetStyles.confirm, (code.length !== 6 || busy) && { opacity: 0.45 }, pressed && sheetStyles.pressed]}
+            >
+              {busy ? <ActivityIndicator color="#FFFDF8" /> : <Text style={sheetStyles.confirmText}>Find table</Text>}
+            </Pressable>
+            <Pressable onPress={() => setOpen(false)} accessibilityRole="button" style={sheetStyles.cancel}>
+              <Text style={sheetStyles.cancelText}>Cancel</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
+const codeStyles = StyleSheet.create({
+  trigger: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    height: 44, paddingHorizontal: 16, borderRadius: 22,
+    borderWidth: 1.5, borderColor: skeuo.plum, backgroundColor: '#FFFDF8',
+  },
+  triggerText: { color: skeuo.plum, fontSize: 14, fontWeight: '900' },
+  root: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 },
+  card: { width: '100%', maxWidth: 400, backgroundColor: '#FFFDF8', borderRadius: 24, padding: 22 },
+  hint: { color: '#7E7368', fontSize: 13, fontWeight: '600', marginTop: 4, marginBottom: 14 },
+  input: {
+    height: 58, borderRadius: 16, borderWidth: 1.5, borderColor: '#E3D8CB', backgroundColor: '#FFFFFF',
+    textAlign: 'center', fontSize: 26, fontWeight: '900', letterSpacing: 6, color: skeuo.plum, marginBottom: 10,
+  },
+  error: { color: '#B3261E', fontSize: 13, fontWeight: '700', marginBottom: 10, textAlign: 'center' },
+});
+
 /** One rule line in the open-table sheet. */
 function Rule({ icon, children }: { icon: string; children: React.ReactNode }) {
   return (
@@ -238,8 +332,9 @@ function Rule({ icon, children }: { icon: string; children: React.ReactNode }) {
  */
 export function LudoOpenSheet({
   visible, terms, onClose, onConfirm,
-}: { visible: boolean; terms: LudoTerms; onClose: () => void; onConfirm: () => void }) {
+}: { visible: boolean; terms: LudoTerms; onClose: () => void; onConfirm: (opts: { private: boolean }) => void }) {
   const r = terms.rates;
+  const [privateTable, setPrivateTable] = useState(false);
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
       <View style={sheetStyles.root}>
@@ -276,7 +371,31 @@ export function LudoOpenSheet({
           </View>
 
           <Pressable
-            onPress={onConfirm}
+            onPress={() => setPrivateTable((v) => !v)}
+            accessibilityRole="switch"
+            accessibilityState={{ checked: privateTable }}
+            accessibilityLabel="Private table, only friends with the link or code"
+            style={sheetStyles.privateRow}
+          >
+            <MaterialIcons name={privateTable ? 'lock' : 'public'} size={20} color={skeuo.plum} />
+            <View style={{ flex: 1 }}>
+              <Text style={sheetStyles.privateTitle}>{privateTable ? 'Private table' : 'Public table'}</Text>
+              <Text style={sheetStyles.privateHint}>
+                {privateTable
+                  ? 'Hidden from the lobby. Friends join with your link or code.'
+                  : 'Anyone can find it in the lobby. You can still share a link.'}
+              </Text>
+            </View>
+            <Switch
+              value={privateTable}
+              onValueChange={setPrivateTable}
+              trackColor={{ false: '#D9D1C7', true: '#1B6B35' }}
+              thumbColor="#FFFFFF"
+            />
+          </Pressable>
+
+          <Pressable
+            onPress={() => onConfirm({ private: privateTable })}
             accessibilityRole="button"
             accessibilityLabel={`Open the table for a ${terms.deposit} coin deposit`}
             style={({ pressed }) => [sheetStyles.confirm, pressed && sheetStyles.pressed]}
@@ -331,6 +450,13 @@ export const sheetStyles = StyleSheet.create({
   },
   confirmText: { color: '#FFFDF8', fontSize: 15, fontWeight: '900' },
   cancel: { height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24 },
+  privateRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+    paddingVertical: 12, paddingHorizontal: 14, marginBottom: 12, borderRadius: 16,
+    backgroundColor: '#F6F0E6',
+  },
+  privateTitle: { color: skeuo.plum, fontSize: 14, fontWeight: '900' },
+  privateHint: { color: '#7E7368', fontSize: 12, fontWeight: '600', marginTop: 2 },
   cancelText: { color: '#7E7368', fontSize: 14, fontWeight: '800' },
 });
 
