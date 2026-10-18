@@ -1009,6 +1009,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
               cost={room.gameMode === 'per_token' && isMyTurn ? ROLL_COST : null}
               onPress={handleRoll}
               reduceMotion={reduceMotion}
+              turnProgress={room.phase === 'playing' && !paused ? turnProgress : null}
             />
             {renderSeat(SEAT_LAYOUT[1][1].color, SEAT_LAYOUT[1][1].align)}
           </View>

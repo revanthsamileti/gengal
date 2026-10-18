@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Animated, Easing, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Animated, Easing, Pressable, StyleSheet, Text, Vibration, View } from 'react-native';
+import Svg, { Circle } from 'react-native-svg';
 import { MaterialIcons } from '@expo/vector-icons';
 import { GEMS, ludo, numeric } from '../../theme/ludoTheme';
 import type { PlayerColor } from '../../screens/LudoConstants';
@@ -39,9 +40,26 @@ type Props = {
   cost?: number | null;
   onPress: () => void;
   reduceMotion: boolean;
+  /** 0..1 of the turn left, drawn as a draining ring round the slot; null hides it. */
+  turnProgress?: number | null;
 };
 
-export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, reduceMotion }: Props) {
+const RING = 96;
+const RING_R = (RING - 6) / 2;
+const RING_C = 2 * Math.PI * RING_R;
+/** Sparks thrown out by a six. */
+const SPARKS = Array.from({ length: 10 }, (_, i) => (i / 10) * Math.PI * 2);
+
+/** A short buzz; never let a phone without a vibrator get in the way. */
+const buzz = (pattern: number | number[]) => {
+  try { Vibration.vibrate(pattern as any); } catch { /* no vibrator */ }
+};
+
+export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, reduceMotion, turnProgress = null }: Props) {
+  const burst = useRef(new Animated.Value(0)).current;
+  const punch = useRef(new Animated.Value(0)).current;
+  /** This die's own roll is in flight: only that one buzzes on landing. */
+  const ownRoll = useRef(false);
   const spin = useRef(new Animated.Value(0)).current;
   const hop = useRef(new Animated.Value(0)).current;
   const pulse = useRef(new Animated.Value(0)).current;
@@ -84,11 +102,31 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
     spin.setValue(0);
     hop.setValue(0.7);
     Animated.spring(hop, { toValue: 0, friction: 3.5, tension: 170, useNativeDriver: true }).start();
+    const mine = ownRoll.current;
+    ownRoll.current = false;
+    if (next === 6) {
+      // A six is the moment of the game: the die pops and throws sparks.
+      if (mine) buzz([0, 45, 70, 45]);
+      if (!reduceMotion) {
+        punch.setValue(0);
+        burst.setValue(0);
+        Animated.sequence([
+          Animated.timing(punch, { toValue: 1, duration: 140, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+          Animated.spring(punch, { toValue: 0, friction: 3, tension: 140, useNativeDriver: true }),
+        ]).start();
+        Animated.timing(burst, { toValue: 1, duration: 700, easing: Easing.out(Easing.cubic), useNativeDriver: true }).start();
+      }
+    } else if (mine) {
+      buzz(30);
+    }
   };
 
   // Our own roll shakes for exactly as long as the server takes.
   useEffect(() => {
-    if (rolling && !reduceMotion) setShaking(true);
+    if (!rolling) return;
+    ownRoll.current = true;
+    buzz(15);
+    if (!reduceMotion) setShaking(true);
   }, [rolling, reduceMotion]);
 
   // A value arriving -- ours, or another player's -- lands the die on it.
@@ -147,7 +185,10 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
   const live = enabled || rolling || shaking;
   const rotate = spin.interpolate({ inputRange: [-1, 1], outputRange: ['-18deg', '18deg'] });
   const translateY = hop.interpolate({ inputRange: [0, 1], outputRange: [0, -12] });
-  const scale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] });
+  const scale = Animated.add(
+    pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.08] }),
+    punch.interpolate({ inputRange: [0, 1], outputRange: [0, 0.3] }),
+  );
   const arrowY = arrow.interpolate({ inputRange: [0, 1], outputRange: [0, -9] });
 
   return (
@@ -159,6 +200,39 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
       >
         <MaterialIcons name="arrow-drop-down" size={52} color="#F5A400" />
       </Animated.View>
+      {turnProgress !== null ? (
+        <Svg width={RING} height={RING} style={styles.ring} pointerEvents="none">
+          <Circle cx={RING / 2} cy={RING / 2} r={RING_R} stroke="rgba(0,0,0,0.08)" strokeWidth={4} fill="none" />
+          <Circle
+            cx={RING / 2} cy={RING / 2} r={RING_R}
+            stroke={turnProgress < 0.25 ? '#E32B22' : gem.core}
+            strokeWidth={4}
+            fill="none"
+            strokeLinecap="round"
+            strokeDasharray={`${RING_C} ${RING_C}`}
+            strokeDashoffset={RING_C * (1 - Math.max(0, Math.min(1, turnProgress)))}
+            transform={`rotate(-90 ${RING / 2} ${RING / 2})`}
+          />
+        </Svg>
+      ) : null}
+      {SPARKS.map((angle, i) => (
+        <Animated.View
+          key={i}
+          pointerEvents="none"
+          style={[
+            styles.spark,
+            {
+              backgroundColor: i % 2 ? gem.core : '#F5A400',
+              opacity: burst.interpolate({ inputRange: [0, 0.15, 1], outputRange: [0, 1, 0] }),
+              transform: [
+                { translateX: burst.interpolate({ inputRange: [0, 1], outputRange: [0, Math.cos(angle) * 70] }) },
+                { translateY: burst.interpolate({ inputRange: [0, 1], outputRange: [0, Math.sin(angle) * 70] }) },
+                { scale: burst.interpolate({ inputRange: [0, 1], outputRange: [1.2, 0.3] }) },
+              ],
+            },
+          ]}
+        />
+      ))}
       <Pressable
         onPress={onPress}
         disabled={!enabled}
@@ -196,6 +270,8 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
 
 const styles = StyleSheet.create({
   wrap: { alignItems: 'center' },
+  ring: { position: 'absolute', top: (SLOT - RING) / 2, left: (SLOT - RING) / 2 },
+  spark: { position: 'absolute', top: SLOT / 2 - 5, left: SLOT / 2 - 5, width: 10, height: 10, borderRadius: 5, zIndex: 3 },
   arrow: { position: 'absolute', top: -38, zIndex: 2 },
   slot: {
     width: SLOT,
