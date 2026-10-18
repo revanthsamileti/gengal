@@ -16,6 +16,13 @@ import type { LudoPlayer } from '../../services/ludoService';
  */
 
 const AVATAR = 40;
+/**
+ * The active seat's tint, solid. A see-through wash under Android's card
+ * shadow came out as murky grey boxes on a real phone.
+ */
+const ACTIVE_TINT: Record<PlayerColor, string> = {
+  blue: '#E6F0FD', green: '#E8F6E3', red: '#FDE9E8', yellow: '#FFF5D6',
+};
 const RING = 48;
 const R = (RING - 4) / 2;
 const CIRC = 2 * Math.PI * R;
@@ -84,7 +91,7 @@ export function PlayerSeat({
         <View style={styles.meta}>
           <Text style={styles.emptyName} numberOfLines={1}>{gem.name}</Text>
           <Text style={[styles.emptySub, numeric]} numberOfLines={1}>
-            {taking ? 'Taking seat…' : seatOffer ? seatOffer.text : 'Empty seat'}
+            {taking ? 'Taking seat…' : seatOffer ? seatOffer.text : 'Empty'}
           </Text>
         </View>
       </Pressable>
@@ -98,7 +105,7 @@ export function PlayerSeat({
         align === 'right' && styles.alignRight,
         { borderColor: isActive ? gem.core : ludo.hairline },
         // Whose turn it is, by colour alone: a thick frame and a wash of their colour.
-        isActive && [styles.seatActive, { backgroundColor: gem.wash.replace('0.12', '0.18') }],
+        isActive && [styles.seatActive, { backgroundColor: ACTIVE_TINT[color] }],
       ]}
       accessibilityLabel={
         `${player.nickname}, ${gem.name}${isYou ? ', you' : ''}. ${tokensHome} of 4 home.` +
@@ -234,10 +241,10 @@ const styles = StyleSheet.create({
   name: { color: ludo.ink, fontSize: 13, fontWeight: '800' },
   emptyName: { color: ludo.inkSoft, fontSize: 13, fontWeight: '800' },
   emptySub: { color: ludo.inkFaint, fontSize: 10, fontWeight: '700' },
-  pips: { flexDirection: 'row', gap: 4 },
+  pips: { flexDirection: 'row', gap: 3 },
   lives: { flexDirection: 'row', gap: 3 },
-  life: { width: 7, height: 7, borderRadius: 4 },
-  pip: { width: 9, height: 9, borderRadius: 5 },
+  life: { width: 6, height: 6, borderRadius: 3 },
+  pip: { width: 7, height: 7, borderRadius: 4 },
   bet: {
     alignSelf: 'flex-start',
     paddingHorizontal: 10, paddingVertical: 6,

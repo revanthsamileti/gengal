@@ -639,7 +639,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     } else {
       title = 'Leave the game?';
       body = "You lose your seat. You can't join another table until this game ends.";
-      cta = 'Leave game';
+      cta = 'Leave';
     }
     Alert.alert(title, body, [
       { text: 'Stay', style: 'cancel' },
