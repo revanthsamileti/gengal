@@ -779,15 +779,33 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   const clockUrgent = clockOn && secondsLeft <= 3;
   const clockText = !clockOn ? ' ' : secondsLeft === 0 ? 'Time is up — passing' : `${secondsLeft}s left`;
 
+  const lobbyCopy: { title: string; body: string } = isHost
+    ? (enoughToStart
+      ? { title: `${room.players.length} of 4 seated`, body: 'Start when everyone is in. Empty seats sit out the game.' }
+      : {
+        title: 'Waiting for a player',
+        body: 'Ask a friend to open your table and tap Take a seat. You can start as soon as one person sits down.',
+      })
+    : myPlayer
+      ? { title: "You're in", body: `Waiting for ${hostName} to start the game.` }
+      : seatOpenToMe && freeSeat
+        ? { title: 'Take a seat to play', body: `${hostName} is waiting for players. You're watching until you sit down.` }
+        : { title: 'Table is full', body: 'You can watch the game.' };
+
   let eyebrow: string;
   let instruction: string;
   if (isWaiting) {
     // `currentTurn` is only a default colour until the game starts; reading it
     // here told the host "Your turn -- roll the dice" on a table still filling.
     eyebrow = 'Not started';
-    instruction = !enoughToStart
-      ? 'Waiting for players'
-      : isHost ? 'Start when everyone is in' : `Waiting for ${hostName}`;
+    // Said to each person about what *they* do next. "Waiting for players" on a
+    // watcher's screen read as "somebody else has to come", when the somebody
+    // was them.
+    instruction = isHost
+      ? (enoughToStart ? 'Start when everyone is in' : 'Waiting for a player')
+      : myPlayer
+        ? `Waiting for ${hostName} to start`
+        : seatOpenToMe && freeSeat ? 'Take a seat to play' : `Waiting for ${hostName}`;
   } else if (isOver) {
     // `currentTurn` keeps its last value, so this said "Your turn" after the end.
     eyebrow = 'Game over';
@@ -1042,25 +1060,12 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
         <View style={styles.overlay} pointerEvents="box-none">
           <View style={styles.lobbyCard}>
             <Text style={ludoType.eyebrow}>Waiting to start</Text>
-            <Text style={styles.lobbyTitle}>
-              {/* "1 of 4" read as "four are required" and the card gave no
-                  other clue, so a table that only needed one more person
-                  looked like one that was stuck. Two is the real threshold
-                  handleStart enforces, so the card says that instead. */}
-              {room.players.length === 1
-                ? 'One more player to start'
-                : `${room.players.length} of 4 seated`}
-            </Text>
-            <Text style={styles.lobbyBody}>
-              {!enoughToStart
-                // Somebody already seated has no seat left to tap.
-                ? (myPlayer
-                  ? 'Ludo needs at least two. Waiting for somebody to take a seat.'
-                  : 'Ludo needs at least two. Take a seat to play, or wait for somebody else.')
-                : isHost
-                  ? 'Start when everyone is in. Empty seats sit out the game.'
-                  : `${hostName} starts the game.`}
-            </Text>
+            {/* Written for whoever is reading it. "One more player to start"
+                was on every screen, so the friend who had just opened the
+                table read it as waiting for somebody else, not as their cue to
+                sit down. */}
+            <Text style={styles.lobbyTitle}>{lobbyCopy.title}</Text>
+            <Text style={styles.lobbyBody}>{lobbyCopy.body}</Text>
             {perMinute ? (
               <Text style={[styles.lobbyNote, numeric]}>
                 {isHost
