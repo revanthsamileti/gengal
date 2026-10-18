@@ -27,6 +27,7 @@ import { LudoDie } from '../components/ludo/LudoDie';
 import { PlayerSeat } from '../components/ludo/PlayerSeat';
 import { explainLudoBusy } from '../components/ludo/LudoLobby';
 import { BASE_ORIGIN, cellForPosition, PlayerColor } from './LudoConstants';
+import { ActiveBaseGlow } from '../components/ludo/ActiveBaseGlow';
 import { GEMS, ludo, ludoRadius, ludoType, numeric } from '../theme/ludoTheme';
 
 import { useRoomVoice } from '../hooks/useRoomVoice';
@@ -126,7 +127,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   // before the Agora mint (channel id is the room doc id).
   // Board sizing budget: header, seat rows, action dock, utility rail.
   const stripHeight = isPerMinute(room) && room?.phase === 'playing' ? 40 : 0;
-  const CHROME = 52 + 64 * 2 + 118 + 56 + 26 + stripHeight;
+  // header, top seats, bottom seats with the die, one status line, the rail.
+  const CHROME = 52 + 64 + 96 + 24 + 56 + 26 + stripHeight;
   const boardSize = Math.max(
     204,
     Math.min(width - 28, height - insets.top - insets.bottom - CHROME, 396)
@@ -821,7 +823,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
     instruction = !room.diceRolled
       ? 'Roll the dice'
       : legalMoveIds.length > 0
-        ? 'Tap a gem to move'
+        ? 'Tap a pawn to move'
         : 'No legal moves — passing';
   } else {
     eyebrow = `${turnName}'s turn`;
@@ -875,6 +877,9 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
         onTakeSeat={canTakeSeat && !coinBusy ? () => handleTakeSeat(color) : undefined}
         taking={takingSeat === color}
         betLabel={room.gameMode === 'per_token' && player && player.uid !== myUid ? `Back ${BET_AMOUNT}` : null}
+        lives={perMinute && player && player.uid === room.hostUid && room.terms
+          ? { used: Math.min(room.hostMissed ?? 0, room.terms.hostMaxMissed), max: room.terms.hostMaxMissed }
+          : null}
         onBet={room.gameMode === 'per_token' && player && player.uid !== myUid && !coinBusy ? () => handleBet(color) : undefined}
       />
     );
@@ -959,6 +964,13 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
           <View style={[styles.boardFrame, { width: boardSize + 12, height: boardSize + 12 }]}>
             <View style={{ width: boardSize, height: boardSize }}>
               <LudoBoardSurface size={boardSize} />
+              {room.phase === 'playing' && !paused ? (
+                <ActiveBaseGlow
+                  origin={BASE_ORIGIN[room.currentTurn as PlayerColor]}
+                  cellSize={cellSize}
+                  reduceMotion={reduceMotion}
+                />
+              ) : null}
               <View style={[StyleSheet.absoluteFill, { width: boardSize, height: boardSize }]} pointerEvents="box-none">
                 {tokenViews}
               </View>
@@ -969,47 +981,33 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
             />
           </View>
 
-          <View style={[styles.seatRow, { width: boardSize + 8 }]}>
-            {SEAT_LAYOUT[1].map(({ color, align }) => renderSeat(color, align))}
+          {/* Ludo King's layout: the die between the two bottom seats. */}
+          <View style={[styles.seatRow, styles.bottomRow, { width: boardSize + 8 }]}>
+            {renderSeat(SEAT_LAYOUT[1][0].color, SEAT_LAYOUT[1][0].align)}
+            <LudoDie
+              value={rolled ?? room.diceValue}
+              rolling={rolling}
+              enabled={canRoll}
+              turnColor={room.currentTurn as PlayerColor}
+              cost={room.gameMode === 'per_token' && isMyTurn ? ROLL_COST : null}
+              onPress={handleRoll}
+              reduceMotion={reduceMotion}
+            />
+            {renderSeat(SEAT_LAYOUT[1][1].color, SEAT_LAYOUT[1][1].align)}
           </View>
         </View>
 
-        {/* Action dock */}
-        <View style={styles.dock}>
-          <View style={styles.dockCopy}>
-            <Text
-              style={[
-                ludoType.eyebrow,
-                isMyTurn && !asSpectator && !isWaiting && { color: GEMS[room.currentTurn].ink },
-              ]}
-            >
-              {eyebrow}
-            </Text>
-            {/* One line, always, and the clock line always reserved. The board
-                is centred in whatever the dock leaves, so an instruction that
-                wrapped on a larger font, or a clock line coming and going,
-                shifted the whole board a few pixels every turn. */}
-            <Text
-              style={styles.dockInstruction}
-              numberOfLines={1}
-              adjustsFontSizeToFit
-              minimumFontScale={0.7}
-            >
-              {instruction}
-            </Text>
-            <Text style={[styles.dockClock, numeric, clockUrgent && { color: ludo.danger }]}>
-              {clockText}
-            </Text>
-          </View>
-          <LudoDie
-            value={rolled ?? room.diceValue}
-            rolling={rolling}
-            enabled={canRoll}
-            turnColor={room.currentTurn as PlayerColor}
-            cost={room.gameMode === 'per_token' && isMyTurn ? ROLL_COST : null}
-            onPress={handleRoll}
-            reduceMotion={reduceMotion}
-          />
+        {/* One line instead of a text box: colour and the arrow do the rest. */}
+        <View style={styles.status} accessibilityLiveRegion="polite">
+          <Text
+            style={[styles.statusText, room.phase === 'playing' && { color: GEMS[room.currentTurn].ink }]}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.75}
+          >
+            {isWaiting ? instruction : `${eyebrow} · ${instruction}`}
+            {clockOn && secondsLeft !== null && secondsLeft > 0 ? `  ·  ${secondsLeft}s` : ''}
+          </Text>
         </View>
 
         {/* Utility rail */}
@@ -1497,6 +1495,9 @@ const styles = StyleSheet.create({
     borderColor: ludo.hairline,
   },
   dockCopy: { flex: 1, gap: 3 },
+  bottomRow: { height: 96, alignItems: 'flex-end', paddingBottom: 4 },
+  status: { height: 24, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16 },
+  statusText: { color: ludo.inkSoft, fontSize: 14, fontWeight: '900' },
   dockInstruction: { ...ludoType.display, fontSize: 19 },
   dockClock: { color: ludo.inkFaint, fontSize: 11, fontWeight: '700' },
 

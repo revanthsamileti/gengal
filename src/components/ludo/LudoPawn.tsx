@@ -104,8 +104,10 @@ function LudoPawnImpl({
     }
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(lift, { toValue: 1, duration: 520, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
-        Animated.timing(lift, { toValue: 0, duration: 520, easing: Easing.inOut(Easing.quad), useNativeDriver: true }),
+        // A real hop, as in Ludo King: up quickly, down with a bounce.
+        Animated.timing(lift, { toValue: 1, duration: 260, easing: Easing.out(Easing.quad), useNativeDriver: true }),
+        Animated.timing(lift, { toValue: 0, duration: 420, easing: Easing.bounce, useNativeDriver: true }),
+        Animated.delay(120),
       ])
     );
     loop.start();
@@ -141,7 +143,7 @@ function LudoPawnImpl({
           transform: [
             { translateX },
             { translateY },
-            { translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -cellSize * 0.22] }) },
+            { translateY: lift.interpolate({ inputRange: [0, 1], outputRange: [0, -cellSize * 0.45] }) },
           ],
           zIndex: movable ? 40 : 20,
         },

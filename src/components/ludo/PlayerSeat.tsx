@@ -41,11 +41,16 @@ type Props = {
   onBet?: () => void;
   betLabel?: string | null;
   align: 'left' | 'right';
+  /**
+   * Missed-turn "lives", Ludo King style: a green dot per miss still allowed,
+   * red per miss used. Only the host has a limit, so only the host shows them.
+   */
+  lives?: { used: number; max: number } | null;
 };
 
 export function PlayerSeat({
   color, player, isActive, isYou, turnProgress, secondsLeft, tokensHome,
-  rank, seatOffer, onTakeSeat, taking, onBet, betLabel, align,
+  rank, seatOffer, onTakeSeat, taking, onBet, betLabel, align, lives,
 }: Props) {
   const gem = GEMS[color];
 
@@ -92,7 +97,8 @@ export function PlayerSeat({
         styles.seat,
         align === 'right' && styles.alignRight,
         { borderColor: isActive ? gem.core : ludo.hairline },
-        isActive && styles.seatActive,
+        // Whose turn it is, by colour alone: a thick frame and a wash of their colour.
+        isActive && [styles.seatActive, { backgroundColor: gem.wash.replace('0.12', '0.18') }],
       ]}
       accessibilityLabel={
         `${player.nickname}, ${gem.name}${isYou ? ', you' : ''}. ${tokensHome} of 4 home.` +
@@ -127,7 +133,7 @@ export function PlayerSeat({
         <View
           style={[
             styles.avatar,
-            { borderColor: gem.ink, borderWidth: isActive ? 3 : 1.5 },
+            { borderColor: isActive ? gem.core : gem.ink, borderWidth: isActive ? 3.5 : 1.5 },
           ]}
         >
           <GengalAvatar data={player.avatarData} size={AVATAR} />
@@ -143,6 +149,19 @@ export function PlayerSeat({
         <Text style={styles.name} numberOfLines={1}>
           {isYou ? 'You' : player.nickname}
         </Text>
+        {lives && lives.max > 0 ? (
+          <View
+            style={styles.lives}
+            accessibilityLabel={`${Math.max(0, lives.max - lives.used)} of ${lives.max} missed turns left`}
+          >
+            {Array.from({ length: lives.max }, (_, i) => (
+              <View
+                key={i}
+                style={[styles.life, { backgroundColor: i < lives.max - lives.used ? '#2BB24C' : ludo.danger }]}
+              />
+            ))}
+          </View>
+        ) : null}
         <View style={styles.pips}>
           {[0, 1, 2, 3].map((i) => (
             <View
@@ -183,11 +202,14 @@ const styles = StyleSheet.create({
     borderRadius: ludoRadius.seat,
     borderWidth: 1,
     backgroundColor: ludo.card,
-    minWidth: 132,
-    maxWidth: 168,
+    minWidth: 112,
+    maxWidth: 160,
   },
   alignRight: { flexDirection: 'row-reverse' },
-  seatActive: { backgroundColor: '#FFFFFF', shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.16, shadowRadius: 8, elevation: 4 },
+  seatActive: {
+    borderWidth: 3,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 3 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 6,
+  },
   pressed: { opacity: 0.7 },
   empty: { borderStyle: 'dashed', borderColor: ludo.grid, backgroundColor: ludo.cardSunk },
   emptyDot: {
@@ -213,6 +235,8 @@ const styles = StyleSheet.create({
   emptyName: { color: ludo.inkSoft, fontSize: 13, fontWeight: '800' },
   emptySub: { color: ludo.inkFaint, fontSize: 10, fontWeight: '700' },
   pips: { flexDirection: 'row', gap: 4 },
+  lives: { flexDirection: 'row', gap: 3 },
+  life: { width: 7, height: 7, borderRadius: 4 },
   pip: { width: 9, height: 9, borderRadius: 5 },
   bet: {
     alignSelf: 'flex-start',
