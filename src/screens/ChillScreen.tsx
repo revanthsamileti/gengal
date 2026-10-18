@@ -511,7 +511,7 @@ export default function ChillScreen({ navigate }: Props) {
               />
               <GameTab
                 game="charades"
-                title="Dumb Charades"
+                title="Charades"
                 live={liveCharadeRooms.length}
                 loaded={charadesLoaded && !charadesError}
                 selected={isCharades}
@@ -528,7 +528,7 @@ export default function ChillScreen({ navigate }: Props) {
               <Text style={styles.sectionSub}>
                 {isCharades
                   ? 'Act out a movie, guess the rest. Win coins.'
-                  : `Free seats. Players pay ${ludoTerms.rates['3']}-${ludoTerms.rates['1']} coins a minute.`}
+                  : `Seats are free. Players pay ${ludoTerms.rates['1']}–${ludoTerms.rates['3']} coins a minute.`}
               </Text>
             </View>
             {isCharades ? charadesCta : ludoCta}

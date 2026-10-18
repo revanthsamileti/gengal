@@ -67,8 +67,7 @@ const resolveAuth = () => {
 
 export const auth = resolveAuth();
 /**
- * Firestore, told to detect when its streaming connection is not getting
- * through.
+ * Firestore over long polling, on phones.
  *
  * The default transport is a long-lived WebChannel stream. Indian mobile
  * networks, hotel and office Wi-Fi and some carrier proxies buffer or cut that
@@ -76,12 +75,22 @@ export const auth = resolveAuth();
  *   "WebChannelConnection RPC 'Listen' stream transport errored"
  * in the log and, on the phone, as lists and chats that quietly stop updating
  * until the app is restarted — exactly the "nothing works on bad internet"
- * complaint. Auto-detect falls back to long polling on those networks and
- * keeps the streaming path everywhere else.
+ * complaint.
+ *
+ * Auto-detect was tried first and was not enough: on 2026-10-18, with two
+ * phones on the same Wi-Fi, one phone's Ludo table stopped updating for over
+ * two minutes with no error, so it never saw its turn. Auto-detect only
+ * switches after a failure it can see. Phones now always long-poll, which
+ * costs a little latency and does not stall; the web keeps auto-detect.
  */
 export const db = (() => {
   try {
-    return initializeFirestore(app, { experimentalAutoDetectLongPolling: true });
+    return initializeFirestore(
+      app,
+      Platform.OS === 'web'
+        ? { experimentalAutoDetectLongPolling: true }
+        : { experimentalForceLongPolling: true },
+    );
   } catch {
     // Already initialised (a second import, or a fast refresh).
     return getFirestore(app);

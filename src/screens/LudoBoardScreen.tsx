@@ -9,6 +9,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  Share,
   ScrollView,
   StyleSheet,
   Text,
@@ -900,7 +901,8 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                 ? (room.phase === 'playing' && paying > 0
                   // A watcher pays their own fee (the strip says it); this is the players'.
                   ? (asSpectator && !isHost ? `Players pay ${rateNow}/min` : `${rateNow} coins a minute`)
-                  : 'Per-minute table')
+                  // Whose table, not what kind: "Per-minute table" told nobody anything.
+                  : isHost ? 'Your table' : `${hostName}'s table`)
                 : room.gameMode === 'per_token' ? 'Roll & Back' : 'Ticket Table'}
             </Text>
           </View>
@@ -1072,6 +1074,22 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
                   ? `Players pay ${ludoRate(terms, Math.max(1, paying))} coins a minute once you start. You keep ${terms?.hostSharePercent ?? 0}%.`
                   : `Seats are free. Players pay ${ludoRate(terms, Math.max(1, myPlayer ? paying : paying + 1))} coins a minute once the game starts.`}
               </Text>
+            ) : null}
+            {isHost && !enoughToStart ? (
+              // The card tells the host to ask a friend; this is how.
+              <Pressable
+                onPress={() => {
+                  Share.share({
+                    message: `Play Ludo with me on GenGal! Open GenGal, go to Chill → Ludo, and tap "Take a seat" on ${hostName}'s table. Seats are free.`,
+                  }).catch(() => {});
+                }}
+                accessibilityRole="button"
+                accessibilityLabel="Invite friends"
+                style={({ pressed }) => [styles.inviteBtn, pressed && styles.pressed]}
+              >
+                <MaterialIcons name="share" size={18} color={ludo.ink} />
+                <Text style={styles.inviteBtnText}>Invite friends</Text>
+              </Pressable>
             ) : null}
             {isHost ? (
               <Pressable
@@ -1388,6 +1406,12 @@ const styles = StyleSheet.create({
   },
   goneBtnText: { color: ludo.surface, fontSize: 15, fontWeight: '800' },
   pressed: { opacity: 0.7 },
+  inviteBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    alignSelf: 'stretch', height: 46, borderRadius: 23, marginBottom: 10,
+    borderWidth: 1.5, borderColor: ludo.ink,
+  },
+  inviteBtnText: { color: ludo.ink, fontSize: 15, fontWeight: '800' },
 
   header: {
     height: 52,

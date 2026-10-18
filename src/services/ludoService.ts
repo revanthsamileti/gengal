@@ -14,6 +14,7 @@ import {
   serverTimestamp,
   Timestamp,
   getDoc,
+  getDocFromServer,
 } from 'firebase/firestore';
 import { transferCoins } from './coinService';
 import { authedPost } from './authService';
@@ -420,23 +421,72 @@ export const subscribeToLudoRooms = (
   }, snapshotError('ludo:lobby', onError));
 };
 
+/** What a player acts on: if any of it differs, the board is out of date. */
+const boardFingerprint = (r: LudoRoom | null) => r && JSON.stringify([
+  r.phase, r.status, r.currentTurn, r.diceRolled, r.diceValue,
+  r.turnStartedAt?.toMillis?.() ?? null, r.emptySince?.toMillis?.() ?? null,
+  r.hostBenched ?? false, (r.players ?? []).map((p) => p.uid),
+  (r.tokens ?? []).map((t) => t.position),
+]);
+
+/** How often the board checks its live listener against the server. */
+const ROOM_WATCHDOG_MS = 8000;
+
 export const subscribeToLudoRoom = (
   roomId: string,
   callback: (room: LudoRoom | null) => void,
   onError?: SubscriptionErrorHandler,
 ) => {
-  return onSnapshot(
-    doc(db, 'ludo_rooms', roomId),
-    snap => {
-      callback(snap.exists() ? ({ id: snap.id, ...snap.data() } as LudoRoom) : null);
-    },
-    // This document *is* the board — turn order, token positions, whose roll it
-    // is. A dead listener freezes the game with no indication, and because coins
-    // are staked on the result the player is left watching a turn that will
-    // never arrive. Null is the "room is gone" value the screen already handles,
-    // so they land somewhere real instead of on a board that stopped moving.
-    snapshotError('ludo:room', onError, () => callback(null)),
-  );
+  const ref = doc(db, 'ludo_rooms', roomId);
+  let last: LudoRoom | null = null;
+  let unsub: (() => void) | null = null;
+  let stopped = false;
+
+  const deliver = (room: LudoRoom | null) => {
+    last = room;
+    callback(room);
+  };
+  const listen = () => {
+    unsub?.();
+    unsub = onSnapshot(
+      ref,
+      snap => {
+        deliver(snap.exists() ? ({ id: snap.id, ...snap.data() } as LudoRoom) : null);
+      },
+      // This document *is* the board — turn order, token positions, whose roll it
+      // is. A dead listener freezes the game with no indication, and because coins
+      // are staked on the result the player is left watching a turn that will
+      // never arrive. Null is the "room is gone" value the screen already handles,
+      // so they land somewhere real instead of on a board that stopped moving.
+      snapshotError('ludo:room', onError, () => deliver(null)),
+    );
+  };
+  listen();
+
+  // A listener can also go quiet without an error: on two phones the second
+  // sat on "Waiting for Hem to start" for over two minutes after the game had
+  // begun, so it never saw its turn and every one ran out on the clock. Every
+  // few seconds the board asks the server directly; if what it is showing is
+  // out of date it takes the server's copy and restarts the listener.
+  const watchdog = setInterval(() => {
+    if (!last || last.status !== 'live') return;
+    getDocFromServer(ref)
+      .then((snap) => {
+        if (stopped || !snap.exists()) return;
+        const fresh = { id: snap.id, ...snap.data() } as LudoRoom;
+        if (boardFingerprint(fresh) === boardFingerprint(last)) return;
+        console.warn('[Ludo] room listener was behind the server; resyncing', roomId);
+        deliver(fresh);
+        listen();
+      })
+      .catch(() => {});
+  }, ROOM_WATCHDOG_MS);
+
+  return () => {
+    stopped = true;
+    clearInterval(watchdog);
+    unsub?.();
+  };
 };
 
 export const subscribeToLudoEvents = (
