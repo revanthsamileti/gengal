@@ -128,10 +128,21 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
   // Board sizing budget: header, seat rows, action dock, utility rail.
   const stripHeight = isPerMinute(room) && room?.phase === 'playing' ? 40 : 0;
   // header, top seats, bottom seats with the die, one status line, the rail.
-  const CHROME = 52 + 64 + 96 + 24 + 56 + 26 + stripHeight;
+  const CHROME = 52 + 64 + 112 + 24 + 56 + 26 + stripHeight;
+  // The board is sized from the space the table area really has, measured on
+  // layout. The estimate above was only a guess at the header, banners and
+  // rail, and on a shorter screen (or with the connection banner up) it came
+  // out too big: the seats slid over the notice strip and the bottom row
+  // over the status line.
+  const [stageHeight, setStageHeight] = useState<number | null>(null);
+  const SEAT_ROWS = 60 + 112 + 2 * 8 + 12;   // top seats, bottom seats + die, gaps, frame
   const boardSize = Math.max(
-    204,
-    Math.min(width - 28, height - insets.top - insets.bottom - CHROME, 396)
+    180,
+    Math.min(
+      width - 28,
+      stageHeight !== null ? stageHeight - SEAT_ROWS : height - insets.top - insets.bottom - CHROME,
+      396,
+    ),
   );
   const cellSize = boardSize / 15;
 
@@ -907,7 +918,7 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
               {perMinute
                 ? (room.phase === 'playing' && paying > 0
                   // A watcher pays their own fee (the strip says it); this is the players'.
-                  ? (asSpectator && !isHost ? `Players pay ${rateNow}/min` : `${rateNow} coins a minute`)
+                  ? (asSpectator && !isHost ? `Players pay ${rateNow}/min` : `${rateNow} coins/min`)
                   // Whose table, not what kind: "Per-minute table" told nobody anything.
                   : isHost ? 'Your table' : `${hostName}'s table`)
                 : room.gameMode === 'per_token' ? 'Roll & Back' : 'Ticket Table'}
@@ -956,7 +967,13 @@ export default function LudoBoardScreen({ navigate, goBack, route }: Props) {
         )}
 
         {/* Table */}
-        <View style={styles.stage}>
+        <View
+          style={styles.stage}
+          onLayout={(e) => {
+            const h = Math.round(e.nativeEvent.layout.height);
+            setStageHeight((prev) => (prev !== null && Math.abs(prev - h) < 2 ? prev : h));
+          }}
+        >
           <View style={[styles.seatRow, { width: boardSize + 8 }]}>
             {SEAT_LAYOUT[0].map(({ color, align }) => renderSeat(color, align))}
           </View>
@@ -1495,7 +1512,7 @@ const styles = StyleSheet.create({
     borderColor: ludo.hairline,
   },
   dockCopy: { flex: 1, gap: 3 },
-  bottomRow: { height: 96, alignItems: 'flex-end', paddingBottom: 4 },
+  bottomRow: { height: 112, alignItems: 'flex-end', paddingBottom: 4, zIndex: 2 },
   status: { height: 24, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16 },
   statusText: { color: ludo.inkSoft, fontSize: 14, fontWeight: '900' },
   dockInstruction: { ...ludoType.display, fontSize: 19 },

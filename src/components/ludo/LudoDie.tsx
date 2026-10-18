@@ -157,7 +157,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
         pointerEvents="none"
         style={[styles.arrow, { opacity: enabled && !rolling ? 1 : 0, transform: [{ translateY: arrowY }] }]}
       >
-        <MaterialIcons name="arrow-drop-down" size={58} color="#F5A400" />
+        <MaterialIcons name="arrow-drop-down" size={52} color="#F5A400" />
       </Animated.View>
       <Pressable
         onPress={onPress}
@@ -196,7 +196,7 @@ export function LudoDie({ value, rolling, enabled, turnColor, cost, onPress, red
 
 const styles = StyleSheet.create({
   wrap: { alignItems: 'center' },
-  arrow: { position: 'absolute', top: -44, zIndex: 2 },
+  arrow: { position: 'absolute', top: -38, zIndex: 2 },
   slot: {
     width: SLOT,
     height: SLOT,
